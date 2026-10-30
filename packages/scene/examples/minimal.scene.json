@@ -1,0 +1,39 @@
+{
+  "$schema": "../schema/scene.v1.json",
+  "format": "charaforge.scene",
+  "version": 1,
+  "meta": { "title": "最小示例：单实例 + 一条参数曲线 + 音频", "credits": ["DeepSeek-chan — Illustration & PSD: Kamiya Ryoko / Live2D Rigging: 霓虹猫_NeonNeko"] },
+  "timebase": { "fps": 60 },
+  "duration": 240,
+  "composition": { "width": 1280, "height": 720, "background": "#ffffff" },
+  "assets": {
+    "models": [{ "id": "ds", "uri": "models/deepseek-chan/DeepSeek/大肥鱼.model3.json", "name": "DeepSeek-chan" }],
+    "motions": [{ "id": "ds.idle", "model": "ds", "uri": "models/deepseek-chan/DeepSeek/Animation/IDLE.motion3.json", "semantics": { "tags": ["idle"] } }],
+    "expressions": [{ "id": "ds.blush", "model": "ds", "uri": "models/deepseek-chan/DeepSeek/Exp3/脸红.exp3.json", "semantics": { "emotion": "embarrassed" } }],
+    "audio": [{ "id": "bgm", "uri": "video/DeepSeek-chan.wav" }]
+  },
+  "camera": { "x": 640, "y": 360, "zoom": 1 },
+  "layers": [
+    {
+      "id": "main",
+      "kind": "model",
+      "model": "ds",
+      "in": 0,
+      "out": 240,
+      "transform": { "x": 640, "y": 900, "scale": { "keys": [{ "t": 0, "v": 0.2, "ease": "smooth" }, { "t": 120, "v": 0.3 }] } },
+      "opacity": 1,
+      "filters": [{ "type": "blur", "sigma": 0 }],
+      "physics": { "warmup": 60 },
+      "motions": [{ "motion": "ds.idle", "start": 0, "loop": true }],
+      "expressions": [{ "expression": "ds.blush", "start": 60, "end": 180 }],
+      "params": [
+        { "id": "ParamAngleX", "curve": { "keys": [{ "t": 0, "v": 0 }, { "t": 60, "v": 30, "ease": [0.25, 0.1, 0.25, 1] }, { "t": 120, "v": -30 }] }, "semantics": { "intent": "shake_head" } },
+        { "id": "key10", "curve": { "keys": [{ "t": 0, "v": 0, "ease": "step" }, { "t": 90, "v": 1 }] } },
+        { "id": "ParamEyeLOpen", "curve": { "baked": { "start": 0, "values": [1, 1, 0.5, 0, 0.5, 1] } } }
+      ],
+      "semantics": { "tags": ["demo"] }
+    }
+  ],
+  "audio": [{ "audio": "bgm", "start": 0 }],
+  "markers": [{ "id": "m0", "start": 0, "end": 240, "kind": "shot", "label": "demo" }]
+}

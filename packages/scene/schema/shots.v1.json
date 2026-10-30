@@ -1,0 +1,549 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "$id": "https://charaforge.dev/schema/shots.v1.json",
+  "title": "CharaForge Shots v1",
+  "type": "object",
+  "required": [
+    "format",
+    "version",
+    "video",
+    "shots"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "format": {
+      "const": "charaforge.shots",
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "type": "number"
+    },
+    "video": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "uri",
+        "sha256",
+        "width",
+        "height",
+        "fps",
+        "frameCount"
+      ],
+      "properties": {
+        "uri": {
+          "description": "相对于仓库根目录的路径",
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "width": {
+          "type": "integer"
+        },
+        "height": {
+          "type": "integer"
+        },
+        "fps": {
+          "type": "number"
+        },
+        "frameCount": {
+          "type": "integer"
+        }
+      }
+    },
+    "shots": {
+      "description": "按时间排序，首尾相接覆盖 [0, frameCount)",
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "start",
+          "end",
+          "transitionIn",
+          "category",
+          "hasCharacter",
+          "instances",
+          "exclusions",
+          "effects"
+        ],
+        "properties": {
+          "id": {
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_.:-]+$",
+            "description": "文档内唯一标识",
+            "type": "string"
+          },
+          "start": {
+            "minimum": 0,
+            "description": "帧号（以 timebase.fps 为单位）",
+            "type": "number"
+          },
+          "end": {
+            "minimum": 0,
+            "description": "帧号（以 timebase.fps 为单位）",
+            "type": "number"
+          },
+          "transitionIn": {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "type",
+              "duration"
+            ],
+            "properties": {
+              "type": {
+                "anyOf": [
+                  {
+                    "const": "cut",
+                    "type": "string"
+                  },
+                  {
+                    "const": "dissolve",
+                    "type": "string"
+                  },
+                  {
+                    "const": "fadeFromBlack",
+                    "type": "string"
+                  },
+                  {
+                    "const": "fadeFromWhite",
+                    "type": "string"
+                  },
+                  {
+                    "const": "wipe",
+                    "type": "string"
+                  },
+                  {
+                    "const": "other",
+                    "type": "string"
+                  }
+                ]
+              },
+              "duration": {
+                "minimum": 0,
+                "description": "过渡持续帧数，硬切为 0",
+                "type": "integer"
+              },
+              "note": {
+                "type": "string"
+              }
+            }
+          },
+          "category": {
+            "description": "如 halfBody、closeUp、extremeCloseUp、fullBody、multi、pip、noCharacter",
+            "type": "string"
+          },
+          "hasCharacter": {
+            "description": "false 表示纯 UI/转场镜头，不参与拟合和质检",
+            "type": "boolean"
+          },
+          "instances": {
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "id",
+                "role",
+                "z",
+                "variant",
+                "switchEvents",
+                "motionHints",
+                "track"
+              ],
+              "properties": {
+                "id": {
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9_.:-]+$",
+                  "description": "文档内唯一标识",
+                  "type": "string"
+                },
+                "role": {
+                  "description": "如 main、pip、side、chibi、fullBody、background",
+                  "type": "string"
+                },
+                "z": {
+                  "description": "叠放顺序，越大越靠前",
+                  "type": "integer"
+                },
+                "variant": {
+                  "description": "镜头开始时开关类参数的取值（key*、Clothes*、Movement*），只列非默认值",
+                  "type": "object",
+                  "patternProperties": {
+                    "^(.*)$": {
+                      "type": "number"
+                    }
+                  }
+                },
+                "switchEvents": {
+                  "description": "镜头内的开关切换",
+                  "type": "array",
+                  "items": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": [
+                      "frame",
+                      "param",
+                      "value"
+                    ],
+                    "properties": {
+                      "frame": {
+                        "minimum": 0,
+                        "description": "帧号（以 timebase.fps 为单位）",
+                        "type": "number"
+                      },
+                      "param": {
+                        "description": "开关参数 ID，如 key10、Clothes1、Movement3",
+                        "type": "string"
+                      },
+                      "value": {
+                        "type": "number"
+                      },
+                      "confidence": {
+                        "minimum": 0,
+                        "maximum": 1,
+                        "type": "number"
+                      },
+                      "note": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "motionHints": {
+                  "type": "array",
+                  "items": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": [
+                      "motion",
+                      "start"
+                    ],
+                    "properties": {
+                      "motion": {
+                        "description": "motion3 文件名（不含扩展名），如 \"脱捕\"",
+                        "type": "string"
+                      },
+                      "start": {
+                        "minimum": 0,
+                        "description": "帧号（以 timebase.fps 为单位）",
+                        "type": "number"
+                      },
+                      "confidence": {
+                        "minimum": 0,
+                        "maximum": 1,
+                        "type": "number"
+                      },
+                      "note": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "track": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": [
+                      "frame"
+                    ],
+                    "properties": {
+                      "frame": {
+                        "minimum": 0,
+                        "description": "帧号（以 timebase.fps 为单位）",
+                        "type": "number"
+                      },
+                      "bbox": {
+                        "description": "角色可见部分的外接框；null 表示该帧不可见",
+                        "anyOf": [
+                          {
+                            "description": "[x, y, width, height]，视频像素",
+                            "type": "array",
+                            "items": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              }
+                            ],
+                            "additionalItems": false,
+                            "minItems": 4,
+                            "maxItems": 4
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "head": {
+                        "description": "头部（含头发，不含发尾）的外接框",
+                        "anyOf": [
+                          {
+                            "description": "[x, y, width, height]，视频像素",
+                            "type": "array",
+                            "items": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              }
+                            ],
+                            "additionalItems": false,
+                            "minItems": 4,
+                            "maxItems": 4
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "eyes": {
+                        "description": "画面左侧眼睛中心、右侧眼睛中心，视频像素",
+                        "type": "array",
+                        "items": [
+                          {
+                            "type": "array",
+                            "items": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              }
+                            ],
+                            "additionalItems": false,
+                            "minItems": 2,
+                            "maxItems": 2
+                          },
+                          {
+                            "type": "array",
+                            "items": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              }
+                            ],
+                            "additionalItems": false,
+                            "minItems": 2,
+                            "maxItems": 2
+                          }
+                        ],
+                        "additionalItems": false,
+                        "minItems": 2,
+                        "maxItems": 2
+                      },
+                      "rotation": {
+                        "description": "画面内整体旋转（度，顺时针为正）",
+                        "type": "number"
+                      },
+                      "opacity": {
+                        "minimum": 0,
+                        "maximum": 1,
+                        "type": "number"
+                      },
+                      "blurSigma": {
+                        "minimum": 0,
+                        "description": "估计的高斯模糊 sigma（像素）",
+                        "type": "number"
+                      }
+                    }
+                  }
+                },
+                "clip": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "description": "画中画等窗口裁切（屏幕空间，镜头内固定）",
+                      "type": "object",
+                      "required": [
+                        "rect"
+                      ],
+                      "properties": {
+                        "rect": {
+                          "description": "[x, y, width, height]，视频像素",
+                          "type": "array",
+                          "items": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "number"
+                            }
+                          ],
+                          "additionalItems": false,
+                          "minItems": 4,
+                          "maxItems": 4
+                        },
+                        "radius": {
+                          "minimum": 0,
+                          "type": "number"
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "flipX": {
+                  "type": "boolean"
+                },
+                "colorGrade": {
+                  "description": "对角色本身的调色/压暗的文字描述，如 \"整体压暗约 40%、偏蓝\"",
+                  "type": "string"
+                },
+                "notes": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "exclusions": {
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "start",
+                "end",
+                "reason",
+                "rects"
+              ],
+              "properties": {
+                "start": {
+                  "minimum": 0,
+                  "description": "帧号（以 timebase.fps 为单位）",
+                  "type": "number"
+                },
+                "end": {
+                  "minimum": 0,
+                  "description": "帧号（以 timebase.fps 为单位）",
+                  "type": "number"
+                },
+                "reason": {
+                  "description": "如 finger、bubble、check、cursor、text、effect、silhouette",
+                  "type": "string"
+                },
+                "rects": {
+                  "minItems": 1,
+                  "description": "遮挡区域关键帧，线性插值；拟合和质检时这些区域不计入角色遮罩",
+                  "type": "array",
+                  "items": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": [
+                      "frame",
+                      "rect"
+                    ],
+                    "properties": {
+                      "frame": {
+                        "minimum": 0,
+                        "description": "帧号（以 timebase.fps 为单位）",
+                        "type": "number"
+                      },
+                      "rect": {
+                        "description": "[x, y, width, height]，视频像素",
+                        "type": "array",
+                        "items": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "number"
+                          }
+                        ],
+                        "additionalItems": false,
+                        "minItems": 4,
+                        "maxItems": 4
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "effects": {
+            "description": "镜头内会影响角色像素的效果，供拟合/质检参考",
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "kind",
+                "start",
+                "end"
+              ],
+              "properties": {
+                "kind": {
+                  "description": "如 motionBlur、cameraShake、vignette、colorGrade、silhouette、particles",
+                  "type": "string"
+                },
+                "start": {
+                  "minimum": 0,
+                  "description": "帧号（以 timebase.fps 为单位）",
+                  "type": "number"
+                },
+                "end": {
+                  "minimum": 0,
+                  "description": "帧号（以 timebase.fps 为单位）",
+                  "type": "number"
+                },
+                "note": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "thumbnail": {
+            "description": "缩略图拼图路径，相对于 shots.json 所在目录",
+            "type": "string"
+          },
+          "confidence": {
+            "minimum": 0,
+            "maximum": 1,
+            "type": "number"
+          },
+          "notes": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

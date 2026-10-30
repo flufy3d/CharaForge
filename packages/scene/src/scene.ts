@@ -1,0 +1,338 @@
+import { Type, type Static } from '@sinclair/typebox';
+import { AnimNumber, AnimVec3, CurveNumber, Frame, Id, Provenance, Semantics } from './common.ts';
+
+/*
+ * CharaForge 场景格式（charaforge.scene v1）
+ *
+ * 一个场景 = 合成画布 + 资源表 + 相机 + 若干图层（角色实例）+ 音频 + 标记。
+ * 规范性约定（播放器、拟合器、编辑器必须一致）：
+ *
+ * 1. 时间：所有时间以帧为单位，帧率为 timebase.fps。帧 f 的时刻为 f / fps 秒。
+ *
+ * 2. 坐标：
+ *    - 模型空间 = moc3 画布像素坐标，原点在画布左上角，y 向下，单位为画布像素
+ *      （画布尺寸 = CanvasInfo.Size，像素/单位换算 = CanvasInfo.PixelsPerUnit）。
+ *    - 世界空间 = 合成像素坐标系（与画布同尺寸），相机作用之前。
+ *    - 屏幕空间 = 合成像素坐标，原点左上，y 向下。
+ *    - 图层：world = [x,y] + R(rotation) · diag(sx, scale) · (p − [anchorX, anchorY])，
+ *      其中 sx = flipX ? −scale : scale，rotation 单位为度、顺时针为正（y 向下）。
+ *    - 相机：screen = [W/2, H/2] + zoom · R(rotation) · (world − [x, y])。
+ *      space = "screen" 的图层不受相机影响（world 直接当作 screen）。
+ *
+ * 3. 单帧求值顺序（每个图层独立）：
+ *    a. 所有参数复位为模型默认值，部件不透明度复位为默认值；
+ *    b. 按数组顺序叠加处于激活区间的 motion 片段（Cubism motion 语义，含淡入淡出）；
+ *    c. 按数组顺序叠加 expression 片段（exp3 的 Add / Multiply / Overwrite 语义）；
+ *    d. 按数组顺序应用 stage = "prePhysics" 的参数轨；
+ *    e. 物理前进一步，dt = 1 / fps（固定步长，不用墙钟时间）；
+ *    f. 按数组顺序应用 stage = "postPhysics" 的参数轨（用于烘焙物理输出或强制覆盖）；
+ *    g. 应用部件不透明度轨，更新模型并绘制。
+ *    不存在任何隐式的自动行为（自动眨眼、呼吸、口型同步等），一切都要显式写成轨道。
+ *
+ * 4. 物理状态与确定性：图层在帧 f 的状态，定义为从帧 (in − physics.warmup) 开始
+ *    逐帧按上述顺序推进到 f 的结果；预热阶段使用帧 in 的输入。跳转（seek）时必须重放，
+ *    使任意访问路径得到逐位相同的结果。
+ *
+ * 5. 合成：图层按数组顺序从下到上绘制。每个图层先渲染到独立的预乘 alpha 缓冲
+ *    （合成分辨率），再依次应用 filters、clip、opacity，最后按 blendMode 合成。
+ */
+
+// ---------- 资源 ----------
+
+export const ModelAsset = Type.Object(
+  {
+    id: Id,
+    uri: Type.String({ description: 'model3.json 路径，相对于资源根目录（assetRoot）' }),
+    name: Type.Optional(Type.String()),
+    credits: Type.Optional(Type.String({ description: '署名信息，播放器需要展示' })),
+  },
+  { additionalProperties: false },
+);
+
+export const MotionAsset = Type.Object(
+  {
+    id: Id,
+    model: Id,
+    uri: Type.String({ description: 'motion3.json 路径，相对于资源根目录' }),
+    semantics: Type.Optional(Semantics),
+  },
+  { additionalProperties: false },
+);
+
+export const ExpressionAsset = Type.Object(
+  {
+    id: Id,
+    model: Id,
+    uri: Type.String({ description: 'exp3.json 路径，相对于资源根目录' }),
+    semantics: Type.Optional(Semantics),
+  },
+  { additionalProperties: false },
+);
+
+export const AudioAsset = Type.Object(
+  { id: Id, uri: Type.String({ description: '音频文件路径，相对于资源根目录' }) },
+  { additionalProperties: false },
+);
+
+// ---------- 轨道与片段 ----------
+
+export const ParamTrack = Type.Object(
+  {
+    id: Type.String({ description: '模型参数 ID，如 ParamAngleX、key10' }),
+    curve: CurveNumber,
+    mode: Type.Optional(
+      Type.Union([Type.Literal('set'), Type.Literal('add'), Type.Literal('multiply')], {
+        description: '缺省 set',
+      }),
+    ),
+    stage: Type.Optional(
+      Type.Union([Type.Literal('prePhysics'), Type.Literal('postPhysics')], { description: '缺省 prePhysics' }),
+    ),
+    weight: Type.Optional(AnimNumber),
+    range: Type.Optional(
+      Type.Tuple([Frame, Frame], { description: '仅在 [start, end) 内生效；缺省为整个图层区间' }),
+    ),
+    semantics: Type.Optional(Semantics),
+    provenance: Type.Optional(Provenance),
+  },
+  { additionalProperties: false },
+);
+
+export const PartOpacityTrack = Type.Object(
+  { id: Type.String({ description: '部件 ID' }), curve: CurveNumber, provenance: Type.Optional(Provenance) },
+  { additionalProperties: false },
+);
+
+export const MotionClip = Type.Object(
+  {
+    motion: Id,
+    start: Frame,
+    end: Type.Optional(Type.Number({ description: '结束帧（不含）；缺省为 motion 自然结束或图层结束' })),
+    offset: Type.Optional(Type.Number({ description: '从 motion 的第几秒开始播放，缺省 0' })),
+    speed: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: '缺省 1' })),
+    loop: Type.Optional(Type.Boolean()),
+    weight: Type.Optional(AnimNumber),
+    fadeIn: Type.Optional(Type.Number({ minimum: 0, description: '秒；缺省用 motion3 自带值' })),
+    fadeOut: Type.Optional(Type.Number({ minimum: 0, description: '秒；缺省用 motion3 自带值' })),
+    semantics: Type.Optional(Semantics),
+    provenance: Type.Optional(Provenance),
+  },
+  { additionalProperties: false },
+);
+
+export const ExpressionClip = Type.Object(
+  {
+    expression: Id,
+    start: Frame,
+    end: Type.Optional(Type.Number({ description: '结束帧（不含）；缺省持续到图层结束' })),
+    weight: Type.Optional(AnimNumber),
+    fadeIn: Type.Optional(Type.Number({ minimum: 0, description: '秒；缺省用 exp3 自带值' })),
+    fadeOut: Type.Optional(Type.Number({ minimum: 0, description: '秒；缺省用 exp3 自带值' })),
+    semantics: Type.Optional(Semantics),
+    provenance: Type.Optional(Provenance),
+  },
+  { additionalProperties: false },
+);
+
+// ---------- 图层属性 ----------
+
+export const Transform2D = Type.Object(
+  {
+    x: AnimNumber,
+    y: AnimNumber,
+    scale: AnimNumber,
+    rotation: Type.Optional(AnimNumber),
+    anchorX: Type.Optional(Type.Number({ description: '模型画布像素，缺省为画布中心' })),
+    anchorY: Type.Optional(Type.Number({ description: '模型画布像素，缺省为画布中心' })),
+    flipX: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+export const CameraTransform = Type.Object(
+  {
+    x: AnimNumber,
+    y: AnimNumber,
+    zoom: AnimNumber,
+    rotation: Type.Optional(AnimNumber),
+  },
+  { additionalProperties: false },
+);
+
+export const Clip = Type.Object(
+  {
+    x: AnimNumber,
+    y: AnimNumber,
+    width: AnimNumber,
+    height: AnimNumber,
+    radius: Type.Optional(AnimNumber),
+    feather: Type.Optional(AnimNumber),
+  },
+  { additionalProperties: false, description: '屏幕空间圆角矩形裁切' },
+);
+
+export const BlurFilter = Type.Object(
+  {
+    type: Type.Literal('blur'),
+    sigma: AnimNumber,
+    enabled: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false, description: '高斯模糊，sigma 为屏幕像素' },
+);
+
+export const MotionBlurFilter = Type.Object(
+  {
+    type: Type.Literal('motionBlur'),
+    angle: AnimNumber,
+    length: AnimNumber,
+    enabled: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false, description: '方向模糊：angle 为度，length 为屏幕像素' },
+);
+
+export const ColorFilter = Type.Object(
+  {
+    type: Type.Literal('color'),
+    brightness: Type.Optional(AnimNumber),
+    contrast: Type.Optional(AnimNumber),
+    saturation: Type.Optional(AnimNumber),
+    multiply: Type.Optional(AnimVec3),
+    offset: Type.Optional(AnimVec3),
+    enabled: Type.Optional(Type.Boolean()),
+  },
+  {
+    additionalProperties: false,
+    description:
+      '颜色调整，作用于非预乘颜色，按顺序：c = (c − 0.5)·contrast + 0.5 + brightness；' +
+      '饱和度按 Rec.709 亮度插值；再 c = c·multiply + offset。缺省值 brightness 0、contrast 1、saturation 1、multiply [1,1,1]、offset [0,0,0]',
+  },
+);
+
+export const Filter = Type.Union([BlurFilter, MotionBlurFilter, ColorFilter]);
+
+export const BlendMode = Type.Union([
+  Type.Literal('normal'),
+  Type.Literal('add'),
+  Type.Literal('multiply'),
+  Type.Literal('screen'),
+]);
+
+export const ModelLayer = Type.Object(
+  {
+    id: Id,
+    name: Type.Optional(Type.String()),
+    kind: Type.Literal('model'),
+    model: Id,
+    in: Frame,
+    out: Type.Number({ description: '结束帧（不含）' }),
+    space: Type.Optional(Type.Union([Type.Literal('world'), Type.Literal('screen')], { description: '缺省 world' })),
+    transform: Transform2D,
+    opacity: Type.Optional(AnimNumber),
+    clip: Type.Optional(Clip),
+    filters: Type.Optional(Type.Array(Filter)),
+    blendMode: Type.Optional(BlendMode),
+    physics: Type.Optional(
+      Type.Object(
+        {
+          enabled: Type.Optional(Type.Boolean({ description: '缺省 true' })),
+          warmup: Type.Optional(Type.Integer({ minimum: 0, description: '预热帧数，缺省 0' })),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    motions: Type.Optional(Type.Array(MotionClip)),
+    expressions: Type.Optional(Type.Array(ExpressionClip)),
+    params: Type.Optional(Type.Array(ParamTrack)),
+    partOpacity: Type.Optional(Type.Array(PartOpacityTrack)),
+    semantics: Type.Optional(Semantics),
+    provenance: Type.Optional(Provenance),
+  },
+  { additionalProperties: false },
+);
+
+/** 图层联合类型；后续可加入 image、group 等图层。 */
+export const Layer = Type.Union([ModelLayer]);
+
+export const AudioClip = Type.Object(
+  {
+    audio: Id,
+    start: Frame,
+    offset: Type.Optional(Type.Number({ minimum: 0, description: '从音频第几秒开始，缺省 0' })),
+    duration: Type.Optional(Type.Number({ minimum: 0, description: '秒；缺省播放到结束' })),
+    gain: Type.Optional(Type.Number({ minimum: 0, description: '线性增益，缺省 1' })),
+  },
+  { additionalProperties: false },
+);
+
+export const Marker = Type.Object(
+  {
+    id: Id,
+    start: Frame,
+    end: Type.Optional(Type.Number()),
+    label: Type.Optional(Type.String()),
+    kind: Type.Optional(Type.String({ description: '如 "shot"、"beat"、"note"' })),
+    semantics: Type.Optional(Semantics),
+  },
+  { additionalProperties: false },
+);
+
+export const Scene = Type.Object(
+  {
+    $schema: Type.Optional(Type.String()),
+    format: Type.Literal('charaforge.scene'),
+    version: Type.Literal(1),
+    meta: Type.Object(
+      {
+        title: Type.String(),
+        description: Type.Optional(Type.String()),
+        credits: Type.Optional(Type.Array(Type.String())),
+        provenance: Type.Optional(Provenance),
+      },
+      { additionalProperties: true },
+    ),
+    timebase: Type.Object({ fps: Type.Number({ exclusiveMinimum: 0 }) }, { additionalProperties: false }),
+    duration: Type.Integer({ minimum: 1, description: '总帧数' }),
+    composition: Type.Object(
+      {
+        width: Type.Integer({ minimum: 1 }),
+        height: Type.Integer({ minimum: 1 }),
+        background: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: 'CSS 颜色；null 为透明' })),
+      },
+      { additionalProperties: false },
+    ),
+    assets: Type.Object(
+      {
+        models: Type.Array(ModelAsset),
+        motions: Type.Optional(Type.Array(MotionAsset)),
+        expressions: Type.Optional(Type.Array(ExpressionAsset)),
+        audio: Type.Optional(Type.Array(AudioAsset)),
+      },
+      { additionalProperties: false },
+    ),
+    camera: Type.Optional(CameraTransform),
+    layers: Type.Array(Layer),
+    audio: Type.Optional(Type.Array(AudioClip)),
+    markers: Type.Optional(Type.Array(Marker)),
+    semantics: Type.Optional(Semantics),
+  },
+  { additionalProperties: false, $id: 'https://charaforge.dev/schema/scene.v1.json', title: 'CharaForge Scene v1' },
+);
+
+export type ModelAsset = Static<typeof ModelAsset>;
+export type MotionAsset = Static<typeof MotionAsset>;
+export type ExpressionAsset = Static<typeof ExpressionAsset>;
+export type AudioAsset = Static<typeof AudioAsset>;
+export type ParamTrack = Static<typeof ParamTrack>;
+export type PartOpacityTrack = Static<typeof PartOpacityTrack>;
+export type MotionClip = Static<typeof MotionClip>;
+export type ExpressionClip = Static<typeof ExpressionClip>;
+export type Transform2D = Static<typeof Transform2D>;
+export type CameraTransform = Static<typeof CameraTransform>;
+export type Clip = Static<typeof Clip>;
+export type Filter = Static<typeof Filter>;
+export type BlendMode = Static<typeof BlendMode>;
+export type ModelLayer = Static<typeof ModelLayer>;
+export type Layer = Static<typeof Layer>;
+export type AudioClip = Static<typeof AudioClip>;
+export type Marker = Static<typeof Marker>;
+export type Scene = Static<typeof Scene>;

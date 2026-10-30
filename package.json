@@ -1,0 +1,23 @@
+{
+  "name": "charaforge",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10.18.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "setup:cubism": "node scripts/setup-cubism.mjs",
+    "setup:assets": "node scripts/setup-assets.mjs",
+    "setup:py": "uv sync --project tools",
+    "setup": "pnpm setup:cubism && pnpm setup:assets && pnpm setup:py",
+    "schema": "pnpm --filter @charaforge/scene run schema",
+    "typecheck": "pnpm -r run typecheck",
+    "build": "pnpm -r run build"
+  },
+  "devDependencies": {
+    "fflate": "^0.8.3",
+    "typescript": "^5.9.3"
+  }
+}

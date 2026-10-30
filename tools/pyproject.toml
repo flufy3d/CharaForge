@@ -1,0 +1,15 @@
+[project]
+name = "charaforge-tools"
+version = "0.1.0"
+description = "CharaForge 视频分析与质检工具（recon / qa）"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy>=2.0",
+  "opencv-python-headless>=4.10",
+  "scikit-image>=0.24",
+  "jsonschema>=4.23",
+  "pillow>=10.4",
+]
+
+[tool.uv]
+package = false

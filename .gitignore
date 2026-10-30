@@ -1,0 +1,20 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Live2D Cubism SDK（Core/Framework）不进仓库，由 pnpm setup:cubism 安装
+vendor/
+
+# 模型、视频、音频等外部资源不进仓库，由 pnpm setup:assets 下载
+assets/
+.cache/
+
+# 中间产物：抽帧、拟合结果、质检报告等
+.data/
+out/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
