@@ -43,3 +43,8 @@ pnpm setup          # 下载 Cubism SDK、模型与参考视频（校验 sha256�
 模型署名：**DeepSeek-chan** — Illustration & PSD Layer Separation: Kamiya Ryoko ／
 Live2D Rigging: 霓虹猫_NeonNeko ／ Free model distributed by Kamiya Ryoko
 （[VGen](https://vgen.co/KAMIYA)、[X @kamiya_ryoko](https://x.com/kamiya_ryoko)）。
+
+模型请从原作者的发布页获取并支持原作者：
+<https://vgen.co/KAMIYA/product/deepseek-chan-deepseek-free-live2d-model-layered-psd-psd/1c55a71a-2747-4616-819d-2dc0a934089d>
+
+`pnpm build` 产出的静态页面仅供本地查看，不公开部署（公开部署并附带模型文件会构成再分发）。
