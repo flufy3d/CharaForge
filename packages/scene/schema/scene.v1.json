@@ -3112,6 +3112,35 @@
               }
             ]
           },
+          "frameHold": {
+            "description": "帧保持段，见文件头约定 4b；各段不得重叠",
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "start",
+                "end",
+                "every"
+              ],
+              "properties": {
+                "start": {
+                  "minimum": 0,
+                  "description": "帧号（以 timebase.fps 为单位）",
+                  "type": "number"
+                },
+                "end": {
+                  "minimum": 0,
+                  "description": "帧号（以 timebase.fps 为单位）",
+                  "type": "number"
+                },
+                "every": {
+                  "minimum": 2,
+                  "type": "integer"
+                }
+              }
+            }
+          },
           "physics": {
             "additionalProperties": false,
             "type": "object",

@@ -29,6 +29,13 @@ export const TrackSample = Type.Object(
     rotation: Type.Optional(Type.Number({ description: '画面内整体旋转（度，顺时针为正）' })),
     opacity: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
     blurSigma: Type.Optional(Type.Number({ minimum: 0, description: '估计的高斯模糊 sigma（像素）' })),
+    eyesState: Type.Optional(
+      Type.Union([Type.Literal('open'), Type.Literal('closed'), Type.Literal('special'), Type.Literal('hidden')], {
+        description: 'special = ><、圈圈眼、爱心眼等替换眼；hidden = 被遮挡或出画',
+      }),
+    ),
+    source: Type.Optional(Type.String({ description: '数值来源，如 manual、flow、iris-refine' })),
+    confidence: Type.Optional(Confidence),
   },
   { additionalProperties: false },
 );
@@ -38,6 +45,7 @@ export const SwitchEvent = Type.Object(
     frame: Frame,
     param: Type.String({ description: '开关参数 ID，如 key10、Clothes1、Movement3' }),
     value: Type.Number(),
+    fade: Type.Optional(Type.Integer({ minimum: 0, description: '从旧值过渡到新值所用帧数，缺省 0（阶跃）' })),
     confidence: Type.Optional(Confidence),
     note: Type.Optional(Type.String()),
   },
@@ -57,6 +65,9 @@ export const MotionHint = Type.Object(
 export const ShotInstance = Type.Object(
   {
     id: Id,
+    continues: Type.Optional(
+      Type.String({ description: '若该实例是之前某镜头中同一实例的延续（画面连续、物理不应重置），填那个实例的 id' }),
+    ),
     role: Type.String({ description: '如 main、pip、side、chibi、fullBody、background' }),
     z: Type.Integer({ description: '叠放顺序，越大越靠前' }),
     variant: Type.Record(Type.String(), Type.Number(), {
@@ -67,9 +78,12 @@ export const ShotInstance = Type.Object(
     track: Type.Array(TrackSample, { minItems: 1 }),
     clip: Type.Optional(
       Type.Union([
-        Type.Object(
-          { rect: Rect, radius: Type.Optional(Type.Number({ minimum: 0 })) },
-          { additionalProperties: false, description: '画中画等窗口裁切（屏幕空间，镜头内固定）' },
+        Type.Array(
+          Type.Object(
+            { frame: Frame, rect: Rect, radius: Type.Optional(Type.Number({ minimum: 0 })) },
+            { additionalProperties: false },
+          ),
+          { minItems: 1, description: '画中画等窗口裁切（屏幕空间圆角矩形）关键帧，线性插值' },
         ),
         Type.Null(),
       ]),
@@ -127,9 +141,15 @@ export const Shot = Type.Object(
     effects: Type.Array(
       Type.Object(
         {
-          kind: Type.String({ description: '如 motionBlur、cameraShake、vignette、colorGrade、silhouette、particles' }),
+          kind: Type.String({ description: '如 motionBlur、radialBlur、cameraShake、vignette、colorGrade、halftone、silhouette、particles' }),
           start: Frame,
           end: Frame,
+          instances: Type.Optional(Type.Array(Id, { description: '只作用于这些实例；缺省为整帧' })),
+          strength: Type.Optional(
+            Type.Array(Type.Object({ frame: Frame, value: Type.Number() }, { additionalProperties: false }), {
+              description: '强度关键帧（0~1 或该效果的自然单位），线性插值',
+            }),
+          ),
           note: Type.Optional(Type.String()),
         },
         { additionalProperties: false },
@@ -158,6 +178,19 @@ export const Shots = Type.Object(
         frameCount: Type.Integer(),
       },
       { additionalProperties: false },
+    ),
+    cadence: Type.Optional(
+      Type.Array(
+        Type.Object(
+          {
+            start: Frame,
+            end: Frame,
+            every: Type.Integer({ minimum: 2, description: '每 every 帧才有一张新画面' }),
+          },
+          { additionalProperties: false, description: '在 [start, end) 内，帧 f 与帧 start + floor((f−start)/every)·every 画面相同' },
+        ),
+        { description: '帧重复段（低帧率素材）。不在任何段内的帧视为逐帧都是新画面' },
+      ),
     ),
     shots: Type.Array(Shot, { description: '按时间排序，首尾相接覆盖 [0, frameCount)' }),
   },

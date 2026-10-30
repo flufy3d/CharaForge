@@ -33,6 +33,10 @@ import { AnimNumber, AnimVec3, CurveNumber, Frame, Id, Provenance, Semantics } f
  *    逐帧按上述顺序推进到 f 的结果；预热阶段使用帧 in 的输入。跳转（seek）时必须重放，
  *    使任意访问路径得到逐位相同的结果。
  *
+ * 4b. 帧保持（frameHold）：在某段 [start, end) 内，图层在显示帧 f 呈现的画面
+ *    等于它在帧 g = start + floor((f − start) / every) · every 的画面（所有属性都在 g 求值）。
+ *    状态推进不受影响，仍然逐帧推进物理；它只改变「显示哪一帧」。用于还原低帧率素材。
+ *
  * 5. 合成：图层按数组顺序从下到上绘制。每个图层先渲染到独立的预乘 alpha 缓冲
  *    （合成分辨率），再依次应用 filters、clip、opacity，最后按 blendMode 合成。
  */
@@ -231,6 +235,15 @@ export const ModelLayer = Type.Object(
     clip: Type.Optional(Clip),
     filters: Type.Optional(Type.Array(Filter)),
     blendMode: Type.Optional(BlendMode),
+    frameHold: Type.Optional(
+      Type.Array(
+        Type.Object(
+          { start: Frame, end: Frame, every: Type.Integer({ minimum: 2 }) },
+          { additionalProperties: false },
+        ),
+        { description: '帧保持段，见文件头约定 4b；各段不得重叠' },
+      ),
+    ),
     physics: Type.Optional(
       Type.Object(
         {

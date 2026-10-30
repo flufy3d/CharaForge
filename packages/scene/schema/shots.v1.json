@@ -55,6 +55,37 @@
         }
       }
     },
+    "cadence": {
+      "description": "帧重复段（低帧率素材）。不在任何段内的帧视为逐帧都是新画面",
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "description": "在 [start, end) 内，帧 f 与帧 start + floor((f−start)/every)·every 画面相同",
+        "type": "object",
+        "required": [
+          "start",
+          "end",
+          "every"
+        ],
+        "properties": {
+          "start": {
+            "minimum": 0,
+            "description": "帧号（以 timebase.fps 为单位）",
+            "type": "number"
+          },
+          "end": {
+            "minimum": 0,
+            "description": "帧号（以 timebase.fps 为单位）",
+            "type": "number"
+          },
+          "every": {
+            "minimum": 2,
+            "description": "每 every 帧才有一张新画面",
+            "type": "integer"
+          }
+        }
+      }
+    },
     "shots": {
       "description": "按时间排序，首尾相接覆盖 [0, frameCount)",
       "type": "array",
@@ -164,6 +195,10 @@
                   "description": "文档内唯一标识",
                   "type": "string"
                 },
+                "continues": {
+                  "description": "若该实例是之前某镜头中同一实例的延续（画面连续、物理不应重置），填那个实例的 id",
+                  "type": "string"
+                },
                 "role": {
                   "description": "如 main、pip、side、chibi、fullBody、background",
                   "type": "string"
@@ -204,6 +239,11 @@
                       },
                       "value": {
                         "type": "number"
+                      },
+                      "fade": {
+                        "minimum": 0,
+                        "description": "从旧值过渡到新值所用帧数，缺省 0（阶跃）",
+                        "type": "integer"
                       },
                       "confidence": {
                         "minimum": 0,
@@ -369,6 +409,36 @@
                         "minimum": 0,
                         "description": "估计的高斯模糊 sigma（像素）",
                         "type": "number"
+                      },
+                      "eyesState": {
+                        "description": "special = ><、圈圈眼、爱心眼等替换眼；hidden = 被遮挡或出画",
+                        "anyOf": [
+                          {
+                            "const": "open",
+                            "type": "string"
+                          },
+                          {
+                            "const": "closed",
+                            "type": "string"
+                          },
+                          {
+                            "const": "special",
+                            "type": "string"
+                          },
+                          {
+                            "const": "hidden",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "source": {
+                        "description": "数值来源，如 manual、flow、iris-refine",
+                        "type": "string"
+                      },
+                      "confidence": {
+                        "minimum": 0,
+                        "maximum": 1,
+                        "type": "number"
                       }
                     }
                   }
@@ -376,37 +446,47 @@
                 "clip": {
                   "anyOf": [
                     {
-                      "additionalProperties": false,
-                      "description": "画中画等窗口裁切（屏幕空间，镜头内固定）",
-                      "type": "object",
-                      "required": [
-                        "rect"
-                      ],
-                      "properties": {
-                        "rect": {
-                          "description": "[x, y, width, height]，视频像素",
-                          "type": "array",
-                          "items": [
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "number"
-                            }
-                          ],
-                          "additionalItems": false,
-                          "minItems": 4,
-                          "maxItems": 4
-                        },
-                        "radius": {
-                          "minimum": 0,
-                          "type": "number"
+                      "minItems": 1,
+                      "description": "画中画等窗口裁切（屏幕空间圆角矩形）关键帧，线性插值",
+                      "type": "array",
+                      "items": {
+                        "additionalProperties": false,
+                        "type": "object",
+                        "required": [
+                          "frame",
+                          "rect"
+                        ],
+                        "properties": {
+                          "frame": {
+                            "minimum": 0,
+                            "description": "帧号（以 timebase.fps 为单位）",
+                            "type": "number"
+                          },
+                          "rect": {
+                            "description": "[x, y, width, height]，视频像素",
+                            "type": "array",
+                            "items": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "number"
+                              }
+                            ],
+                            "additionalItems": false,
+                            "minItems": 4,
+                            "maxItems": 4
+                          },
+                          "radius": {
+                            "minimum": 0,
+                            "type": "number"
+                          }
                         }
                       }
                     },
@@ -511,7 +591,7 @@
               ],
               "properties": {
                 "kind": {
-                  "description": "如 motionBlur、cameraShake、vignette、colorGrade、silhouette、particles",
+                  "description": "如 motionBlur、radialBlur、cameraShake、vignette、colorGrade、halftone、silhouette、particles",
                   "type": "string"
                 },
                 "start": {
@@ -523,6 +603,38 @@
                   "minimum": 0,
                   "description": "帧号（以 timebase.fps 为单位）",
                   "type": "number"
+                },
+                "instances": {
+                  "description": "只作用于这些实例；缺省为整帧",
+                  "type": "array",
+                  "items": {
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9_.:-]+$",
+                    "description": "文档内唯一标识",
+                    "type": "string"
+                  }
+                },
+                "strength": {
+                  "description": "强度关键帧（0~1 或该效果的自然单位），线性插值",
+                  "type": "array",
+                  "items": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": [
+                      "frame",
+                      "value"
+                    ],
+                    "properties": {
+                      "frame": {
+                        "minimum": 0,
+                        "description": "帧号（以 timebase.fps 为单位）",
+                        "type": "number"
+                      },
+                      "value": {
+                        "type": "number"
+                      }
+                    }
+                  }
                 },
                 "note": {
                   "type": "string"
