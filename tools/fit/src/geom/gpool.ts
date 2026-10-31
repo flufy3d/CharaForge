@@ -63,6 +63,15 @@ export class GeomPool {
     return out;
   }
 
+  /** 物理脉冲响应（见 worker.ts 的 impulse） */
+  impulse(req: { base: Record<string, number>; inputs: string[]; outputs: string[]; taps: number; delta: number }): Promise<Record<string, Record<string, number[]>>> {
+    const id = ++this.seq;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as never, reject });
+      this.workers[0]!.postMessage({ id, impulse: req });
+    });
+  }
+
   /** 每个 drawable 的顶点数 */
   vertexCounts(): Promise<number[]> {
     const id = ++this.seq;

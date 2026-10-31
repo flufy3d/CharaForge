@@ -16,6 +16,8 @@ import { readFileSync as rf } from 'node:fs';
 import { Pool } from './pool.ts';
 import { GeomPool } from './geom/gpool.ts';
 import { fitTrajectory } from './traj.ts';
+import { buildLayer, fitInputs } from './traj2.ts';
+import { loadVts } from './vts.ts';
 import { encodePng } from '../../../apps/player/scripts/png.ts';
 import { FIT_DIR, FIT_TAG, MODEL_URI, REPO } from './paths.ts';
 import { planFor } from './plans.ts';
@@ -94,7 +96,7 @@ async function main() {
   const cmd = argv[0];
   const { values } = parseArgs({
     args: argv.slice(1),
-    options: { shot: { type: 'string' }, until: { type: 'string' }, start: { type: 'string' }, geom: { type: 'string' }, itersA: { type: 'string' }, itersB: { type: 'string' }, noconst: { type: 'boolean' }, workers: { type: 'string' }, effort: { type: 'string' }, hair: { type: 'boolean' }, only: { type: 'string' }, scene: { type: 'string' }, frames: { type: 'string' }, preview: { type: 'string' }, out: { type: 'string' } },
+    options: { shot: { type: 'string' }, until: { type: 'string' }, start: { type: 'string' }, geom: { type: 'string' }, itersA: { type: 'string' }, itersB: { type: 'string' }, noconst: { type: 'boolean' }, smoothC: { type: 'string' }, fixed: { type: 'string' }, refine: { type: 'string' }, workers: { type: 'string' }, effort: { type: 'string' }, hair: { type: 'boolean' }, only: { type: 'string' }, scene: { type: 'string' }, frames: { type: 'string' }, preview: { type: 'string' }, out: { type: 'string' } },
   });
   if (cmd === 'assemble') {
     assembleScene(values.out);
@@ -103,6 +105,10 @@ async function main() {
   if (cmd === 'switches' && values.shot) {
     // 对已有 result.json 重新做开关的画面检测（用拟合结果的虹膜位置），改写开关轨
     await redetectSwitches(values.shot);
+    return;
+  }
+  if ((cmd === 'fit4' || cmd === 'synth2') && values.shot) {
+    await runInputs(cmd, values);
     return;
   }
   if (cmd === 'fit3' && values.shot) {
@@ -142,6 +148,99 @@ async function main() {
   } finally {
     await pool.close();
   }
+}
+
+/**
+ * 第三轮续：面捕输入空间的整段轨迹拟合（traj2.ts）；synth2 = 生成符合 VTS 结构的合成基准真值。
+ */
+async function runInputs(cmd: string, values: Record<string, unknown>) {
+  const shots = loadShots();
+  const pool = await Pool.open(values.workers ? Number(values.workers) : 4);
+  const gpool = cmd === 'fit4' ? await GeomPool.open(join(REPO, 'assets', MODEL_URI), values.geom ? Number(values.geom) : undefined) : null;
+  try {
+    const calib = await calibrate(pool.pages[0]!);
+    const defaults = await pool.pages[0]!.evaluate(async (m) => {
+      const H = window.__charaforge;
+      const id = await H.createInstance(m);
+      const info = H.instanceInfo(id);
+      H.destroyInstance(id);
+      return Object.fromEntries(info.parameters.map((p) => [p.id, p.default]));
+    }, MODEL_URI);
+    const vts = loadVts(join(REPO, 'assets/models/deepseek-chan/DeepSeek/大肥鱼.vtube.json'), defaults);
+    const smoothC = values.smoothC ? Number(values.smoothC) : 0.15;
+    for (const id of String(values.shot).split(',')) {
+      const shot = shots.shots.find((s) => s.id === id)!;
+      const { plans } = planFor(shot);
+      if (cmd === 'synth2') { synthTruth(shot, plans[0]!, vts, calib, smoothC); continue; }
+      const dir = join(FIT_DIR, id + FIT_TAG);
+      mkdirSync(dir, { recursive: true });
+      const logFile = join(dir, 'fit.log');
+      writeFileSync(logFile, '');
+      const log = (s: string) => { console.log(s); appendFileSync(logFile, `${s}\n`); };
+      const fixed = values.fixed ? JSON.parse(String(values.fixed)) : undefined;
+      const r = await fitInputs(pool, gpool!, shot, plans[0]!, calib, vts, {
+        smoothC, log, fixedConsts: fixed,
+        itersA: values.itersA ? Number(values.itersA) : undefined,
+        itersB: values.itersB ? Number(values.itersB) : undefined,
+        refineRounds: values.refine ? Number(values.refine) : 0,
+      });
+      writeFileSync(join(dir, 'result.json'), JSON.stringify({ shot: id, range: [shot.start, shot.end], method: 'vts-input-gn', elapsedSec: r.elapsed, timing: r.timing, layers: [r.layer], state: r.state }));
+    }
+  } finally {
+    await gpool?.close();
+    await pool.close();
+  }
+}
+
+/** 合成基准真值：把第二轮结果投影到面捕输入空间（逆映射 + 平滑），变换取稀疏关键帧，再经同一前向模型生成图层 */
+function synthTruth(shot: import('../../../packages/scene/src/index.ts').Shot, p: import('./fitshot.ts').LayerPlan, vts: import('./vts.ts').VtsModel, calib: ModelCalib, smoothC: number) {
+  const r2 = JSON.parse(readFileSync(join(FIT_DIR, 'synth', `truth_r2_${shot.id}.json`), 'utf8')).layers[0];
+  const n = r2.out - r2.in;
+  const track = (id: string) => {
+    const t = r2.params.find((x: any) => x.id === id && !x.stage);
+    return t?.curve.baked ? (t.curve.baked.values as number[]) : t ? Array(n).fill(t.curve.keys[0].v) : Array(n).fill(0);
+  };
+  const ma = (a: number[], w: number) => a.map((_, i) => { let s = 0, c = 0; for (let k = -w; k <= w; k++) { const j = i + k; if (j >= 0 && j < n) { s += a[j]!; c++; } } return s / c; });
+  const inv: Record<string, string> = { FaceAngleX: 'AngleX', FaceAngleY: 'AngleY', FaceAngleZ: 'AngleZ', EyeOpenLeft: 'ParamEyeLOpen', EyeOpenRight: 'ParamEyeROpen', EyeRightX: 'ParamEyeBallX', EyeRightY: 'ParamEyeBallY', MouthSmile: 'ParamMouthForm', MouthOpen: 'ParamMouthOpenY', Brows: 'ParamBrowLY' };
+  const series: Record<string, number[]> = {};
+  for (const [input, out] of Object.entries(inv)) {
+    const s = vts.settings.find((x) => x.input === input && x.output === out)!;
+    const vals = track(out).map((v) => s.inLo + ((v - s.outLo) / (s.outHi - s.outLo)) * (s.inHi - s.inLo));
+    series[input] = ma(vals, 3);
+  }
+  const frames = Array.from({ length: n }, (_, i) => r2.in + i);
+  const zoom = shot.effects.some((e) => e.kind === 'zoom');
+  const every = zoom ? 12 : 24;
+  const keys: number[] = [];
+  for (let f = r2.in; f < r2.out - 1; f += every) keys.push(f);
+  keys.push(r2.out - 1);
+  const tv = (k: string) => ma(r2.transform[k].baked.values as number[], 6);
+  const tx = tv('x'), ty = tv('y'), ts = tv('scale'), tr = tv('rotation');
+  const breath: Record<string, [number, number]> = { s24: [0.888, 3.865], s43: [-2.594, 4.838] };
+  const blurF = r2.filters.find((f: any) => f.type === 'blur');
+  const colF = r2.filters.find((f: any) => f.type === 'color');
+  const st = {
+    nodes: frames,
+    inputs: frames.map((_, i) => Object.fromEntries(vts.inputs.map((k) => [k, series[k] ? series[k]![i]! : vts.neutral[k] ?? 0]))),
+    keys,
+    tf: keys.map((f) => ({ x: tx[f - r2.in]!, y: ty[f - r2.in]!, ls: Math.log(ts[f - r2.in]!), rot: tr[f - r2.in]! })),
+    consts: {
+      lean: track('LeanInput')[0]!, clothes2: track('Clothes2')[0]!, breathPhase: breath[shot.id]?.[0] ?? 0, breathPeriod: breath[shot.id]?.[1] ?? 3.5,
+      blur: blurF ? blurF.sigma.baked.values[0] : 1, resample: 1,
+      color: colF ? { brightness: colF.brightness, contrast: colF.contrast, saturation: colF.saturation, multiply: colF.multiply } : null,
+    },
+  };
+  const layer = buildLayer(p, vts, st as any, calib, smoothC) as any;
+  if (r2.frameHold) layer.frameHold = r2.frameHold;
+  const scene = {
+    format: 'charaforge.scene', version: 1, meta: { title: `合成基准真值（面捕输入空间，${shot.id}）` }, timebase: { fps: 60 }, duration: 3868,
+    composition: { width: 1280, height: 720, background: null, antialias: true },
+    assets: { models: [{ id: 'dsc', uri: MODEL_URI }] }, layers: [layer],
+  };
+  mkdirSync(join(FIT_DIR, 'synth'), { recursive: true });
+  writeFileSync(join(FIT_DIR, 'synth', `truth2_${shot.id}.json`), JSON.stringify(scene));
+  writeFileSync(join(FIT_DIR, 'synth', `truth2_${shot.id}_state.json`), JSON.stringify({ smoothC, state: st }));
+  console.log(`[synth2] ${shot.id}：真值场景 → .data/fit/synth/truth2_${shot.id}.json（${n} 帧，${keys.length} 个变换关键帧，常量 ${JSON.stringify({ lean: st.consts.lean, clothes2: st.consts.clothes2 })}）`);
 }
 
 /** 第三轮：光流对应 + 整段轨迹 Gauss-Newton（traj.ts） */

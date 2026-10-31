@@ -84,7 +84,45 @@ function jac(req: JacRequest): JacFrame[] {
   return out;
 }
 
-parentPort!.on('message', (msg: { id: number; req: JacRequest; counts?: boolean }) => {
+/**
+ * 物理脉冲响应（线性化）：在静止平衡态（base 参数）附近，物理输入 q 在第 0 帧起加 Δ 的阶跃，
+ * 记录输出参数 r 的阶跃响应，差分得到脉冲响应 h_rq[τ]（τ = 0..taps−1）。物理用 runtime 的 ModelInstance。
+ */
+function impulse(req: { base: Record<string, number>; inputs: string[]; outputs: string[]; taps: number; delta: number }) {
+  const run = (bump: string | null) => {
+    inst.resetPhysics();
+    inst.resetPose();
+    inst.setParams(req.base);
+    inst.stabilizePhysics();
+    const rows: number[][] = [];
+    for (let t = 0; t < req.taps; t++) {
+      inst.resetPose();
+      inst.setParams(req.base);
+      if (bump) inst.setParam(bump, (req.base[bump] ?? 0) + req.delta);
+      inst.stepPhysics(1 / 60);
+      const v = inst.getParams();
+      rows.push(req.outputs.map((o) => v[o] ?? 0));
+    }
+    return rows;
+  };
+  const ref = run(null);
+  const out: Record<string, Record<string, number[]>> = {};
+  for (const q of req.inputs) {
+    const st = run(q);
+    out[q] = {};
+    req.outputs.forEach((r, ri) => {
+      const step = st.map((row, t) => (row[ri]! - ref[t]![ri]!) / req.delta);
+      out[q]![r] = step.map((v, t) => v - (t ? step[t - 1]! : 0));
+    });
+  }
+  return out;
+}
+
+parentPort!.on('message', (msg: { id: number; req: JacRequest; counts?: boolean; impulse?: any }) => {
+  if (msg.impulse) {
+    parentPort!.postMessage({ id: msg.id, r: impulse(msg.impulse) });
+    return;
+  }
   if (msg.counts) {
     const counts = Array.from({ length: model.getDrawableCount() }, (_, d) => model.getDrawableVertexCount(d));
     parentPort!.postMessage({ id: msg.id, r: counts });

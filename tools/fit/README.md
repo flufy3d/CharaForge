@@ -35,7 +35,31 @@ for s in s43 s24 s15; do tools/.venv/bin/python -I tools/qa/metric.py review --r
 node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/scripts/check_consistency.ts s24 2368,2416,2440
 ```
 
-## 第三轮：光流对应 + 整段轨迹 Gauss-Newton（`fit3`，开发中，合成基准未达标）
+## 第三轮续：面捕输入空间的轨迹拟合（`fit4`，当前主线；合成基准接近但未全部达标）
+
+前向模型：面捕输入（每个新画面一个节点）→ `src/vts.ts`（读 `大肥鱼.vtube.json` 的 ParameterSettings：区间线性映射、
+指数平滑 α = 1/(1 + c·smoothing)，c 为全局常量）→ 模型参数 → runtime 物理 → 顶点/渲染。图层变换为稀疏关键帧
+（每 24 帧，zoom 镜头每 12 帧）。雅可比链：顶点对可见参数（姿态输出、直接参数、159 个次级物理输出）的有限差分
+× 映射斜率 × 平滑 × 物理脉冲响应（runtime 物理在镜头静止态附近线性化）。镜头常量（体型、前倾）多假设各自收敛按 SSIM@360 挑，
+外观常量（blur、resample、color、呼吸相位/周期）用像素损失。
+
+```bash
+# 新合成基准（真值在面捕输入空间；由第二轮结果逆映射投影 + 平滑，变换取稀疏关键帧，c = 0.15）
+node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts synth2 --shot s24,s43
+for s in "s24 2368-2441" "s43 3668-3721"; do set -- $s
+  pnpm render --scene .data/fit/synth/truth2_$1.json --frames $2 --out .data/fit/synth/truth2_$1
+  tools/.venv/bin/python -I tools/qa/synth.py encode --renders .data/fit/synth/truth2_$1 --frames $2 --out .data/fit/synth/$1_synth2.mp4
+done
+# 拟合（结果 .data/fit/s24_v2/result.json，含输入空间状态 state，可与 truth2_s24_state.json 比较）
+FIT_VIDEO=$PWD/.data/fit/synth/s24_synth2.mp4 FIT_VIDEO_OFFSET=2368 FIT_TAG=_v2 \
+  node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts fit4 --shot s24 --itersB 22
+#    --smoothC c（缺省 0.15）、--fixed '{"lean":0,"clothes2":0}'（跳过常量搜索）、--refine N（逐节点像素精修，目前有害，缺省关）
+FIT_TAG=_v2 node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts assemble --out .data/fit/synth/fit_v2.json
+pnpm render --scene .data/fit/synth/fit_v2.json --frames 2368-2441 --out .data/fit/synth/r_v2
+tools/.venv/bin/python -I tools/qa/metric.py score --renders .data/fit/synth/r_v2 --shots s24 --video .data/fit/synth/s24_synth2.mp4 --video-offset 2368
+```
+
+## 第三轮：光流对应 + 整段轨迹 Gauss-Newton（`fit3`，已被 fit4 取代）
 
 ```bash
 # 合成基准（真值 = 第二轮 s24 / s43 的拟合结果；退化方式同上限实验）
