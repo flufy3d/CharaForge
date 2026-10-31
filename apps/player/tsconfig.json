@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "jsx": "react-jsx",
+    "types": ["node", "vite/client"],
+    "baseUrl": ".",
+    "paths": { "@cubism/framework/*": ["../../.cache/cubism-framework/*"] }
+  },
+  "include": ["src", "scripts", "vite.config.ts", "../../.cache/cubism-framework/live2dcubismcore.d.ts"]
+}

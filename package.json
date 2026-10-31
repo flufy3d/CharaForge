@@ -14,7 +14,14 @@
     "setup": "pnpm setup:cubism && pnpm setup:assets && pnpm setup:py",
     "schema": "pnpm --filter @charaforge/scene run schema",
     "typecheck": "pnpm -r run typecheck",
-    "build": "pnpm -r run build"
+    "build": "pnpm -r run build",
+    "framework": "node packages/runtime/scripts/build-framework.mjs",
+    "dev": "pnpm --filter @charaforge/player dev",
+    "render": "node packages/runtime/scripts/build-framework.mjs && node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/render.ts",
+    "render:gallery": "node packages/runtime/scripts/build-framework.mjs && node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/gallery.ts",
+    "test:runtime": "pnpm --filter @charaforge/runtime test",
+    "verify:video": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/verify-video.ts",
+    "bench": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/bench.ts"
   },
   "devDependencies": {
     "fflate": "^0.8.3",

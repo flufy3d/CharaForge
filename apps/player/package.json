@@ -1,0 +1,30 @@
+{
+  "name": "@charaforge/player",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "node ../../packages/runtime/scripts/build-framework.mjs && vite",
+    "build": "node ../../packages/runtime/scripts/build-framework.mjs && vite build",
+    "typecheck": "node ../../packages/runtime/scripts/build-framework.mjs && tsc --noEmit",
+    "render": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/render.ts",
+    "render:gallery": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/gallery.ts"
+  },
+  "dependencies": {
+    "@charaforge/runtime": "workspace:*",
+    "@charaforge/scene": "workspace:*",
+    "pixi.js": "^8.22.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "fflate": "^0.8.3",
+    "playwright": "^1.64.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5"
+  }
+}
