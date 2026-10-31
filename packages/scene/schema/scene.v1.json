@@ -129,6 +129,10 @@
               "type": "null"
             }
           ]
+        },
+        "antialias": {
+          "description": "模型绘制是否启用 MSAA，缺省 true；影响像素，拟合与播放必须一致",
+          "type": "boolean"
         }
       }
     },
@@ -3153,6 +3157,10 @@
                 "minimum": 0,
                 "description": "预热帧数，缺省 0",
                 "type": "integer"
+              },
+              "stabilize": {
+                "description": "预热之前先用帧 in 的输入把物理置于静止平衡态（Cubism stabilization），缺省 false",
+                "type": "boolean"
               }
             }
           },

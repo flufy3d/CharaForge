@@ -8,6 +8,8 @@ import { AnimNumber, AnimVec3, CurveNumber, Frame, Id, Provenance, Semantics } f
  * 规范性约定（播放器、拟合器、编辑器必须一致）：
  *
  * 1. 时间：所有时间以帧为单位，帧率为 timebase.fps。帧 f 的时刻为 f / fps 秒。
+ *    曲线关键帧、clip、片段的 start/end 等一律是场景绝对帧号（不是相对图层 in）。
+ *    例外：motion/expression 片段的 offset、fadeIn、fadeOut 以秒为单位。
  *
  * 2. 坐标：
  *    - 模型空间 = moc3 画布像素坐标，原点在画布左上角，y 向下，单位为画布像素
@@ -27,18 +29,30 @@ import { AnimNumber, AnimVec3, CurveNumber, Frame, Id, Provenance, Semantics } f
  *    e. 物理前进一步，dt = 1 / fps（固定步长，不用墙钟时间）；
  *    f. 按数组顺序应用 stage = "postPhysics" 的参数轨（用于烘焙物理输出或强制覆盖）；
  *    g. 应用部件不透明度轨，更新模型并绘制。
+ *    参数轨 mode：set → v' = v + (x − v)·w；add → v' = v + x·w；multiply → v' = v·(1 + (x − 1)·w)，
+ *    w 为 weight（缺省 1）。
  *    不存在任何隐式的自动行为（自动眨眼、呼吸、口型同步等），一切都要显式写成轨道。
  *
  * 4. 物理状态与确定性：图层在帧 f 的状态，定义为从帧 (in − physics.warmup) 开始
  *    逐帧按上述顺序推进到 f 的结果；预热阶段使用帧 in 的输入。跳转（seek）时必须重放，
  *    使任意访问路径得到逐位相同的结果。
  *
+ * 3b. motion / expression 片段（片段时间 τ = (f − start)/fps 秒）：
+ *    - motion 内部时间 = offset + τ·speed；loop 缺省 false，循环时每圈不重新淡入；
+ *    - 淡入：从 start 起 fadeIn 秒（缺省取文件自带值，文件未写时为 1 秒），Cubism 正弦缓动；
+ *    - 结束时刻 = end（若给出）；否则非循环 motion 为自然结束 (duration − offset)/speed，
+ *      循环 motion 与 expression 无结束（持续到图层 out，不淡出）；
+ *    - 淡出：在结束时刻之前 fadeOut 秒内淡到 0；fade 时长不受 speed 影响；
+ *    - 片段在帧 f 的效果只由 (片段定义, f) 决定，没有跨帧状态。
+ *
  * 4b. 帧保持（frameHold）：在某段 [start, end) 内，图层在显示帧 f 呈现的画面
  *    等于它在帧 g = start + floor((f − start) / every) · every 的画面（所有属性都在 g 求值）。
  *    状态推进不受影响，仍然逐帧推进物理；它只改变「显示哪一帧」。用于还原低帧率素材。
+ *    相机属于场景而非图层：图层在 g 呈现时，相机也取 g 时刻的值。
  *
  * 5. 合成：图层按数组顺序从下到上绘制。每个图层先渲染到独立的预乘 alpha 缓冲
  *    （合成分辨率），再依次应用 filters、clip、opacity，最后按 blendMode 合成。
+ *    filters 的边缘处理、采样方式、clip 羽化的具体算法以 packages/runtime 的参考实现为准。
  */
 
 // ---------- 资源 ----------
@@ -249,6 +263,9 @@ export const ModelLayer = Type.Object(
         {
           enabled: Type.Optional(Type.Boolean({ description: '缺省 true' })),
           warmup: Type.Optional(Type.Integer({ minimum: 0, description: '预热帧数，缺省 0' })),
+          stabilize: Type.Optional(
+            Type.Boolean({ description: '预热之前先用帧 in 的输入把物理置于静止平衡态（Cubism stabilization），缺省 false' }),
+          ),
         },
         { additionalProperties: false },
       ),
@@ -310,6 +327,7 @@ export const Scene = Type.Object(
         width: Type.Integer({ minimum: 1 }),
         height: Type.Integer({ minimum: 1 }),
         background: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: 'CSS 颜色；null 为透明' })),
+        antialias: Type.Optional(Type.Boolean({ description: '模型绘制是否启用 MSAA，缺省 true；影响像素，拟合与播放必须一致' })),
       },
       { additionalProperties: false },
     ),
