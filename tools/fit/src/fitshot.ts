@@ -59,6 +59,8 @@ export interface LayerPlan {
   blurRanges: [number, number][];
   /** 逐帧拟合不透明度的区间 */
   opacityRanges: [number, number][];
+  /** 逐帧拟合水平缩放 scaleX 的区间（翻牌） */
+  flipRange?: [number, number];
   /** 逐帧拟合圆形 clip 的区间（区间外不裁切） */
   clipRange?: [number, number];
   /** 镜头常量（SHOT_CONST_DIMS 里的 key） */
@@ -134,6 +136,8 @@ export function makeScene(shot: Shot, plans: LayerPlan[], calib: ModelCalib, ini
       const baked = (v: number) => ({ baked: { start: p.in, values: Array(n).fill(v) } });
       const filters: unknown[] = [];
       if (p.colorFilter) filters.push({ type: 'color', brightness: 0, contrast: 1, saturation: 1, multiply: [1, 1, 1] });
+      // 低分辨率素材放大的软化（resample，镜头常量；factor 1 = 不做）在模糊之前
+      filters.push({ type: 'resample', factor: 1, method: 'bilinear' });
       filters.push({ type: 'blur', sigma: baked(s['c:blur'] ?? 0) });
       const pre = toParams(s, p.in);
       const paramConsts = PARAM_CONSTS.filter((k) => p.consts.includes(`c:${k}`));
@@ -143,7 +147,7 @@ export function makeScene(shot: Shot, plans: LayerPlan[], calib: ModelCalib, ini
         model: 'dsc',
         in: p.in,
         out: p.out,
-        transform: { x: baked(s.x!), y: baked(s.y!), scale: baked(Math.exp(s.ls!)), rotation: baked(s.rot!), anchorX: ax, anchorY: ay },
+        transform: { x: baked(s.x!), y: baked(s.y!), scale: baked(Math.exp(s.ls!)), ...(p.flipRange ? { scaleX: baked(1) } : {}), rotation: baked(s.rot!), anchorX: ax, anchorY: ay },
         ...(p.opacityRanges.length ? { opacity: baked(1) } : {}),
         // 区间外 clip 为覆盖全画面的大矩形（等价于不裁切）
         ...(p.clipRange ? { clip: { x: baked(-10000), y: baked(-10000), width: baked(30000), height: baked(30000), radius: baked(0), feather: 2 } } : {}),
@@ -162,7 +166,7 @@ export function makeScene(shot: Shot, plans: LayerPlan[], calib: ModelCalib, ini
   };
 }
 
-function initialState(plan: LayerPlan, calib: ModelCalib, f: number): State {
+export function initialState(plan: LayerPlan, calib: ModelCalib, f: number): State {
   const eyes = trackAt(plan.inst, 'eyes', f) as [[number, number], [number, number]] | null;
   const mdx = calib.eyes[1][0] - calib.eyes[0][0];
   let x = 640, y = 360, scale = 0.3, rot = 0;
@@ -685,7 +689,7 @@ export async function redetectSwitch(pool: Pool, ref: RefFrames, p: LayerPlan, s
   return { ...ramp, samples };
 }
 
-function rampValue(from: number, to: number, start: number, fade: number, f: number): number {
+export function rampValue(from: number, to: number, start: number, fade: number, f: number): number {
   if (f < start) return from;
   if (fade <= 0 || f >= start + fade) return to;
   const u = (f - start) / fade;
@@ -706,7 +710,7 @@ function fitSwitchRamp(ws: Map<number, number>, sw: SwitchPlan) {
   return best;
 }
 
-function exportLayer(
+export function exportLayer(
   scene: ReturnType<typeof makeScene>, p: LayerPlan, d: ReturnType<typeof dumpType>, lr: LayerRuntime,
   holds: { start: number; end: number; every: number }[], shot: Shot,
 ) {
@@ -717,6 +721,8 @@ function exportLayer(
   const filters: unknown[] = [];
   const c = d.color as any;
   if (c) filters.push({ type: 'color', brightness: r6(c.brightness), contrast: r6(c.contrast), saturation: r6(c.saturation), multiply: (c.multiply as number[]).map(r6) });
+  const rs = (d as any).resample as number | null | undefined;
+  if (rs !== undefined && rs !== null && rs < 1) filters.push({ type: 'resample', factor: r6(rs), method: 'bilinear' });
   if (d.blur) filters.push({ type: 'blur', sigma: bk(d.blur) });
   const clip = d.clip ? { x: bk(d.clip.x), y: bk(d.clip.y), width: bk(d.clip.width), height: bk(d.clip.height), radius: bk(d.clip.radius), feather: 2 } : undefined;
   return {
@@ -726,7 +732,7 @@ function exportLayer(
     model: 'dsc',
     in: p.in,
     out: p.out,
-    transform: { x: bk(d.tf.x), y: bk(d.tf.y), scale: bk(d.tf.scale), rotation: bk(d.tf.rotation), anchorX: base.transform.anchorX, anchorY: base.transform.anchorY },
+    transform: { x: bk(d.tf.x), y: bk(d.tf.y), scale: bk(d.tf.scale), ...((d as any).sx ? { scaleX: bk((d as any).sx) } : {}), rotation: bk(d.tf.rotation), anchorX: base.transform.anchorX, anchorY: base.transform.anchorY },
     ...(d.opacity ? { opacity: bk(d.opacity) } : {}),
     ...(clip ? { clip } : {}),
     filters,

@@ -58,6 +58,9 @@ export const FACE_DIMS: Dim[] = [
   { key: 'mf', lo: -1, hi: 1, sd: 0.2, tau: 0.8 },
 ];
 
+/** 呼吸（ParamBreath 直接取值，0..1；VTS 自动呼吸，周期/相位未知，按节点拟合并平滑） */
+export const BREATH_DIM: Dim = { key: 'br', lo: 0, hi: 1, sd: 0.1, tau: 0.25 };
+
 export const BLUR_DIM: Dim = { key: 'blur', lo: 0, hi: 20, sd: 1, tau: 4 };
 export const OPACITY_DIM: Dim = { key: 'opacity', lo: 0, hi: 1, sd: 0.1, tau: 0.5 };
 
@@ -83,6 +86,17 @@ export const HAIR_GROUPS: { key: string; params: string[]; gain: number }[] = [
   { key: 'hLY', params: ['LateHairY1', 'LateHairY2', 'LateHairY3', 'LateHairY4', 'LateHairY5'], gain: 1 },
   { key: 'hLSX', params: ['LateSideHairX1', 'LateSideHairX2', 'LateSideHairX3', 'LateSideHairX4', 'LateSideHairX5'], gain: 1 },
   { key: 'hLSY', params: ['LateSideHairY1', 'LateSideHairY2', 'LateSideHairY3', 'LateSideHairY4', 'LateSideHairY5'], gain: 1 },
+  // 第三轮：其他次级物理（耳朵、袖子、胸、花边、头饰、马尾、飘带）
+  { key: 'hEarL', params: ['LEar1', 'LEar2', 'LEar3'], gain: 1 },
+  { key: 'hEarR', params: ['REar1', 'REar2', 'REar3'], gain: 1 },
+  { key: 'hSlvL', params: ['LSleeveX1', 'LSleeveX2', 'LSleeveX3'], gain: 1 },
+  { key: 'hSlvR', params: ['RSleeveX1', 'RSleeveX2', 'RSleeveX3', 'RSleeveX4'], gain: 1 },
+  { key: 'hChX', params: ['ChestX1', 'ChestX2', 'ChestX3'], gain: 1 },
+  { key: 'hChY', params: ['ChestY1', 'ChestY2', 'ChestY3'], gain: 1 },
+  { key: 'hLace', params: ['LaceRX', 'LaceRX2', 'LaceRX3', 'LaceLX1', 'LaceLX2', 'LaceLX3'], gain: 1 },
+  { key: 'hBow', params: ['RBowX1', 'RBowX2', 'RBowX3', 'RBowX4', 'LBowX1', 'LowX2', 'LBowX3', 'LBowX4', 'RBowX5', 'RBowX6', 'RBowX7', 'RBowX8'], gain: 1 },
+  { key: 'hPony', params: ['ShortPonytailX1', 'ShortPonytailX2'], gain: 1 },
+  { key: 'hRib', params: ['LRibbonX1', 'LRibbonX2', 'LRibbonX3', 'LRibbonX4', 'RRibbonX1', 'RRibbonX2', 'RRibbonX3', 'RRibbonX4'], gain: 1 },
 ];
 export const HAIR_DIMS: Dim[] = HAIR_GROUPS.map((g) => ({ key: g.key, lo: -1, hi: 1, sd: 0.15, tau: 0.3 }));
 
@@ -113,6 +127,8 @@ export const PHYS_INPUT_IDS = ['AngleX', 'AngleY', 'AngleZ', 'PositionX', 'Posit
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 
 export function breathAt(s: Record<string, number>, frame: number): number {
+  // 第三轮：节点上直接给出呼吸值（br，逐节点拟合、时间平滑）时优先用它
+  if (s.br !== undefined) return s.br;
   const T = s['c:breathPeriod'] ?? 3.5, ph = s['c:breathPhase'] ?? 0;
   return 0.5 + 0.5 * Math.sin((2 * Math.PI * frame) / 60 / T + ph);
 }

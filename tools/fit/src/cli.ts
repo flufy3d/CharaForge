@@ -14,8 +14,10 @@ import { fitShot, redetectSwitch, type ModelCalib } from './fitshot.ts';
 import { RefFrames } from './refvideo.ts';
 import { readFileSync as rf } from 'node:fs';
 import { Pool } from './pool.ts';
+import { GeomPool } from './geom/gpool.ts';
+import { fitTrajectory } from './traj.ts';
 import { encodePng } from '../../../apps/player/scripts/png.ts';
-import { FIT_DIR, FIT_TAG, MODEL_URI } from './paths.ts';
+import { FIT_DIR, FIT_TAG, MODEL_URI, REPO } from './paths.ts';
 import { planFor } from './plans.ts';
 import { loadShots } from './shotsutil.ts';
 
@@ -92,7 +94,7 @@ async function main() {
   const cmd = argv[0];
   const { values } = parseArgs({
     args: argv.slice(1),
-    options: { shot: { type: 'string' }, until: { type: 'string' }, start: { type: 'string' }, workers: { type: 'string' }, effort: { type: 'string' }, hair: { type: 'boolean' }, only: { type: 'string' }, scene: { type: 'string' }, frames: { type: 'string' }, preview: { type: 'string' }, out: { type: 'string' } },
+    options: { shot: { type: 'string' }, until: { type: 'string' }, start: { type: 'string' }, geom: { type: 'string' }, itersA: { type: 'string' }, itersB: { type: 'string' }, noconst: { type: 'boolean' }, workers: { type: 'string' }, effort: { type: 'string' }, hair: { type: 'boolean' }, only: { type: 'string' }, scene: { type: 'string' }, frames: { type: 'string' }, preview: { type: 'string' }, out: { type: 'string' } },
   });
   if (cmd === 'assemble') {
     assembleScene(values.out);
@@ -101,6 +103,10 @@ async function main() {
   if (cmd === 'switches' && values.shot) {
     // 对已有 result.json 重新做开关的画面检测（用拟合结果的虹膜位置），改写开关轨
     await redetectSwitches(values.shot);
+    return;
+  }
+  if (cmd === 'fit3' && values.shot) {
+    await runTraj(values);
     return;
   }
   if (cmd !== 'fit' || !values.shot) {
@@ -134,6 +140,34 @@ async function main() {
       });
     }
   } finally {
+    await pool.close();
+  }
+}
+
+/** 第三轮：光流对应 + 整段轨迹 Gauss-Newton（traj.ts） */
+async function runTraj(values: Record<string, unknown>) {
+  const shots = loadShots();
+  const pool = await Pool.open(values.workers ? Number(values.workers) : 4);
+  const gpool = await GeomPool.open(join(REPO, 'assets', MODEL_URI), values.geom ? Number(values.geom) : undefined);
+  try {
+    console.log(`[fit3] GPU: ${pool.renderer}，${pool.size} 个渲染页面，${gpool.size} 个几何 Worker`);
+    const calib = await calibrate(pool.pages[0]!);
+    for (const id of String(values.shot).split(',')) {
+      const shot = shots.shots.find((s) => s.id === id)!;
+      const { plans, options } = planFor(shot, { hairBake: !!values.hair });
+      const logFile = join(FIT_DIR, id + FIT_TAG, 'fit.log');
+      mkdirSync(join(FIT_DIR, id + FIT_TAG), { recursive: true });
+      writeFileSync(logFile, '');
+      await fitTrajectory(pool, gpool, shot, plans, calib, {
+        order: options.order,
+        itersA: values.itersA ? Number(values.itersA) : undefined,
+        itersB: values.itersB ? Number(values.itersB) : undefined,
+        constGrid: !values.noconst,
+        log: (s) => { console.log(s); appendFileSync(logFile, `${s}\n`); },
+      });
+    }
+  } finally {
+    await gpool.close();
     await pool.close();
   }
 }

@@ -27,6 +27,8 @@ export class RefFrames {
   readonly a: number;
   readonly b: number;
   private fd: number;
+  /** 缓存文件路径（RGB24 连续帧，第 0 帧 = 场景帧 a） */
+  readonly file: string;
   constructor(a: number, b: number) {
     this.a = a;
     this.b = b;
@@ -43,6 +45,7 @@ export class RefFrames {
       if (statSync(tmp).size !== want) throw new Error(`解码帧数不对：${statSync(tmp).size / FRAME_BYTES} ≠ ${b - a}`);
       renameSync(tmp, file);
     }
+    this.file = file;
     this.fd = openSync(file, 'r');
   }
   /** 帧 f 的 RGB24（行从上到下） */

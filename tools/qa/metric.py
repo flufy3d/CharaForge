@@ -19,7 +19,10 @@
   4. 辅助指标 SSIM@720：同上但不降采样；
   5. |M_f|（全分辨率）< 1% 画面记为「无角色」，不参与统计；
   6. 覆盖率 = |M_f ∩ bbox| / |bbox − 排除区|，bbox = shots 里该帧各实例 bbox 之并（线性插值，null 表示不可见）；
-  7. 镜头指标：两种 SSIM 各自的均值、最小值、5% 分位数、≥0.9 的帧比例；全片 = 所有有效帧的平均。
+  7. 镜头指标：两种 SSIM 各自的均值、最小值、5% 分位数、≥0.9 的帧比例；全片 = 所有有效帧的平均；
+  8. 每帧分类：普通帧 / 特效帧（落在 halftone、radialBlur、zoomBlur、swirl、silhouette、fadeFromWhite、
+     fadeFromBlack、particles 效果区间内；落在 transitionIn 过渡区间内；或任一实例估计 blurSigma > 3），
+     输出类别与判定依据；普通帧门槛 SSIM@360 ≥ 0.85，特效帧单独统计、以肉眼对比为准。
 
 参考帧用 ffmpeg 解码，颜色转换参数与 tools/fit/src/refvideo.ts 逐字一致。
 --video / --video-offset 可换成别的参考视频（上限实验的合成参考）：视频第 0 帧对应场景帧 offset。
@@ -142,6 +145,30 @@ def ssim_map(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return m / 3.0
 
 
+EFFECT_KINDS = {"halftone", "radialBlur", "zoomBlur", "swirl", "silhouette", "fadeFromWhite", "fadeFromBlack", "particles"}
+THRESHOLD_360 = 0.85
+
+
+def classify(shot: dict, f: int) -> tuple[str, list[str]]:
+    """普通帧 / 特效帧（docs/pipeline.md 验收门槛）。返回类别与判定依据列表。"""
+    why: list[str] = []
+    for e in shot["effects"]:
+        if e["kind"] in EFFECT_KINDS and e["start"] <= f < e["end"]:
+            why.append(f"effect:{e['kind']}[{e['start']},{e['end']})")
+    tr = shot["transitionIn"]
+    if tr.get("duration", 0) > 0 and shot["start"] <= f < shot["start"] + tr["duration"]:
+        why.append(f"transitionIn:{tr['type']}[{shot['start']},{shot['start'] + tr['duration']})")
+    for inst in shot["instances"]:
+        ks = [t for t in inst["track"] if t.get("blurSigma") is not None]
+        # 首个 blurSigma 采样之前视为未模糊（shots 只在模糊出现后才写 blurSigma）
+        if not ks or f < ks[0]["frame"]:
+            continue
+        sig = _interp_rects([{**k, "b": [k["blurSigma"]]} for k in ks], f, "b")
+        if sig is not None and sig[0] > 3:
+            why.append(f"blurSigma>3:{inst['id']}({sig[0]:.1f})")
+    return ("effect" if why else "normal"), why
+
+
 def frame_metric(rgb: np.ndarray, alpha: np.ndarray, ref: np.ndarray, shot: dict, f: int, want_maps=False):
     refd = ref.astype(np.float64)
     comp = rgb * alpha[..., None] + refd * (1.0 - alpha[..., None])
@@ -149,7 +176,8 @@ def frame_metric(rgb: np.ndarray, alpha: np.ndarray, ref: np.ndarray, shot: dict
     mask = cv2.dilate((alpha > 0.1).astype(np.uint8), DISK) > 0
     mask &= ~excl
     area = int(mask.sum())
-    out = {"frame": f, "maskArea": area}
+    cls, why = classify(shot, f)
+    out = {"frame": f, "class": cls, "why": why, "maskArea": area}
     bb = bbox_mask(shot, f)
     denom = int((bb & ~excl).sum())
     out["coverage"] = (float((mask & bb).sum()) / denom) if denom > 0 else None
@@ -179,22 +207,35 @@ def shot_frames(shot: dict, args) -> range:
     return range(a, b)
 
 
+def _stats(rows: list[dict], key: str) -> dict:
+    vals = np.array([r[key] for r in rows if r[key] is not None], dtype=np.float64)
+    if vals.size == 0:
+        return {"valid": 0}
+    valid = [r for r in rows if r[key] is not None]
+    out = {
+        "valid": int(vals.size),
+        "mean": float(vals.mean()),
+        "min": float(vals.min()),
+        "p5": float(np.percentile(vals, 5)),
+        "fracGE0.9": float((vals >= 0.9).mean()),
+        "worstFrame": int(valid[int(np.argmin(vals))]["frame"]),
+    }
+    if key == "ssim360":
+        out["fracGE0.85"] = float((vals >= THRESHOLD_360).mean())
+        out["framesBelow0.85"] = [int(r["frame"]) for r in valid if r[key] < THRESHOLD_360]
+    return out
+
+
 def summarize(rows: list[dict]) -> dict:
     out: dict = {"frames": len(rows)}
     for key in ("ssim360", "ssim720"):
-        vals = np.array([r[key] for r in rows if r[key] is not None], dtype=np.float64)
-        if vals.size == 0:
-            out[key] = {"valid": 0}
-            continue
-        valid = [r for r in rows if r[key] is not None]
-        out[key] = {
-            "valid": int(vals.size),
-            "mean": float(vals.mean()),
-            "min": float(vals.min()),
-            "p5": float(np.percentile(vals, 5)),
-            "fracGE0.9": float((vals >= 0.9).mean()),
-            "worstFrame": int(valid[int(np.argmin(vals))]["frame"]),
-        }
+        out[key] = _stats(rows, key)
+    # 普通帧 / 特效帧分开统计（门槛只对普通帧：SSIM@360 ≥ 0.85）
+    for cls in ("normal", "effect"):
+        sub = [r for r in rows if r["class"] == cls]
+        out[cls] = {"frames": len(sub), "ssim360": _stats(sub, "ssim360"), "ssim720": _stats(sub, "ssim720")}
+    nv = out["normal"]["ssim360"]
+    out["normalPass"] = bool(nv.get("valid", 0) > 0 and nv["min"] >= THRESHOLD_360)
     cov = np.array([r["coverage"] for r in rows if r["ssim360"] is not None and r["coverage"] is not None])
     out["coverageMean"] = float(cov.mean()) if cov.size else None
     out["coverageMin"] = float(cov.min()) if cov.size else None
@@ -266,8 +307,9 @@ def quad(ref: np.ndarray, comp: np.ndarray, smap, mask, excl, info: dict, half=T
     bot = np.concatenate(panels[2:], 1)
     img = np.ascontiguousarray(np.concatenate([top, bot], 0))
     s = info.get("ssim360")
-    txt = (f"f={info['frame']}  SSIM@360={s:.3f}  @720={info['ssim720']:.3f}" if s is not None
-           else f"f={info['frame']}  SSIM=n/a (mask<1%)")
+    tag = "EFFECT" if info.get("class") == "effect" else "normal"
+    txt = (f"f={info['frame']} [{tag}]  SSIM@360={s:.3f}  @720={info['ssim720']:.3f}" if s is not None
+           else f"f={info['frame']} [{tag}]  SSIM=n/a (mask<1%)")
     label(img, txt, 0.8 if half else 1.3)
     return img
 

@@ -35,6 +35,30 @@ for s in s43 s24 s15; do tools/.venv/bin/python -I tools/qa/metric.py review --r
 node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/scripts/check_consistency.ts s24 2368,2416,2440
 ```
 
+## 第三轮：光流对应 + 整段轨迹 Gauss-Newton（`fit3`，开发中，合成基准未达标）
+
+```bash
+# 合成基准（真值 = 第二轮 s24 / s43 的拟合结果；退化方式同上限实验）
+for s in "s24 2368-2441 2368" "s43 3668-3721 3668"; do set -- $s
+  cp .data/fit/$1/result.json .data/fit/synth/truth_r2_$1.json
+  tools/.venv/bin/python -I tools/qa/synth.py truth-scene --result .data/fit/synth/truth_r2_$1.json --out .data/fit/synth/truth_$1.json
+  pnpm render --scene .data/fit/synth/truth_$1.json --frames $2 --out .data/fit/synth/truth_$1
+  tools/.venv/bin/python -I tools/qa/synth.py encode --renders .data/fit/synth/truth_$1 --frames $2 --out .data/fit/synth/$1_synth.mp4
+done
+# 拟合合成参考（结果在 .data/fit/s24_t3/）
+FIT_VIDEO=$PWD/.data/fit/synth/s24_synth.mp4 FIT_VIDEO_OFFSET=2368 FIT_TAG=_t3 \
+  node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts fit3 --shot s24 --hair --itersA 4 --itersB 10
+FIT_TAG=_t3 node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts assemble --out .data/fit/synth/fit_t3.json
+pnpm render --scene .data/fit/synth/fit_t3.json --frames 2368-2441 --out .data/fit/synth/r_t3
+tools/.venv/bin/python -I tools/qa/metric.py score --renders .data/fit/synth/r_t3 --shots s24 --video .data/fit/synth/s24_synth.mp4 --video-offset 2368
+#    选项：--geom N（几何 Worker 数，缺省 CPU 核数−2）、--workers N（渲染页面）、--noconst（跳过镜头常量搜索）
+#    诊断：FIT_INIT_JSON='{"c:LeanInput":-27,"by":-25}' 覆盖所有节点的初值
+```
+
+组成：`src/traj.ts`（轨迹 GN）、`src/geom/`（worker_threads 里运行 runtime 的 LayerEvaluator + Cubism Core，
+求采样顶点与有限差分雅可比；`register.mjs` 只做 @cubism/framework 的模块解析）、`flow.py`（OpenCV DIS 光流，
+前后向一致性，多进程）。渲染、损失、复核仍全部经由 harness 里的 runtime。
+
 ## 上限实验（已知真值的合成参考）
 
 ```bash

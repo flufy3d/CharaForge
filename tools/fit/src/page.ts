@@ -31,6 +31,8 @@ export function installPageHelpers(): void {
     tracks: Track[]; byId: Map<string, Track>;
     tf: { x: number[]; y: number[]; scale: number[]; rotation: number[] }; anchorX: number; anchorY: number;
     opacity: number[] | null; blur: number[] | null;
+    /** resample 滤镜（镜头常量 factor；null = 没有该滤镜）与水平缩放 scaleX（逐帧，null = 1） */
+    resample: number | null; sx: number[] | null;
     clip: { x: number[]; y: number[]; width: number[]; height: number[]; radius: number[]; feather: number } | null;
     color: { brightness: number; contrast: number; saturation: number; multiply: [number, number, number] } | null;
     states: Map<number, unknown>;
@@ -43,6 +45,8 @@ export function installPageHelpers(): void {
     tf?: [number, number, number, number];
     opacity?: number;
     blur?: number;
+    resample?: number;
+    sx?: number;
     color?: Layer['color'];
     /** [帧, {参数: 值}]：写进逐帧参数轨 */
     set?: [number, Record<string, number>][];
@@ -131,6 +135,8 @@ export function installPageHelpers(): void {
     if (v.tf) { L.tf.x[i] = v.tf[0]; L.tf.y[i] = v.tf[1]; L.tf.scale[i] = v.tf[2]; L.tf.rotation[i] = v.tf[3]; }
     if (v.opacity !== undefined && L.opacity) L.opacity[i] = v.opacity;
     if (v.blur !== undefined && L.blur) L.blur[i] = v.blur;
+    if (v.resample !== undefined && L.resample !== null) L.resample = v.resample;
+    if (v.sx !== undefined && L.sx) L.sx[i] = v.sx;
     if (v.clip !== undefined && L.clip) {
       if (v.clip) { const [cx, cy, r] = v.clip as [number, number, number]; L.clip.x[i] = cx - r; L.clip.y[i] = cy - r; L.clip.width[i] = 2 * r; L.clip.height[i] = 2 * r; L.clip.radius[i] = r; }
       else { L.clip.x[i] = -10000; L.clip.y[i] = -10000; L.clip.width[i] = 30000; L.clip.height[i] = 30000; L.clip.radius[i] = 0; }
@@ -155,7 +161,8 @@ export function installPageHelpers(): void {
     const rad = (r * Math.PI) / 180;
     const c = r === 0 ? 1 : Math.cos(rad), sn = r === 0 ? 0 : Math.sin(rad);
     // translate(x,y)·rotate·scale(s,s)·translate(−anchor)，与 runtime/math.ts 的 layerMatrix 相同（无 flipX）
-    const a = c * s, b = sn * s, cc = -sn * s, d = c * s;
+    const sx = L.sx ? s * L.sx[i]! : s;
+    const a = c * sx, b = sn * sx, cc = -sn * s, d = c * s;
     return [a, b, cc, d, L.tf.x[i]! - (a * L.anchorX + cc * L.anchorY), L.tf.y[i]! - (b * L.anchorX + d * L.anchorY)];
   }
 
@@ -169,6 +176,7 @@ export function installPageHelpers(): void {
       ready(L, f);
       const filters: unknown[] = [];
       if (L.color) filters.push({ type: 'color', ...L.color, offset: [0, 0, 0] });
+      if (L.resample !== null && L.resample < 1) filters.push({ type: 'resample', factor: L.resample, method: 'bilinear' });
       if (L.blur && L.blur[f - L.in]! > 0) filters.push({ type: 'blur', sigma: L.blur[f - L.in] });
       const i = f - L.in;
       const clip = L.clip ? { x: L.clip.x[i], y: L.clip.y[i], width: L.clip.width[i], height: L.clip.height[i], radius: L.clip.radius[i], feather: L.clip.feather } : null;
@@ -529,6 +537,8 @@ export function installPageHelpers(): void {
           anchorX: l.transform.anchorX, anchorY: l.transform.anchorY,
           opacity: l.opacity?.baked ? l.opacity.baked.values.slice() : null,
           blur: blurF ? (blurF.sigma.baked ? blurF.sigma.baked.values.slice() : Array(n).fill(blurF.sigma)) : null,
+          resample: (() => { const r = (l.filters ?? []).find((x: any) => x.type === 'resample'); return r ? (typeof r.factor === 'number' ? r.factor : r.factor.baked.values[0]) : null; })(),
+          sx: l.transform.scaleX?.baked ? l.transform.scaleX.baked.values.slice() : null,
           clip: l.clip ? { x: l.clip.x.baked.values.slice(), y: l.clip.y.baked.values.slice(), width: l.clip.width.baked.values.slice(), height: l.clip.height.baked.values.slice(), radius: l.clip.radius.baked.values.slice(), feather: l.clip.feather ?? 0 } : null,
           color: colorF ? { brightness: colorF.brightness, contrast: colorF.contrast, saturation: colorF.saturation, multiply: colorF.multiply.slice() } : null,
           states: new Map(), ready: null, needsInit: true,
@@ -588,7 +598,7 @@ export function installPageHelpers(): void {
       const L = layers.get(lid)!;
       const arrs = ids
         ? ids.map((id) => L.byId.get(id)!.values)
-        : [L.tf.x, L.tf.y, L.tf.scale, L.tf.rotation, ...(L.opacity ? [L.opacity] : []), ...(L.blur ? [L.blur] : []),
+        : [L.tf.x, L.tf.y, L.tf.scale, L.tf.rotation, ...(L.sx ? [L.sx] : []), ...(L.opacity ? [L.opacity] : []), ...(L.blur ? [L.blur] : []),
            ...(L.clip ? [L.clip.x, L.clip.y, L.clip.width, L.clip.height, L.clip.radius] : []), ...L.tracks.map((t) => t.values)];
       a = Math.max(a, L.in); b = Math.min(b, L.out);
       if (src < L.in || src >= L.out) return;
@@ -598,7 +608,7 @@ export function installPageHelpers(): void {
     /** 取回图层的全部逐帧数组（写 scene.json 用） */
     dump(lid: string) {
       const L = layers.get(lid)!;
-      return { tf: L.tf, opacity: L.opacity, blur: L.blur, clip: L.clip, color: L.color, params: Object.fromEntries(L.tracks.map((t) => [t.post ? `post:${t.id}` : t.id, t.values])) };
+      return { tf: L.tf, sx: L.sx, resample: L.resample, opacity: L.opacity, blur: L.blur, clip: L.clip, color: L.color, params: Object.fromEntries(L.tracks.map((t) => [t.post ? `post:${t.id}` : t.id, t.values])) };
     },
     /** 合成帧 f 并读回 RGBA（预览用，base64） */
     render(f: number, scale: number) {
