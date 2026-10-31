@@ -1,0 +1,10 @@
+{
+  "name": "@charaforge/fit",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "fit": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/cli.ts"
+  }
+}
