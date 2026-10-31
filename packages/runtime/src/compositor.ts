@@ -6,9 +6,13 @@
  *   2. 依次应用 filters（blur → 两遍可分离高斯；motionBlur；color）
  *   3. 输出 pass：圆角羽化 clip × opacity，按 blendMode 混合进合成缓冲
  *
- * GL 状态隔离：Cubism 绘制前后各做一次，前：绑定独立 VAO；后：解绑 VAO 并调用
- * renderer.resetState() 让 Pixi 丢弃所有缓存的 GL 绑定（纹理、程序、帧缓冲、混合、剔除……）。
- * 所有 Pixi pass 都通过 renderer.render({ container, target }) 完成，不手写 GL 状态。
+ * GL 状态隔离（见 resyncPixi）：任何绕过 Pixi 的 GL 操作（Cubism 绘制、原生清屏、读回）之后，
+ * 先把 GL 恢复到 Pixi 的 resetState() 所假定的缺省值，再调用 renderer.resetState()。
+ * 注意 Pixi 的 resetState 只把自己的清屏色缓存置为 [0,0,0,0]，并不真正设置 GL：
+ * 若 GL 清屏色此时不是 0（Cubism 画遮罩时会设 clearColor(1,1,1,1)；原生清屏会设背景色），
+ * 之后请求 [0,0,0,0] 的清屏会被缓存「跳过」，透明处变成白色/背景色。
+ * 另外，覆盖式 pass（滤镜、拷贝、缩放读回）一律关闭混合（blendMode 'none'），输出只取决于着色器，
+ * 不依赖目标缓冲被清成什么。所有 Pixi pass 都通过 renderer.render({ container, target }) 完成。
  * 「Cubism 绘制用独立 VAO + 绘制后重置 Pixi 状态缓存」这一思路参考了 easy-live2d
  * （https://github.com/Panzer-Jack/easy-live2d ，MIT，Copyright (c) 2025 老船长PZ_Jack），未复制其代码。
  */
@@ -21,6 +25,7 @@ import {
   RenderTexture,
   Shader,
   Sprite,
+  State,
   Texture,
   UniformGroup,
   type BLEND_MODES,
@@ -99,6 +104,9 @@ export class Compositor {
   private msaa: { fbo: WebGLFramebuffer; rb: WebGLRenderbuffer; w: number; h: number } | null = null;
   private readonly stage = new Container();
   private readonly quad: Mesh<MeshGeometry, Shader>;
+  /** 覆盖式 pass 专用：独立的 State，关闭混合（不经过 Container 的 blendMode 路径） */
+  private readonly quadOverwrite: Mesh<MeshGeometry, Shader>;
+  private readonly overwriteStage = new Container();
   private readonly blur: PassShader;
   private readonly motionBlur: PassShader;
   private readonly color: PassShader;
@@ -183,6 +191,10 @@ export class Compositor {
     this.copyPass = mk('copy', COPY_FRAG, { uUnused: { value: 0, type: 'f32' } });
     this.quad = new Mesh<MeshGeometry, Shader>({ geometry, shader: this.blur.shader });
     this.stage.addChild(this.quad);
+    this.quadOverwrite = new Mesh<MeshGeometry, Shader>({ geometry, shader: this.blur.shader });
+    this.quadOverwrite.state = State.for2d();
+    this.quadOverwrite.state.blend = false;
+    this.overwriteStage.addChild(this.quadOverwrite);
     this.resize(width, height);
   }
 
@@ -207,6 +219,29 @@ export class Compositor {
     this.clearRT(this.comp, rgba);
   }
 
+  /**
+   * 绕过 Pixi 的 GL 操作之后调用：把 Cubism / 原生调用可能改动的状态恢复到 Pixi 缓存所假定的缺省值，
+   * 再让 Pixi 丢弃全部缓存（之后的 pass 会重新设置它需要的一切）。
+   * Cubism R5 渲染器会改：clearColor（遮罩 1,1,1,1）、viewport、scissor/stencil/depth 开关、frontFace、
+   * 混合函数与开关、colorMask、当前程序、纹理单元与绑定、数组/索引缓冲、帧缓冲绑定。
+   */
+  private resyncPixi(): void {
+    const gl = this.gl;
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.clearColor(0, 0, 0, 0); // 与 Pixi resetState 后的清屏色缓存 [0,0,0,0] 一致
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.STENCIL_TEST);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
+    gl.colorMask(true, true, true, true);
+    gl.depthMask(true);
+    gl.useProgram(null);
+    gl.activeTexture(gl.TEXTURE0);
+    this.renderer.resetState();
+  }
+
   /** 用原生 GL 清空一张 RenderTexture（不依赖 Pixi 渲染通道的延迟清屏语义）。 */
   clearRT(rt: RenderTexture, rgba: [number, number, number, number]): void {
     const gl = this.gl;
@@ -216,7 +251,7 @@ export class Compositor {
     gl.viewport(0, 0, rt.width, rt.height);
     gl.clearColor(rgba[0], rgba[1], rgba[2], rgba[3]);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    this.renderer.resetState();
+    this.resyncPixi();
   }
 
   /**
@@ -254,9 +289,7 @@ export class Compositor {
         inst.draw(fbo, toScreen, w, h, true);
       }
     } finally {
-      gl.bindVertexArray(null);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      r.resetState();
+      this.resyncPixi();
     }
     return target;
   }
@@ -343,15 +376,18 @@ export class Compositor {
     return dst;
   }
 
-  /** 用全屏四边形把 src 经 shader 画到 dst。 */
-  private pass(ps: PassShader, src: RenderTexture, dst: RenderTexture, clear: boolean, blend: BLEND_MODES = 'normal'): void {
+  /**
+   * 用全屏四边形把 src 经 shader 画到 dst。
+   * overwrite = true：覆盖整个目标（关闭混合，结果与目标原内容无关）；false：按 blend 混合进目标。
+   */
+  private pass(ps: PassShader, src: RenderTexture, dst: RenderTexture, overwrite: boolean, blend: BLEND_MODES = 'normal'): void {
     ps.shader.resources.uTexture = src.source;
-    const q = this.quad;
+    const q = overwrite ? this.quadOverwrite : this.quad;
     q.shader = ps.shader;
-    q.blendMode = blend;
+    if (!overwrite) q.blendMode = blend;
     q.scale.set(dst.width, dst.height);
     q.position.set(0, 0);
-    this.renderer.render({ container: this.stage, target: dst, clear, clearColor: [0, 0, 0, 0] });
+    this.renderer.render({ container: overwrite ? this.overwriteStage : this.stage, target: dst, clear: overwrite, clearColor: [0, 0, 0, 0] });
   }
 
   /**
@@ -386,7 +422,8 @@ export class Compositor {
     const data = out && out.length >= n ? out : new Uint8Array(n);
     gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
     gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, data);
-    this.renderer.resetState();
+    gl.pixelStorei(gl.PACK_ALIGNMENT, 4);
+    this.resyncPixi();
     return { width: w, height: h, data: data.length === n ? data : data.subarray(0, n) };
   }
 

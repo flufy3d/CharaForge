@@ -267,3 +267,44 @@ test('不可见图层（opacity=0 / 出画 / clip 面积 0）跳过 Core update�
   for (let f = 5; f < 50; f++) assert.equal(updates[f], 0, `帧 ${f} 不应做 Core update`);
   for (let f = 50; f < FRAMES; f++) assert.equal(updates[f], 1, `帧 ${f} 应做 1 次 Core update`);
 });
+
+test('回归：Cubism 改动 GL 清屏色后，滤镜 / frameHold 缓存 / 缩放读回的透明处 alpha 仍为 0', async () => {
+  const scene = {
+    format: 'charaforge.scene', version: 1, meta: { title: 'alpha' }, timebase: { fps: 60 }, duration: 40,
+    composition: { width: 640, height: 360, background: null },
+    assets: { models: [{ id: 'ds', uri: MODEL }] },
+    layers: [{
+      id: 'main', kind: 'model', model: 'ds', in: 0, out: 40,
+      transform: { x: 320, y: 300, scale: 0.08 },
+      physics: { warmup: 10 },
+      frameHold: [{ start: 10, end: 30, every: 2 }],
+      filters: [{ type: 'color', brightness: 0.05, saturation: 0.8 }, { type: 'blur', sigma: 2 }],
+      params: [{ id: 'ParamAngleX', curve: { keys: [{ t: 0, v: -20 }, { t: 40, v: 20 }] } }],
+    }],
+  };
+  // 第二个图层 / 背景色场景先渲染一次，确保 GL 清屏色被改成非 0 过（Cubism 遮罩 1,1,1,1；背景色）
+  await h.page.evaluate((s) => window.__charaforge.loadScene(s), richScene);
+  await render(10);
+  await h.page.evaluate((s) => window.__charaforge.loadScene(s), scene);
+  const alphaStats = (b64: string, w: number, x0: number, y0: number, x1: number, y1: number) => {
+    const d = Buffer.from(b64, 'base64');
+    let maxCorner = 0;
+    let anyOpaque = 0;
+    for (let i = 3; i < d.length; i += 4) {
+      const p = (i - 3) / 4;
+      const x = p % w, y = Math.floor(p / w);
+      if (x >= x0 && x < x1 && y >= y0 && y < y1) maxCorner = Math.max(maxCorner, d[i]!);
+      if (d[i]! > 0) anyOpaque++;
+    }
+    return { maxCorner, anyOpaque };
+  };
+  for (const f of [0, 5, 10, 11, 12, 20, 21, 29, 30, 35]) {
+    for (const scale of [1, 0.5]) {
+      const r = await h.page.evaluate(([f, scale]) => window.__charaforge.renderFrame(f, { read: { scale } }), [f, scale] as const);
+      const k = scale;
+      const st = alphaStats(r.data!, r.width!, 0, 0, Math.round(80 * k), Math.round(60 * k));
+      assert.equal(st.maxCorner, 0, `帧 ${f} scale ${scale}：透明角落 alpha 应为 0`);
+      assert.ok(st.anyOpaque > 100, `帧 ${f} scale ${scale}：应有模型像素`);
+    }
+  }
+});
