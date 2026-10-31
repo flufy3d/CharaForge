@@ -184,3 +184,47 @@ out vec4 finalColor;
 void main() {
   finalColor = texelFetch(uTexture, ivec2(gl_FragCoord.xy), 0);
 }`;
+
+/**
+ * resample 滤镜的放大步：小图（textureSize）→ 输出尺寸（uOutSize 由片元坐标与目标尺寸推出）。
+ * 输出像素中心 p+0.5 对应小图坐标 q = (p + 0.5)·small/out − 0.5（像素中心对齐），越界按边缘钳制。
+ * bilinear：2×2 加权；bicubic：Catmull-Rom（a = −0.5）4×4 加权，结果夹到 [0,1] 且 rgb ≤ a（保持合法的预乘颜色）。
+ * 两种都用 texelFetch 显式计算，不依赖采样器设置。
+ */
+export const UPSAMPLE_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uTexture;
+uniform float uBicubic;
+uniform vec2 uOutSize;
+in vec2 vUV;
+out vec4 finalColor;
+vec4 tap(ivec2 q, ivec2 size) {
+  return texelFetch(uTexture, clamp(q, ivec2(0), size - 1), 0);
+}
+float cr(float x) {
+  x = abs(x);
+  if (x < 1.0) return 1.5 * x * x * x - 2.5 * x * x + 1.0;
+  if (x < 2.0) return -0.5 * x * x * x + 2.5 * x * x - 4.0 * x + 2.0;
+  return 0.0;
+}
+void main() {
+  ivec2 size = textureSize(uTexture, 0);
+  vec2 q = gl_FragCoord.xy * vec2(size) / uOutSize - 0.5;
+  vec2 b = floor(q);
+  vec2 t = q - b;
+  ivec2 i0 = ivec2(b);
+  if (uBicubic < 0.5) {
+    vec4 a = mix(tap(i0, size), tap(i0 + ivec2(1, 0), size), t.x);
+    vec4 c = mix(tap(i0 + ivec2(0, 1), size), tap(i0 + ivec2(1, 1), size), t.x);
+    finalColor = mix(a, c, t.y);
+    return;
+  }
+  vec4 acc = vec4(0.0);
+  for (int j = -1; j <= 2; j++) {
+    float wy = cr(float(j) - t.y);
+    for (int i = -1; i <= 2; i++) acc += cr(float(i) - t.x) * wy * tap(i0 + ivec2(i, j), size);
+  }
+  acc = clamp(acc, 0.0, 1.0);
+  finalColor = vec4(min(acc.rgb, vec3(acc.a)), acc.a);
+}`;

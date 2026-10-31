@@ -43,6 +43,10 @@ export interface InstanceTransform {
   x: number;
   y: number;
   scale: number;
+  /** 缺省 1：sx = scale·scaleX·(flipX ? −1 : 1) */
+  scaleX?: number;
+  /** 缺省 1：sy = scale·scaleY */
+  scaleY?: number;
   rotation?: number;
   anchorX?: number;
   anchorY?: number;
@@ -509,6 +513,7 @@ function layerOnScreen(toScreen: Affine, c: CanvasInfo, d: LayerDrawParams, W: n
   for (const f of d.filters) {
     if (f.type === 'blur') pad += Math.ceil(3 * Math.max(0, f.sigma));
     else if (f.type === 'motionBlur') pad += Math.ceil(Math.max(0, f.length) / 2) + 1;
+    else if (f.type === 'resample' && f.factor > 0 && f.factor < 1) pad += Math.ceil(3 / f.factor);
   }
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const [px, py] of [[0, 0], [c.width, 0], [0, c.height], [c.width, c.height]] as const) {
@@ -542,6 +547,8 @@ function fillTransform(t: InstanceTransform, c: CanvasInfo) {
     x: t.x,
     y: t.y,
     scale: t.scale,
+    scaleX: t.scaleX ?? 1,
+    scaleY: t.scaleY ?? 1,
     rotation: t.rotation ?? 0,
     anchorX: t.anchorX ?? c.width / 2,
     anchorY: t.anchorY ?? c.height / 2,
@@ -555,6 +562,8 @@ export function sampleTransform(t: Transform2D, f: number, c: CanvasInfo) {
       x: sample(t.x, f, 0),
       y: sample(t.y, f, 0),
       scale: sample(t.scale, f, 1),
+      scaleX: sample(t.scaleX, f, 1),
+      scaleY: sample(t.scaleY, f, 1),
       rotation: sample(t.rotation, f, 0),
       anchorX: t.anchorX,
       anchorY: t.anchorY,
@@ -574,6 +583,7 @@ function resolveLayerDraw(layer: ModelLayer, f: number, opacity: number): LayerD
     if (fl.enabled === false) continue;
     if (fl.type === 'blur') filters.push({ type: 'blur', sigma: sample(fl.sigma, f, 0) });
     else if (fl.type === 'motionBlur') filters.push({ type: 'motionBlur', angle: sample(fl.angle, f, 0), length: sample(fl.length, f, 0) });
+    else if (fl.type === 'resample') filters.push({ type: 'resample', factor: sample(fl.factor, f, 1), method: fl.method ?? 'bilinear' });
     else
       filters.push({
         type: 'color',

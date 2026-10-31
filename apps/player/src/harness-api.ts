@@ -87,11 +87,18 @@ export interface InstanceInfo {
   parts: { id: string; name?: string; defaultOpacity: number }[];
 }
 
-/** 与场景图层 transform 同语义：out = [x,y] + R(rotation)·diag(±scale, scale)·(p − anchor)，anchor 缺省画布中心。 */
+/**
+ * 与场景图层 transform 同语义：out = [x,y] + R(rotation)·diag(sx, sy)·(p − anchor)，
+ * sx = scale·scaleX·(flipX ? −1 : 1)，sy = scale·scaleY；anchor 缺省画布中心。
+ */
 export interface InstanceTransform {
   x: number;
   y: number;
   scale: number;
+  /** 缺省 1 */
+  scaleX?: number;
+  /** 缺省 1 */
+  scaleY?: number;
   rotation?: number;
   anchorX?: number;
   anchorY?: number;

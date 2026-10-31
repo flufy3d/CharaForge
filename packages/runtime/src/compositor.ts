@@ -33,11 +33,12 @@ import {
 } from 'pixi.js';
 import type { ModelInstance } from './instance.ts';
 import type { Affine } from './math.ts';
-import { BLUR_FRAG, COLOR_FRAG, COPY_FRAG, DEBUG_FRAG, MOTION_BLUR_FRAG, OUTPUT_FRAG, PASS_VERT, RESAMPLE_FRAG } from './shaders.ts';
+import { BLUR_FRAG, COLOR_FRAG, COPY_FRAG, UPSAMPLE_FRAG, DEBUG_FRAG, MOTION_BLUR_FRAG, OUTPUT_FRAG, PASS_VERT, RESAMPLE_FRAG } from './shaders.ts';
 
 export type ResolvedFilter =
   | { type: 'blur'; sigma: number }
   | { type: 'motionBlur'; angle: number; length: number }
+  | { type: 'resample'; factor: number; method: 'bilinear' | 'bicubic' }
   | {
       type: 'color';
       brightness: number;
@@ -114,6 +115,7 @@ export class Compositor {
   private readonly resample: PassShader;
   private readonly debug: PassShader;
   private readonly copyPass: PassShader;
+  private readonly upsample: PassShader;
   private readonly rtPool = new Map<string, RenderTexture>();
   private readonly presentSprite = new Sprite();
   private readbackBuf: Uint8Array = new Uint8Array(0);
@@ -189,6 +191,10 @@ export class Compositor {
       uGain: { value: 1, type: 'f32' },
     }, { uVideo: Texture.EMPTY.source });
     this.copyPass = mk('copy', COPY_FRAG, { uUnused: { value: 0, type: 'f32' } });
+    this.upsample = mk('upsample', UPSAMPLE_FRAG, {
+      uBicubic: { value: 0, type: 'f32' },
+      uOutSize: { value: new Float32Array(2), type: 'vec2<f32>' },
+    });
     this.quad = new Mesh<MeshGeometry, Shader>({ geometry, shader: this.blur.shader });
     this.stage.addChild(this.quad);
     this.quadOverwrite = new Mesh<MeshGeometry, Shader>({ geometry, shader: this.blur.shader });
@@ -356,6 +362,25 @@ export class Compositor {
       u.uDir.set([0, 1]);
       this.pass(this.blur, dst, dst2, true);
       return dst2;
+    }
+    if (f.type === 'resample') {
+      // factor ≥ 1（或非法值）不做任何处理
+      if (!(f.factor > 0 && f.factor < 1)) return src;
+      const sw = Math.max(1, Math.round(src.width * f.factor));
+      const sh = Math.max(1, Math.round(src.height * f.factor));
+      // 1) 区域平均缩小到 sw×sh（与缩放读回同一个着色器）
+      const small = this.pooledRT(sw, sh, ':resample');
+      const ru = this.resample.uniforms as Record<string, unknown> & { uRegion: Float32Array; uOutSize: Float32Array };
+      ru.uRegion.set([0, 0, src.width, src.height]);
+      ru.uOutSize.set([sw, sh]);
+      ru.uTaps = Math.min(8, Math.ceil(1 / f.factor - 1e-9));
+      this.pass(this.resample, src, small, true);
+      // 2) 插值放大回原尺寸
+      const uu = this.upsample.uniforms as Record<string, unknown> & { uOutSize: Float32Array };
+      uu.uBicubic = f.method === 'bicubic' ? 1 : 0;
+      uu.uOutSize.set([dst.width, dst.height]);
+      this.pass(this.upsample, small, dst, true);
+      return dst;
     }
     if (f.type === 'motionBlur') {
       if (!(f.length > 0)) return src;

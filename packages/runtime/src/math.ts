@@ -41,20 +41,25 @@ export function apply(m: Affine, x: number, y: number): [number, number] {
   return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
 }
 
-/** 图层变换：world = [x,y] + R(rot)·diag(sx, scale)·(p − anchor)，sx = flipX ? −scale : scale。 */
+/**
+ * 图层变换：world = [x,y] + R(rot)·diag(sx, sy)·(p − anchor)，
+ * sx = scale·scaleX·(flipX ? −1 : 1)，sy = scale·scaleY（scaleX、scaleY 缺省 1）。
+ * scaleX = scaleY = 1 时与旧公式逐位相同（乘 1、乘 −1 都是精确运算）。
+ */
 export function layerMatrix(t: {
   x: number;
   y: number;
   scale: number;
+  scaleX?: number;
+  scaleY?: number;
   rotation: number;
   anchorX: number;
   anchorY: number;
   flipX: boolean;
 }): Affine {
-  return mul(
-    translate(t.x, t.y),
-    mul(rotate(t.rotation), mul(scale(t.flipX ? -t.scale : t.scale, t.scale), translate(-t.anchorX, -t.anchorY))),
-  );
+  const sx = t.scale * (t.scaleX ?? 1) * (t.flipX ? -1 : 1);
+  const sy = t.scale * (t.scaleY ?? 1);
+  return mul(translate(t.x, t.y), mul(rotate(t.rotation), mul(scale(sx, sy), translate(-t.anchorX, -t.anchorY))));
 }
 
 /** 相机：screen = [W/2, H/2] + zoom·R(rot)·(world − [x, y])。 */

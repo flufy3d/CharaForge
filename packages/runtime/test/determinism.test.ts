@@ -308,3 +308,81 @@ test('回归：Cubism 改动 GL 清屏色后，滤镜 / frameHold 缓存 / 缩�
     }
   }
 });
+
+/** 只保留 main 图层的富场景（变体测试用） */
+function mainOnly(mod: (layer: Record<string, unknown>) => void = () => {}) {
+  const s = structuredClone(richScene) as typeof richScene & { layers: Record<string, unknown>[] };
+  s.layers = s.layers.filter((l) => l.id === 'main');
+  mod(s.layers[0]!);
+  return s;
+}
+
+async function seqAndSeek(scene: object, seekOrder: number[]): Promise<string[]> {
+  await h.page.evaluate((s) => window.__charaforge.loadScene(s), scene);
+  const seq: string[] = [];
+  for (let f = 0; f < FRAMES; f++) seq.push(await render(f));
+  await h.page.evaluate((s) => window.__charaforge.loadScene(s), scene);
+  for (const f of seekOrder) assert.equal(await render(f), seq[f], `seek 帧 ${f} 应与顺序播放相同`);
+  return seq;
+}
+
+test('transform.scaleX / scaleY：缺省 1 与旧公式逐位相同、scaleX=−1 等价 flipX、动画可 seek', async () => {
+  const pick = [10, 40, 80];
+  const hashes = async (scene: object) => {
+    await h.page.evaluate((s) => window.__charaforge.loadScene(s), scene);
+    const out: string[] = [];
+    for (const f of pick) out.push(await render(f));
+    return out;
+  };
+  const tf = (l: Record<string, unknown>) => l.transform as Record<string, unknown>;
+  const base = await hashes(mainOnly());
+  assert.deepEqual(await hashes(mainOnly((l) => Object.assign(tf(l), { scaleX: 1, scaleY: 1 }))), base, '显式 1 与缺省相同');
+  const flipped = await hashes(mainOnly((l) => Object.assign(tf(l), { flipX: true })));
+  assert.deepEqual(await hashes(mainOnly((l) => Object.assign(tf(l), { scaleX: -1 }))), flipped, 'scaleX = −1 等价 flipX');
+  assert.notDeepEqual(flipped, base);
+  const anim = mainOnly((l) => Object.assign(tf(l), {
+    scaleX: { keys: [{ t: 0, v: 0.8 }, { t: 90, v: 1.3, ease: 'smooth' }] },
+    scaleY: { keys: [{ t: 0, v: 1.2 }, { t: 90, v: 0.9 }] },
+  }));
+  const seq = await seqAndSeek(anim, [77, 13, 89, 0, 45, 46]);
+  for (const [i, f] of pick.entries()) assert.notEqual(seq[f], base[i], `帧 ${f} 非均匀缩放应改变画面`);
+});
+
+test('resample 滤镜：bilinear / bicubic、factor ≥ 1 不处理、动画可 seek、透明处 alpha 为 0', async () => {
+  const pick = [10, 40, 80];
+  const hashes = async (scene: object) => {
+    await h.page.evaluate((s) => window.__charaforge.loadScene(s), scene);
+    const out: string[] = [];
+    for (const f of pick) out.push(await render(f));
+    return out;
+  };
+  const withFilters = (filters: object[]) => mainOnly((l) => { l.filters = filters; });
+  const none = await hashes(withFilters([]));
+  assert.deepEqual(await hashes(withFilters([{ type: 'resample', factor: 1 }])), none, 'factor = 1 不处理');
+  assert.deepEqual(await hashes(withFilters([{ type: 'resample', factor: 1.5, method: 'bicubic' }])), none, 'factor > 1 不处理');
+  const bil = await hashes(withFilters([{ type: 'resample', factor: 0.4 }]));
+  const bic = await hashes(withFilters([{ type: 'resample', factor: 0.4, method: 'bicubic' }]));
+  for (let i = 0; i < pick.length; i++) {
+    assert.notEqual(bil[i], none[i], 'factor < 1 应软化画面');
+    assert.notEqual(bic[i], bil[i], 'bicubic 与 bilinear 不同');
+  }
+  const anim = withFilters([{ type: 'resample', factor: { keys: [{ t: 0, v: 0.6 }, { t: 90, v: 0.15 }] }, method: 'bicubic' }, { type: 'resample', factor: 0.5 }]);
+  await seqAndSeek(anim, [77, 13, 89, 0, 45, 46]);
+
+  // 透明背景：放大后的透明处 alpha 仍为 0
+  const transparent = { ...anim, composition: { ...anim.composition, background: null } };
+  delete (transparent.layers[0] as Record<string, unknown>).clip;
+  await h.page.evaluate((s) => window.__charaforge.loadScene(s), transparent);
+  for (const f of [10, 60]) {
+    const r = await h.page.evaluate((f) => window.__charaforge.renderFrame(f, { read: {} }), f);
+    const d = Buffer.from(r.data!, 'base64');
+    let corner = 0, opaque = 0;
+    for (let y = 0; y < r.height!; y++) for (let x = 0; x < r.width!; x++) {
+      const a = d[(y * r.width! + x) * 4 + 3]!;
+      if (x < 60 && y < 40) corner = Math.max(corner, a);
+      if (a > 0) opaque++;
+    }
+    assert.equal(corner, 0, `帧 ${f}：透明角落 alpha 应为 0`);
+    assert.ok(opaque > 100);
+  }
+});

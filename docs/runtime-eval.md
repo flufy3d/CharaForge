@@ -74,6 +74,11 @@ apps/player/
 - blur：可分离高斯，半径 ceil(3σ)，`texelFetch` 整数采样，缓冲外视为透明，权重按全部采样点归一化（边缘会变透明）。
 - motionBlur：沿 (cos angle, sin angle)（y 向下，顺时针为正）在 [−L/2, L/2] 上取 max(2, ceil(L)+1) 个双线性样本的平均，缓冲外透明。
 - color：按 scene.ts 描述，作用于反预乘颜色，结果夹到 [0,1] 再预乘。
+- resample：factor ∉ (0, 1) 时不处理。否则先缩小到 round(W·factor) × round(H·factor)：每个小图像素在其源区域内取 k×k（k = ceil(1/factor)，≤ 8）
+  个双线性样本求平均（与缩放读回同一个着色器）；再放大回 W×H：输出像素中心 p+0.5 对应小图坐标 (p+0.5)·small/out − 0.5（像素中心对齐），
+  越界按边缘钳制；bilinear 为 2×2 线性插值，bicubic 为 Catmull-Rom（a = −0.5）4×4，结果夹到 [0,1] 且 rgb ≤ a（合法预乘色）。
+  全部在预乘 alpha 上计算，透明处保持 alpha 0。
+- transform：sx = scale·scaleX·(flipX ? −1 : 1)，sy = scale·scaleY；scaleX = scaleY = 1 时与旧公式逐位相同，scaleX = −1 与 flipX 逐位相同（测试 12）。
 - clip：圆角矩形（屏幕/合成像素），覆盖率 = clamp(0.5 − d/max(feather,1), 0, 1)，d 为到边界的有符号距离，
   即羽化带以边界为中心、宽 feather；feather = 0 为 1 像素抗锯齿。
 - opacity 与 clip 在同一个输出 pass 里相乘，再用 Pixi 的预乘 blendMode（normal/add/multiply/screen）混入合成缓冲。
@@ -120,6 +125,9 @@ ok 7 - Worker 路径与同步路径逐位相同（顺序 + seek + 覆盖）
 ok 8 - composition.antialias：false 时不做 MSAA，等价于 MSAA=0 的渲染
 ok 9 - physics.stabilize：预热前置于平衡态，结果不同于未稳定、且确定
 ok 10 - 不可见图层（opacity=0 / 出画 / clip 面积 0）跳过 Core update，但物理链连续
+ok 11 - 回归：Cubism 改动 GL 清屏色后，滤镜 / frameHold 缓存 / 缩放读回的透明处 alpha 仍为 0
+ok 12 - transform.scaleX / scaleY：缺省 1 与旧公式逐位相同、scaleX=−1 等价 flipX、动画可 seek
+ok 13 - resample 滤镜：bilinear / bicubic、factor ≥ 1 不处理、动画可 seek、透明处 alpha 为 0
 ```
 
 （`CHARAFORGE_GPU=egl CHARAFORGE_MSAA=0` 下前 6 项同样通过。）
