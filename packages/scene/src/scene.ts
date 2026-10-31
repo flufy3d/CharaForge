@@ -16,8 +16,9 @@ import { AnimNumber, AnimVec3, CurveNumber, Frame, Id, Provenance, Semantics } f
  *      （画布尺寸 = CanvasInfo.Size，像素/单位换算 = CanvasInfo.PixelsPerUnit）。
  *    - 世界空间 = 合成像素坐标系（与画布同尺寸），相机作用之前。
  *    - 屏幕空间 = 合成像素坐标，原点左上，y 向下。
- *    - 图层：world = [x,y] + R(rotation) · diag(sx, scale) · (p − [anchorX, anchorY])，
- *      其中 sx = flipX ? −scale : scale，rotation 单位为度、顺时针为正（y 向下）。
+ *    - 图层：world = [x,y] + R(rotation) · diag(sx, sy) · (p − [anchorX, anchorY])，
+ *      其中 sx = scale · scaleX · (flipX ? −1 : 1)，sy = scale · scaleY（scaleX、scaleY 缺省 1），
+ *      rotation 单位为度、顺时针为正（y 向下）。
  *    - 相机：screen = [W/2, H/2] + zoom · R(rotation) · (world − [x, y])。
  *      space = "screen" 的图层不受相机影响（world 直接当作 screen）。
  *
@@ -159,6 +160,8 @@ export const Transform2D = Type.Object(
     x: AnimNumber,
     y: AnimNumber,
     scale: AnimNumber,
+    scaleX: Type.Optional(AnimNumber),
+    scaleY: Type.Optional(AnimNumber),
     rotation: Type.Optional(AnimNumber),
     anchorX: Type.Optional(Type.Number({ description: '模型画布像素，缺省为画布中心' })),
     anchorY: Type.Optional(Type.Number({ description: '模型画布像素，缺省为画布中心' })),
@@ -226,7 +229,20 @@ export const ColorFilter = Type.Object(
   },
 );
 
-export const Filter = Type.Union([BlurFilter, MotionBlurFilter, ColorFilter]);
+export const ResampleFilter = Type.Object(
+  {
+    type: Type.Literal('resample'),
+    factor: AnimNumber,
+    method: Type.Optional(Type.Union([Type.Literal('bilinear'), Type.Literal('bicubic')], { description: '放大回原尺寸时的插值，缺省 bilinear' })),
+    enabled: Type.Optional(Type.Boolean()),
+  },
+  {
+    additionalProperties: false,
+    description: '先按 factor（0~1）缩小（区域平均）再放大回原尺寸，模拟低分辨率素材放大后的软化',
+  },
+);
+
+export const Filter = Type.Union([BlurFilter, MotionBlurFilter, ColorFilter, ResampleFilter]);
 
 export const BlendMode = Type.Union([
   Type.Literal('normal'),

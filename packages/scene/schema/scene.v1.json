@@ -1165,6 +1165,226 @@
                   }
                 ]
               },
+              "scaleX": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "type": "object",
+                        "required": [
+                          "keys"
+                        ],
+                        "properties": {
+                          "keys": {
+                            "minItems": 1,
+                            "type": "array",
+                            "items": {
+                              "additionalProperties": false,
+                              "description": "关键帧；ease 缺省为 linear",
+                              "type": "object",
+                              "required": [
+                                "t",
+                                "v"
+                              ],
+                              "properties": {
+                                "t": {
+                                  "minimum": 0,
+                                  "description": "帧号（以 timebase.fps 为单位）",
+                                  "type": "number"
+                                },
+                                "v": {
+                                  "type": "number"
+                                },
+                                "ease": {
+                                  "anyOf": [
+                                    {
+                                      "const": "step",
+                                      "type": "string"
+                                    },
+                                    {
+                                      "const": "linear",
+                                      "type": "string"
+                                    },
+                                    {
+                                      "const": "smooth",
+                                      "type": "string"
+                                    },
+                                    {
+                                      "type": "array",
+                                      "items": [
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "number"
+                                        }
+                                      ],
+                                      "additionalItems": false,
+                                      "minItems": 4,
+                                      "maxItems": 4
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "additionalProperties": false,
+                        "type": "object",
+                        "required": [
+                          "baked"
+                        ],
+                        "properties": {
+                          "baked": {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "required": [
+                              "start",
+                              "values"
+                            ],
+                            "properties": {
+                              "start": {
+                                "minimum": 0,
+                                "description": "帧号（以 timebase.fps 为单位）",
+                                "type": "number"
+                              },
+                              "values": {
+                                "description": "values[i] 对应帧 start+i；超出范围时取首/尾值",
+                                "type": "array",
+                                "items": {
+                                  "type": "number"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              "scaleY": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "type": "object",
+                        "required": [
+                          "keys"
+                        ],
+                        "properties": {
+                          "keys": {
+                            "minItems": 1,
+                            "type": "array",
+                            "items": {
+                              "additionalProperties": false,
+                              "description": "关键帧；ease 缺省为 linear",
+                              "type": "object",
+                              "required": [
+                                "t",
+                                "v"
+                              ],
+                              "properties": {
+                                "t": {
+                                  "minimum": 0,
+                                  "description": "帧号（以 timebase.fps 为单位）",
+                                  "type": "number"
+                                },
+                                "v": {
+                                  "type": "number"
+                                },
+                                "ease": {
+                                  "anyOf": [
+                                    {
+                                      "const": "step",
+                                      "type": "string"
+                                    },
+                                    {
+                                      "const": "linear",
+                                      "type": "string"
+                                    },
+                                    {
+                                      "const": "smooth",
+                                      "type": "string"
+                                    },
+                                    {
+                                      "type": "array",
+                                      "items": [
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "number"
+                                        },
+                                        {
+                                          "type": "number"
+                                        }
+                                      ],
+                                      "additionalItems": false,
+                                      "minItems": 4,
+                                      "maxItems": 4
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "additionalProperties": false,
+                        "type": "object",
+                        "required": [
+                          "baked"
+                        ],
+                        "properties": {
+                          "baked": {
+                            "additionalProperties": false,
+                            "type": "object",
+                            "required": [
+                              "start",
+                              "values"
+                            ],
+                            "properties": {
+                              "start": {
+                                "minimum": 0,
+                                "description": "帧号（以 timebase.fps 为单位）",
+                                "type": "number"
+                              },
+                              "values": {
+                                "description": "values[i] 对应帧 start+i；超出范围时取首/尾值",
+                                "type": "array",
+                                "items": {
+                                  "type": "number"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
               "rotation": {
                 "anyOf": [
                   {
@@ -3085,6 +3305,147 @@
                               }
                             }
                           ]
+                        }
+                      ]
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    }
+                  }
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "先按 factor（0~1）缩小（区域平均）再放大回原尺寸，模拟低分辨率素材放大后的软化",
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "factor"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "resample",
+                      "type": "string"
+                    },
+                    "factor": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "anyOf": [
+                            {
+                              "additionalProperties": false,
+                              "type": "object",
+                              "required": [
+                                "keys"
+                              ],
+                              "properties": {
+                                "keys": {
+                                  "minItems": 1,
+                                  "type": "array",
+                                  "items": {
+                                    "additionalProperties": false,
+                                    "description": "关键帧；ease 缺省为 linear",
+                                    "type": "object",
+                                    "required": [
+                                      "t",
+                                      "v"
+                                    ],
+                                    "properties": {
+                                      "t": {
+                                        "minimum": 0,
+                                        "description": "帧号（以 timebase.fps 为单位）",
+                                        "type": "number"
+                                      },
+                                      "v": {
+                                        "type": "number"
+                                      },
+                                      "ease": {
+                                        "anyOf": [
+                                          {
+                                            "const": "step",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "linear",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "const": "smooth",
+                                            "type": "string"
+                                          },
+                                          {
+                                            "type": "array",
+                                            "items": [
+                                              {
+                                                "type": "number"
+                                              },
+                                              {
+                                                "type": "number"
+                                              },
+                                              {
+                                                "type": "number"
+                                              },
+                                              {
+                                                "type": "number"
+                                              }
+                                            ],
+                                            "additionalItems": false,
+                                            "minItems": 4,
+                                            "maxItems": 4
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            {
+                              "additionalProperties": false,
+                              "type": "object",
+                              "required": [
+                                "baked"
+                              ],
+                              "properties": {
+                                "baked": {
+                                  "additionalProperties": false,
+                                  "type": "object",
+                                  "required": [
+                                    "start",
+                                    "values"
+                                  ],
+                                  "properties": {
+                                    "start": {
+                                      "minimum": 0,
+                                      "description": "帧号（以 timebase.fps 为单位）",
+                                      "type": "number"
+                                    },
+                                    "values": {
+                                      "description": "values[i] 对应帧 start+i；超出范围时取首/尾值",
+                                      "type": "array",
+                                      "items": {
+                                        "type": "number"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "method": {
+                      "description": "放大回原尺寸时的插值，缺省 bilinear",
+                      "anyOf": [
+                        {
+                          "const": "bilinear",
+                          "type": "string"
+                        },
+                        {
+                          "const": "bicubic",
+                          "type": "string"
                         }
                       ]
                     },
