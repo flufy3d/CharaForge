@@ -156,3 +156,26 @@ export function detectRefEyes(buf: Buffer, guess: number[][], excl: number[][]):
   }
   return out as [[number, number], [number, number]];
 }
+
+/**
+ * 爱心眼（key4）开关的画面检测：在两只眼睛窗口（半径 0.45×眼距）里数青色虹膜像素和粉色（爱心）像素，
+ * 返回粉色占比 w ∈ [0,1]（按两类像素各自在稳定段的典型数量归一化）。眼睛闭合时两类都很少，返回 null。
+ */
+export function heartEyeWeight(buf: Buffer, eyes: number[][]): number | null {
+  const ed = Math.hypot(eyes[1]![0]! - eyes[0]![0]!, eyes[1]![1]! - eyes[0]![1]!);
+  let cy = 0, pk = 0;
+  for (const [ex, ey] of eyes) {
+    const r = 0.45 * ed;
+    for (let y = Math.max(0, Math.floor(ey! - r)); y < Math.min(720, Math.ceil(ey! + r)); y++)
+      for (let x = Math.max(0, Math.floor(ex! - r)); x < Math.min(1280, Math.ceil(ex! + r)); x++) {
+        const o = (y * 1280 + x) * 3;
+        const R = buf[o]!, G = buf[o + 1]!, B = buf[o + 2]!;
+        if (G - R > 45 && B - R > 55 && G > 0.6 * B && B > 110) cy++;
+        else if (R > 170 && B > 120 && G < R - 60 && B > G + 20) pk++;
+      }
+  }
+  // 归一化：爱心眼的粉色面积约为青色虹膜的 0.4 倍（s15 1470~1482 与 1448~1464 的典型值）
+  const c = cy * 0.4;
+  if (c + pk < 0.04 * ed * ed) return null;
+  return pk / (pk + c);
+}

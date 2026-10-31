@@ -19,7 +19,9 @@ try {
   // 拟合引擎不实现 frameHold：去掉保持段后比较（保持只改变「显示哪一帧」）
   const noHold = res.layers.map((l: any) => ({ ...l, frameHold: undefined }));
   await h.page.evaluate(([ls, uri, off]) => (window as any).__fit.setup(ls, uri, off), [noHold, MODEL_URI, calib.irisOffset] as const);
+  const isHeld = (f: number) => res.layers.some((l: any) => (l.frameHold ?? []).some((h: any) => f >= h.start && f < h.end && (f - h.start) % h.every !== 0));
   for (const f of frames) {
+    if (isHeld(f)) { console.log(`f=${f} 是某图层的保持帧（画面取自更早的帧），跳过`); continue; }
     const r = await h.page.evaluate(async ([f]) => {
       const scenePx = await window.__charaforge.renderFrame(f, { read: {} });
       const fitPx = (window as any).__fit.render(f, 1);

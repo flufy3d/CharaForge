@@ -23,23 +23,15 @@ export function installPageHelpers(): void {
   const WIDTH = 1280;
   const HEIGHT = 720;
   const FPS = 60;
-  // 绕过 runtime 的清屏色 bug（详见 render.ts 文件头）：Cubism 绘制遮罩时把 GL 清屏色改成白色而 Pixi 不知道，
-  // 之后 clear=true 的 pass（blur/color 滤镜、frameHold 缓存）在透明处输出白色。每次 pass 前把清屏色设回 0。
-  // 只影响 GL 状态、不改变任何算法；runtime 修复后这几行变成空操作。
-  if (!rt.compositor.__cfClearPatched) {
-    const comp = rt.compositor;
-    const orig = comp.pass.bind(comp);
-    comp.pass = (...a: unknown[]) => { comp.gl.clearColor(0, 0, 0, 0); return orig(...a); };
-    comp.__cfClearPatched = true;
-  }
 
-  interface Track { id: string; idx: number; post: boolean; values: number[] }
+  interface Track { id: string; idx: number; post: boolean; add: boolean; values: number[] }
   interface Layer {
     id: string; in: number; out: number; z: number; warmup: number; stabilize: boolean;
     handle: number; inst: any;
     tracks: Track[]; byId: Map<string, Track>;
     tf: { x: number[]; y: number[]; scale: number[]; rotation: number[] }; anchorX: number; anchorY: number;
     opacity: number[] | null; blur: number[] | null;
+    clip: { x: number[]; y: number[]; width: number[]; height: number[]; radius: number[]; feather: number } | null;
     color: { brightness: number; contrast: number; saturation: number; multiply: [number, number, number] } | null;
     states: Map<number, unknown>;
     /** 实例当前参数/顶点对应的（规范）帧；null = 不确定 */
@@ -54,6 +46,8 @@ export function installPageHelpers(): void {
     color?: Layer['color'];
     /** [帧, {参数: 值}]：写进逐帧参数轨 */
     set?: [number, Record<string, number>][];
+    /** 圆形 clip [cx, cy, r]（屏幕像素）；null = 不裁切（覆盖全画面的大矩形） */
+    clip?: number[] | null;
     /** 眼睛对齐：求值后按相似变换把我们的虹膜（网格质心 + 标定偏移）对齐到这两个屏幕点，覆盖 tf */
     alignEyes?: [[number, number], [number, number]];
   }
@@ -61,6 +55,7 @@ export function installPageHelpers(): void {
   const layers = new Map<string, Layer>();
   /** 拟合时临时隐藏的图层（尚未拟合的前景实例等），不影响导出 */
   let hidden = new Set<string>();
+  const useGpuDownsample = true;
   /** 虹膜网格顶点质心 → 青色质心的偏移（画布像素，参考姿态下标定），见 setup */
   let irisOffset: [[number, number], [number, number]] = [[0, 0], [0, 0]];
   const timing = { compose: 0, read: 0, loss: 0, n: 0, steps: 0 };
@@ -80,9 +75,9 @@ export function installPageHelpers(): void {
     const inst = L.inst;
     const i = idx(L, g);
     inst.resetPose();
-    for (const t of L.tracks) if (!t.post) inst.setParamByIndex(t.idx, t.values[i]!, 'set', 1);
+    for (const t of L.tracks) if (!t.post) inst.setParamByIndex(t.idx, t.values[i]!, t.add ? 'add' : 'set', 1);
     inst.stepPhysics(1 / FPS);
-    for (const t of L.tracks) if (t.post) inst.setParamByIndex(t.idx, t.values[i]!, 'set', 1);
+    for (const t of L.tracks) if (t.post) inst.setParamByIndex(t.idx, t.values[i]!, t.add ? 'add' : 'set', 1);
     if (final) inst.update();
     timing.steps++;
   }
@@ -92,7 +87,7 @@ export function installPageHelpers(): void {
     inst.resetPhysics();
     if (L.stabilize) {
       inst.resetPose();
-      for (const t of L.tracks) if (!t.post) inst.setParamByIndex(t.idx, t.values[0]!, 'set', 1);
+      for (const t of L.tracks) if (!t.post) inst.setParamByIndex(t.idx, t.values[0]!, t.add ? 'add' : 'set', 1);
       inst.stabilizePhysics();
     }
     L.states.clear();
@@ -136,6 +131,10 @@ export function installPageHelpers(): void {
     if (v.tf) { L.tf.x[i] = v.tf[0]; L.tf.y[i] = v.tf[1]; L.tf.scale[i] = v.tf[2]; L.tf.rotation[i] = v.tf[3]; }
     if (v.opacity !== undefined && L.opacity) L.opacity[i] = v.opacity;
     if (v.blur !== undefined && L.blur) L.blur[i] = v.blur;
+    if (v.clip !== undefined && L.clip) {
+      if (v.clip) { const [cx, cy, r] = v.clip as [number, number, number]; L.clip.x[i] = cx - r; L.clip.y[i] = cy - r; L.clip.width[i] = 2 * r; L.clip.height[i] = 2 * r; L.clip.radius[i] = r; }
+      else { L.clip.x[i] = -10000; L.clip.y[i] = -10000; L.clip.width[i] = 30000; L.clip.height[i] = 30000; L.clip.radius[i] = 0; }
+    }
     if (v.color && L.color) Object.assign(L.color, v.color);
     let first = Infinity;
     for (const [g, ps] of v.set ?? []) {
@@ -143,7 +142,7 @@ export function installPageHelpers(): void {
       const j = idx(L, g);
       for (const k in ps) {
         const t = L.byId.get(k);
-        if (!t) throw new Error(`图层 ${L.id} 没有参数轨 ${k}`);
+        if (!t) throw new Error(`图层 ${L.id} 没有参数轨 ${k}（postPhysics 轨用 post: 前缀）`);
         if (t.values[j] !== ps[k]) { t.values[j] = ps[k]!; first = Math.min(first, Math.max(g, L.in)); }
       }
     }
@@ -171,8 +170,11 @@ export function installPageHelpers(): void {
       const filters: unknown[] = [];
       if (L.color) filters.push({ type: 'color', ...L.color, offset: [0, 0, 0] });
       if (L.blur && L.blur[f - L.in]! > 0) filters.push({ type: 'blur', sigma: L.blur[f - L.in] });
+      const i = f - L.in;
+      const clip = L.clip ? { x: L.clip.x[i], y: L.clip.y[i], width: L.clip.width[i], height: L.clip.height[i], radius: L.clip.radius[i], feather: L.clip.feather } : null;
+      if (clip && !(clip.width! > 0 && clip.height! > 0)) continue;
       const src = comp.layerSource(L.inst, matrix(L, f), filters, true);
-      comp.outputLayer(src, { filters, clip: null, opacity, blendMode: 'normal' });
+      comp.outputLayer(src, { filters, clip, opacity, blendMode: 'normal' });
     }
   }
 
@@ -191,11 +193,10 @@ export function installPageHelpers(): void {
     return btoa(s);
   }
 
-  /**
-   * 整幅逐像素读回后按 k×k 盒式平均下采样（预乘 RGBA）。不用运行时的缩放读回：
-   * 它经过一次 Pixi pass，当前运行时里 pass 的输出在透明处是不透明白色（见汇报）。
-   */
+  /** 整幅逐像素读回后按 k×k 盒式平均下采样（预乘 RGBA） */
   function readScaled(scale: number) {
+    // runtime 的缩放读回（GPU 上做 k×k 区域平均，读回量是整幅的 1/k²）
+    if (useGpuDownsample) return rt.readPixels(undefined, scale) as { width: number; height: number; data: Uint8Array };
     const px = rt.readPixels(undefined, 1);
     const k = Math.round(1 / scale);
     if (k === 1) return px as { width: number; height: number; data: Uint8Array };
@@ -362,7 +363,55 @@ export function installPageHelpers(): void {
     return tot / 2;
   }
 
-  function lossOf(P: Uint8Array, W: number, H: number, scale: number, r: number, wcol: number, eyesList: [number, number][][], weye: number, wseg = 1) {
+  /**
+   * 梯度项（多尺度对齐用，对背景鲁棒）：在我们图层外接框（外扩 15%、扣排除区）内，
+   * 「我们的图层单独铺在中灰上」与「参考帧」的 Sobel 梯度幅值（盒式模糊半径 rb）做归一化互相关，项 = 1 − NCC。
+   * 我们的轮廓与内部线条要落在参考帧的边缘上；参考帧背景纹理与我们无关，只降低相关、不产生偏置。
+   */
+  function gradTerm(P: Uint8Array, W: number, H: number, ref: Float32Array, excl: Uint8Array, bx0: number, by0: number, bx1: number, by1: number, rb: number) {
+    const mw = Math.round((bx1 - bx0) * 0.15), mh = Math.round((by1 - by0) * 0.15);
+    const X0 = Math.max(1, bx0 - mw), X1 = Math.min(W - 2, bx1 + mw), Y0 = Math.max(1, by0 - mh), Y1 = Math.min(H - 2, by1 + mh);
+    const w2 = X1 - X0 + 1, h2 = Y1 - Y0 + 1;
+    if (w2 < 4 || h2 < 4) return 1;
+    const go = new Float32Array(W * H), gr = new Float32Array(W * H);
+    for (let y = Y0 - 1; y <= Y1 + 1; y++)
+      for (let x = X0 - 1; x <= X1 + 1; x++) {
+        const i = y * W + x;
+        const a = P[4 * i + 3]! / 255;
+        go[i] = 0.299 * P[4 * i]! + 0.587 * P[4 * i + 1]! + 0.114 * P[4 * i + 2]! + (1 - a) * 128;
+        gr[i] = 0.299 * ref[3 * i]! + 0.587 * ref[3 * i + 1]! + 0.114 * ref[3 * i + 2]!;
+      }
+    const mag = (g: Float32Array, x: number, y: number) => {
+      const i = y * W + x;
+      const gx = g[i - W + 1]! + 2 * g[i + 1]! + g[i + W + 1]! - g[i - W - 1]! - 2 * g[i - 1]! - g[i + W - 1]!;
+      const gy = g[i + W - 1]! + 2 * g[i + W]! + g[i + W + 1]! - g[i - W - 1]! - 2 * g[i - W]! - g[i - W + 1]!;
+      return Math.sqrt(gx * gx + gy * gy);
+    };
+    const So = new Float64Array((w2 + 1) * (h2 + 1)), Sr = new Float64Array((w2 + 1) * (h2 + 1));
+    for (let y = 0; y < h2; y++) {
+      let ao = 0, ar = 0;
+      for (let x = 0; x < w2; x++) {
+        ao += mag(go, X0 + x, Y0 + y); ar += mag(gr, X0 + x, Y0 + y);
+        const q = (y + 1) * (w2 + 1) + x + 1, up = y * (w2 + 1) + x + 1;
+        So[q] = So[up]! + ao; Sr[q] = Sr[up]! + ar;
+      }
+    }
+    let n = 0, so = 0, sr = 0, soo = 0, srr = 0, sor = 0;
+    for (let y = 0; y < h2; y += 2)
+      for (let x = 0; x < w2; x += 2) {
+        if (excl[(Y0 + y) * W + X0 + x]) continue;
+        const ax = Math.max(0, x - rb), bx = Math.min(w2, x + rb + 1), ay = Math.max(0, y - rb), by = Math.min(h2, y + rb + 1);
+        const N = (bx - ax) * (by - ay);
+        const o = (So[by * (w2 + 1) + bx]! - So[ay * (w2 + 1) + bx]! - So[by * (w2 + 1) + ax]! + So[ay * (w2 + 1) + ax]!) / N;
+        const r = (Sr[by * (w2 + 1) + bx]! - Sr[ay * (w2 + 1) + bx]! - Sr[by * (w2 + 1) + ax]! + Sr[ay * (w2 + 1) + ax]!) / N;
+        n++; so += o; sr += r; soo += o * o; srr += r * r; sor += o * r;
+      }
+    if (n < 4) return 1;
+    const cov = sor / n - (so / n) * (sr / n), vo = soo / n - (so / n) ** 2, vr = srr / n - (sr / n) ** 2;
+    return 1 - cov / Math.sqrt(Math.max(vo * vr, 1e-12));
+  }
+
+  function lossOf(P: Uint8Array, W: number, H: number, scale: number, r: number, wcol: number, eyesList: [number, number][][], weye: number, wseg = 1, wgrad = 0) {
     const ref = refAt(scale);
     const excl = exclAt(scale);
     const n = W * H;
@@ -385,7 +434,7 @@ export function installPageHelpers(): void {
           col += Math.sqrt(dr * dr + dg * dg + db * db + 4) - 2;
         }
       }
-    if (cnt === 0) return { loss: 1 + wcol + 36 * weye + wseg, area: 0, ssim: 0, eye: -1, seg: 1 };
+    if (cnt === 0) return { loss: 1 + wcol + 36 * weye + wseg + wgrad, area: 0, ssim: 0, eye: -1, seg: 1, grad: 1 };
     const X0 = Math.max(0, x0 - r), X1 = Math.min(W - 1, x1 + r), Y0 = Math.max(0, y0 - r), Y1 = Math.min(H - 1, y1 + r);
     const w2 = X1 - X0 + 2, h2 = Y1 - Y0 + 2;
     const S = [new Float64Array(w2 * h2), new Float64Array(w2 * h2), new Float64Array(w2 * h2), new Float64Array(w2 * h2), new Float64Array(w2 * h2)];
@@ -439,7 +488,8 @@ export function installPageHelpers(): void {
       if (m2) eyeTerm = (weye * acc) / m2;
     }
     const seg = wseg > 0 ? segTerm(P, W, H, ref, excl, x0, y0, x1, y1, Math.max(2, Math.round(8 * scale))) : 0;
-    return { loss: 1 - ssim + (wcol * col) / cnt / 255 + eyeTerm + wseg * seg, area: cnt, ssim, eye: eyeErr, seg };
+    const grad = wgrad > 0 ? gradTerm(P, W, H, ref, excl, x0, y0, x1, y1, Math.max(1, Math.round(4 * scale))) : 0;
+    return { loss: 1 - ssim + (wcol * col) / cnt / 255 + eyeTerm + wseg * seg + wgrad * grad, area: cnt, ssim, eye: eyeErr, seg, grad };
   }
 
   // ---------------- 接口 ----------------
@@ -456,9 +506,10 @@ export function installPageHelpers(): void {
         const n = l.out - l.in;
         const tracks: Track[] = (l.params ?? []).map((p: any) => {
           if (p.curve.keys && p.curve.keys.length > 1) throw new Error(`拟合场景里的关键帧轨必须是常量：${p.id}`);
-          if (p.mode && p.mode !== 'set') throw new Error(`拟合场景只支持 set 轨：${p.id}`);
+          if (p.mode && p.mode !== 'set' && p.mode !== 'add') throw new Error(`拟合场景只支持 set/add 轨：${p.id}`);
+          if (p.weight !== undefined && p.weight !== 1) throw new Error(`拟合场景不支持 weight：${p.id}`);
           const values: number[] = p.curve.baked ? p.curve.baked.values.slice() : Array(n).fill(p.curve.keys[0].v);
-          return { id: p.id, idx: inst.paramIndexOf(p.id), post: p.stage === 'postPhysics', values };
+          return { id: p.id, idx: inst.paramIndexOf(p.id), post: p.stage === 'postPhysics', add: p.mode === 'add', values };
         });
         for (const t of tracks) if (t.idx < 0) throw new Error(`模型没有参数 ${t.id}`);
         const blurF = (l.filters ?? []).find((x: any) => x.type === 'blur');
@@ -473,11 +524,12 @@ export function installPageHelpers(): void {
         };
         layers.set(l.id, {
           id: l.id, in: l.in, out: l.out, z: l.z ?? 0, warmup: l.physics?.warmup ?? 0, stabilize: !!l.physics?.stabilize,
-          handle, inst, tracks, byId: new Map(tracks.map((t) => [t.id, t])),
+          handle, inst, tracks, byId: new Map(tracks.map((t) => [t.post ? `post:${t.id}` : t.id, t])),
           tf: { x: l.transform.x.baked.values.slice(), y: l.transform.y.baked.values.slice(), scale: l.transform.scale.baked.values.slice(), rotation: l.transform.rotation.baked.values.slice() },
           anchorX: l.transform.anchorX, anchorY: l.transform.anchorY,
           opacity: l.opacity?.baked ? l.opacity.baked.values.slice() : null,
-          blur: blurF ? blurF.sigma.baked.values.slice() : null,
+          blur: blurF ? (blurF.sigma.baked ? blurF.sigma.baked.values.slice() : Array(n).fill(blurF.sigma)) : null,
+          clip: l.clip ? { x: l.clip.x.baked.values.slice(), y: l.clip.y.baked.values.slice(), width: l.clip.width.baked.values.slice(), height: l.clip.height.baked.values.slice(), radius: l.clip.radius.baked.values.slice(), feather: l.clip.feather ?? 0 } : null,
           color: colorF ? { brightness: colorF.brightness, contrast: colorF.contrast, saturation: colorF.saturation, multiply: colorF.multiply.slice() } : null,
           states: new Map(), ready: null, needsInit: true,
           iris: [find('ArtMesh236'), find('ArtMesh134')],
@@ -497,7 +549,7 @@ export function installPageHelpers(): void {
      * 批量评估：每个候选 {图层ID: 值}；写入后从受影响的最早帧重新推进到 f，合成、读回、算损失。
      * 状态缓存只保存规范状态（被改动的帧之后的缓存会失效），候选之间互不影响。eyesOf：算虹膜项的图层。
      */
-    evalBatch(f: number, cands: Record<string, LayerVals>[], opt: { scale: number; r: number; wcol: number; weye: number; wseg?: number; eyesOf?: string[] }) {
+    evalBatch(f: number, cands: Record<string, LayerVals>[], opt: { scale: number; r: number; wcol: number; weye: number; wseg?: number; wgrad?: number; eyesOf?: string[] }) {
       const out: { loss: number; area: number; ssim: number; eye: number; seg: number; tf?: number[] }[] = [];
       for (const c of cands) {
         let tfOut: number[] | undefined;
@@ -517,7 +569,7 @@ export function installPageHelpers(): void {
           .map((id) => layers.get(id))
           .filter((L): L is Layer => !!L && f >= L.in && f < L.out && L.ready === f)
           .map((L) => irisScreen(L, f));
-        out.push({ ...lossOf(px.data, px.width, px.height, opt.scale, opt.r, opt.wcol, eyes, opt.weye, opt.wseg ?? 1), tf: tfOut });
+        out.push({ ...lossOf(px.data, px.width, px.height, opt.scale, opt.r, opt.wcol, eyes, opt.weye, opt.wseg ?? 1, opt.wgrad ?? 0), tf: tfOut });
         timing.compose += t2 - t1; timing.read += t3 - t2; timing.loss += performance.now() - t3; timing.n++;
       }
       return out;
@@ -536,7 +588,8 @@ export function installPageHelpers(): void {
       const L = layers.get(lid)!;
       const arrs = ids
         ? ids.map((id) => L.byId.get(id)!.values)
-        : [L.tf.x, L.tf.y, L.tf.scale, L.tf.rotation, ...(L.opacity ? [L.opacity] : []), ...(L.blur ? [L.blur] : []), ...L.tracks.map((t) => t.values)];
+        : [L.tf.x, L.tf.y, L.tf.scale, L.tf.rotation, ...(L.opacity ? [L.opacity] : []), ...(L.blur ? [L.blur] : []),
+           ...(L.clip ? [L.clip.x, L.clip.y, L.clip.width, L.clip.height, L.clip.radius] : []), ...L.tracks.map((t) => t.values)];
       a = Math.max(a, L.in); b = Math.min(b, L.out);
       if (src < L.in || src >= L.out) return;
       for (const arr of arrs) for (let g = a; g < b; g++) arr[g - L.in] = arr[src - L.in]!;
@@ -545,7 +598,7 @@ export function installPageHelpers(): void {
     /** 取回图层的全部逐帧数组（写 scene.json 用） */
     dump(lid: string) {
       const L = layers.get(lid)!;
-      return { tf: L.tf, opacity: L.opacity, blur: L.blur, color: L.color, params: Object.fromEntries(L.tracks.map((t) => [t.id, t.values])) };
+      return { tf: L.tf, opacity: L.opacity, blur: L.blur, clip: L.clip, color: L.color, params: Object.fromEntries(L.tracks.map((t) => [t.post ? `post:${t.id}` : t.id, t.values])) };
     },
     /** 合成帧 f 并读回 RGBA（预览用，base64） */
     render(f: number, scale: number) {

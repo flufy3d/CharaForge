@@ -8,13 +8,17 @@ import { closeSync, existsSync, mkdirSync, openSync, readSync, renameSync, statS
 import { join } from 'node:path';
 import { REPO } from './paths.ts';
 
-export const VIDEO = join(REPO, 'assets/video/DeepSeek-chan.mp4');
+/** 参考视频；上限实验用 FIT_VIDEO 换成合成参考，FIT_VIDEO_OFFSET = 该视频第 0 帧对应的场景帧号 */
+export const VIDEO = process.env.FIT_VIDEO ? process.env.FIT_VIDEO : join(REPO, 'assets/video/DeepSeek-chan.mp4');
+const OFFSET = Number(process.env.FIT_VIDEO_OFFSET ?? 0);
 export const W = 1280;
 export const H = 720;
 export const FRAME_BYTES = W * H * 3;
 
 /** 与 metric.py 的 FFMPEG_VF 保持逐字一致 */
 export function ffmpegArgs(a: number, b: number): string[] {
+  a -= OFFSET;
+  b -= OFFSET;
   const vf = `select='between(n\\,${a}\\,${b - 1})',scale=in_color_matrix=bt709:in_range=tv:out_range=pc:flags=accurate_rnd+full_chroma_int,format=rgb24`;
   return ['-v', 'error', '-nostdin', '-i', VIDEO, '-vf', vf, '-fps_mode', 'passthrough', '-f', 'rawvideo', '-'];
 }
@@ -28,7 +32,7 @@ export class RefFrames {
     this.b = b;
     const dir = join(REPO, '.data/fit/ref');
     mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${a}_${b}.rgb`);
+    const file = join(dir, `${process.env.FIT_VIDEO ? 'synth_' : ''}${a}_${b}.rgb`);
     const want = (b - a) * FRAME_BYTES;
     if (!existsSync(file) || statSync(file).size !== want) {
       const tmp = `${file}.tmp`;

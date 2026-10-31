@@ -9,13 +9,13 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { openHarness } from '../../../apps/player/scripts/harness-node.ts';
 import { assembleScene } from './assemble.ts';
-import { renderPatched } from './render.ts';
-import { fitShot, type ModelCalib } from './fitshot.ts';
-import { installPageHelpers } from './page.ts';
+import { fitShot, redetectSwitch, type ModelCalib } from './fitshot.ts';
+import { RefFrames } from './refvideo.ts';
+import { readFileSync as rf } from 'node:fs';
+import { Pool } from './pool.ts';
 import { encodePng } from '../../../apps/player/scripts/png.ts';
-import { FIT_DIR, MODEL_URI } from './paths.ts';
+import { FIT_DIR, FIT_TAG, MODEL_URI } from './paths.ts';
 import { planFor } from './plans.ts';
 import { loadShots } from './shotsutil.ts';
 
@@ -92,15 +92,15 @@ async function main() {
   const cmd = argv[0];
   const { values } = parseArgs({
     args: argv.slice(1),
-    options: { shot: { type: 'string' }, until: { type: 'string' }, start: { type: 'string' }, only: { type: 'string' }, scene: { type: 'string' }, frames: { type: 'string' }, preview: { type: 'string' }, out: { type: 'string' } },
+    options: { shot: { type: 'string' }, until: { type: 'string' }, start: { type: 'string' }, workers: { type: 'string' }, effort: { type: 'string' }, hair: { type: 'boolean' }, only: { type: 'string' }, scene: { type: 'string' }, frames: { type: 'string' }, preview: { type: 'string' }, out: { type: 'string' } },
   });
   if (cmd === 'assemble') {
     assembleScene(values.out);
     return;
   }
-  if (cmd === 'render') {
-    // 绕过 runtime 清屏色 bug 的渲染（见 render.ts 文件头）；参数同 pnpm render
-    await renderPatched(values.scene ?? 'scenes/deepseek-chan/scene.json', values.frames!, values.out!);
+  if (cmd === 'switches' && values.shot) {
+    // 对已有 result.json 重新做开关的画面检测（用拟合结果的虹膜位置），改写开关轨
+    await redetectSwitches(values.shot);
     return;
   }
   if (cmd !== 'fit' || !values.shot) {
@@ -108,24 +108,24 @@ async function main() {
     process.exit(2);
   }
   const shots = loadShots();
-  const h = await openHarness();
+  const pool = await Pool.open(values.workers ? Number(values.workers) : 4);
   try {
-    console.log(`[fit] GPU: ${h.info.renderer}（msaa ${h.info.msaa}）`);
-    await h.page.evaluate(installPageHelpers);
-    const calib = await calibrate(h.page);
+    console.log(`[fit] GPU: ${pool.renderer}，${pool.size} 个页面`);
+    const calib = await calibrate(pool.pages[0]!);
     console.log(`[fit] 模型眼睛（画布像素）：${JSON.stringify(calib.eyes)}`);
     for (const id of values.shot.split(',')) {
       const shot = shots.shots.find((s) => s.id === id);
       if (!shot) throw new Error(`没有镜头 ${id}`);
-      const { plans, options } = planFor(shot);
-      const logFile = join(FIT_DIR, id, 'fit.log');
-      mkdirSync(join(FIT_DIR, id), { recursive: true });
+      const { plans, options } = planFor(shot, { hairBake: !!values.hair });
+      const logFile = join(FIT_DIR, id + FIT_TAG, 'fit.log');
+      mkdirSync(join(FIT_DIR, id + FIT_TAG), { recursive: true });
       writeFileSync(logFile, '');
-      await fitShot(h.page, shot, plans, calib, {
+      await fitShot(pool, shot, plans, calib, {
         ...options,
         until: values.until ? Number(values.until) : undefined,
         start: values.start ? Number(values.start) : undefined,
         only: values.only ? values.only.split(',') : undefined,
+        effort: values.effort ? Number(values.effort) : undefined,
         previewEvery: values.preview ? Number(values.preview) : options.previewEvery,
         log: (s) => {
           console.log(s);
@@ -134,7 +134,38 @@ async function main() {
       });
     }
   } finally {
-    await h.close();
+    await pool.close();
+  }
+}
+
+async function redetectSwitches(shotId: string) {
+  const shot = loadShots().shots.find((s) => s.id === shotId)!;
+  const { plans } = planFor(shot);
+  const file = join(FIT_DIR, shotId + FIT_TAG, 'result.json');
+  const res = JSON.parse(rf(file, 'utf8'));
+  const calib = JSON.parse(rf(join(FIT_DIR, 'calib.json'), 'utf8'));
+  const pool = await Pool.open(1);
+  const ref = new RefFrames(shot.start, shot.end);
+  try {
+    await pool.all(([ls, uri, off]) => (window as any).__fit.setup(ls, uri, off), [res.layers, MODEL_URI, calib.irisOffset] as const);
+    for (const p of plans)
+      for (const sw of p.switches) {
+        if (!sw.detect) continue;
+        const r = await redetectSwitch(pool, ref, p, sw);
+        const layer = res.layers.find((l: any) => l.id === p.id);
+        const t = layer.params.find((x: any) => x.id === sw.param);
+        const vals = t.curve.baked.values as number[];
+        for (let f = p.in; f < p.out; f++) {
+          const u = f < r.start ? 0 : r.fade <= 0 || f >= r.start + r.fade ? 1 : 0.5 - 0.5 * Math.cos((Math.PI * (f - r.start)) / r.fade);
+          vals[f - p.in] = Math.round((sw.from + (sw.to - sw.from) * u) * 1e6) / 1e6;
+        }
+        res.switches = { ...(res.switches ?? {}), [`${p.id}:${sw.param}`]: r };
+        console.log(`[switches] ${p.id} ${sw.param}: 起点 ${r.start}、fade ${r.fade}（rms ${r.rms?.toFixed(3)}，${Object.keys(r.samples).length} 个样本）`);
+      }
+    writeFileSync(file, JSON.stringify(res));
+  } finally {
+    ref.close();
+    await pool.close();
   }
 }
 

@@ -11,14 +11,18 @@
       --out .data/fit/review
 
 定义（与 pipeline.md 逐条对应）：
-  1. M_f = dilate(α_f > 0.1, 半径 3px 圆盘) − 排除区（shots 里覆盖帧 f 的 exclusions 矩形之并，关键帧线性插值）；
-  2. 渲染结果按 alpha 合成到参考帧上；RGB 三通道分别算 SSIM 图（skimage.structural_similarity，
-     gaussian_weights=True, sigma=1.5, use_sample_covariance=False, data_range=255, K1=0.01, K2=0.03），三通道平均；
-  3. 帧 SSIM = SSIM 图在 M_f 上的均值；|M_f| < 1% 画面记为「无角色」，不参与统计；
-  4. 覆盖率 = |M_f ∩ bbox| / |bbox − 排除区|，bbox = shots 里该帧各实例 bbox 之并（线性插值，null 表示不可见）；
-  5. 镜头指标：帧 SSIM 均值、最小值、5% 分位数、≥0.9 的帧比例；全片 = 所有有效帧的平均。
+  1. M_f = dilate(α_f > 0.1, 半径 3px 圆盘) − 排除区（全分辨率；shots 里覆盖帧 f 的 exclusions 矩形之并，关键帧线性插值）；
+  2. 渲染结果按 alpha 合成到参考帧上得到 C_f，参考帧 R_f；
+  3. 主指标 SSIM@360：C_f、R_f 用 cv2.resize(INTER_AREA) 降到 640×360，遮罩同样降采样后取 > 0.5；
+     RGB 三通道分别算 SSIM 图（skimage.structural_similarity，gaussian_weights=True, sigma=1.5,
+     use_sample_covariance=False, data_range=255, K1=0.01, K2=0.03），三通道平均，再在降采样遮罩上取平均；
+  4. 辅助指标 SSIM@720：同上但不降采样；
+  5. |M_f|（全分辨率）< 1% 画面记为「无角色」，不参与统计；
+  6. 覆盖率 = |M_f ∩ bbox| / |bbox − 排除区|，bbox = shots 里该帧各实例 bbox 之并（线性插值，null 表示不可见）；
+  7. 镜头指标：两种 SSIM 各自的均值、最小值、5% 分位数、≥0.9 的帧比例；全片 = 所有有效帧的平均。
 
 参考帧用 ffmpeg 解码，颜色转换参数与 tools/fit/src/refvideo.ts 逐字一致。
+--video / --video-offset 可换成别的参考视频（上限实验的合成参考）：视频第 0 帧对应场景帧 offset。
 """
 
 from __future__ import annotations
@@ -50,8 +54,8 @@ def ffmpeg_vf(a: int, b: int) -> str:
     )
 
 
-def decode_ref(a: int, b: int) -> np.ndarray:
-    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", str(VIDEO), "-vf", ffmpeg_vf(a, b),
+def decode_ref(a: int, b: int, video: Path = VIDEO, offset: int = 0) -> np.ndarray:
+    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", str(video), "-vf", ffmpeg_vf(a - offset, b - offset),
            "-fps_mode", "passthrough", "-f", "rawvideo", "-"]
     raw = subprocess.run(cmd, capture_output=True, check=True).stdout
     fr = np.frombuffer(raw, np.uint8)
@@ -126,8 +130,21 @@ def load_render(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return im[..., :3], im[..., 3] / 255.0
 
 
+def ssim_map(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """RGB 三通道 SSIM 图的平均（float64 输入，数据范围 0–255）"""
+    m = np.zeros(x.shape[:2], np.float64)
+    for c in range(3):
+        _, s = structural_similarity(
+            x[..., c], y[..., c], gaussian_weights=True, sigma=1.5,
+            use_sample_covariance=False, data_range=255, K1=0.01, K2=0.03, full=True,
+        )
+        m += s
+    return m / 3.0
+
+
 def frame_metric(rgb: np.ndarray, alpha: np.ndarray, ref: np.ndarray, shot: dict, f: int, want_maps=False):
-    comp = rgb * alpha[..., None] + ref.astype(np.float64) * (1.0 - alpha[..., None])
+    refd = ref.astype(np.float64)
+    comp = rgb * alpha[..., None] + refd * (1.0 - alpha[..., None])
     excl = exclusion_mask(shot, f)
     mask = cv2.dilate((alpha > 0.1).astype(np.uint8), DISK) > 0
     mask &= ~excl
@@ -137,21 +154,20 @@ def frame_metric(rgb: np.ndarray, alpha: np.ndarray, ref: np.ndarray, shot: dict
     denom = int((bb & ~excl).sum())
     out["coverage"] = (float((mask & bb).sum()) / denom) if denom > 0 else None
     if area < MIN_MASK:
-        out["ssim"] = None
-        if want_maps:
-            return out, comp, None, mask
-        return out
-    smap = np.zeros((H, W), np.float64)
-    for c in range(3):
-        _, s = structural_similarity(
-            comp[..., c], ref[..., c].astype(np.float64), gaussian_weights=True, sigma=1.5,
-            use_sample_covariance=False, data_range=255, K1=0.01, K2=0.03, full=True,
-        )
-        smap += s
-    smap /= 3.0
-    out["ssim"] = float(smap[mask].mean())
+        out["ssim360"] = out["ssim720"] = None
+        return (out, comp, None, mask) if want_maps else out
+    # 主指标 SSIM@360
+    c360 = cv2.resize(comp, (640, 360), interpolation=cv2.INTER_AREA)
+    r360 = cv2.resize(refd, (640, 360), interpolation=cv2.INTER_AREA)
+    m360 = cv2.resize(mask.astype(np.float64), (640, 360), interpolation=cv2.INTER_AREA) > 0.5
+    s360 = ssim_map(c360, r360)
+    out["ssim360"] = float(s360[m360].mean()) if m360.any() else None
+    # 辅助指标 SSIM@720
+    s720 = ssim_map(comp, refd)
+    out["ssim720"] = float(s720[mask].mean())
     if want_maps:
-        return out, comp, smap, mask
+        # 热力图用 SSIM@360 的图（最近邻放大回全分辨率）
+        return out, comp, cv2.resize(s360, (W, H), interpolation=cv2.INTER_NEAREST), mask
     return out
 
 
@@ -164,21 +180,26 @@ def shot_frames(shot: dict, args) -> range:
 
 
 def summarize(rows: list[dict]) -> dict:
-    vals = np.array([r["ssim"] for r in rows if r["ssim"] is not None], dtype=np.float64)
-    cov = np.array([r["coverage"] for r in rows if r["ssim"] is not None and r["coverage"] is not None])
-    if vals.size == 0:
-        return {"frames": len(rows), "valid": 0}
-    return {
-        "frames": len(rows),
-        "valid": int(vals.size),
-        "mean": float(vals.mean()),
-        "min": float(vals.min()),
-        "p5": float(np.percentile(vals, 5)),
-        "fracGE0.9": float((vals >= 0.9).mean()),
-        "coverageMean": float(cov.mean()) if cov.size else None,
-        "coverageMin": float(cov.min()) if cov.size else None,
-        "worstFrame": int(rows[int(np.argmin([r["ssim"] if r["ssim"] is not None else 9 for r in rows]))]["frame"]),
-    }
+    out: dict = {"frames": len(rows)}
+    for key in ("ssim360", "ssim720"):
+        vals = np.array([r[key] for r in rows if r[key] is not None], dtype=np.float64)
+        if vals.size == 0:
+            out[key] = {"valid": 0}
+            continue
+        valid = [r for r in rows if r[key] is not None]
+        out[key] = {
+            "valid": int(vals.size),
+            "mean": float(vals.mean()),
+            "min": float(vals.min()),
+            "p5": float(np.percentile(vals, 5)),
+            "fracGE0.9": float((vals >= 0.9).mean()),
+            "worstFrame": int(valid[int(np.argmin(vals))]["frame"]),
+        }
+    cov = np.array([r["coverage"] for r in rows if r["ssim360"] is not None and r["coverage"] is not None])
+    out["coverageMean"] = float(cov.mean()) if cov.size else None
+    out["coverageMin"] = float(cov.min()) if cov.size else None
+    out["framesWithBboxButNoMask"] = int(sum(1 for r in rows if r["ssim360"] is None and r["coverage"] is not None))
+    return out
 
 
 def render_path(args, f: int) -> Path:
@@ -192,7 +213,7 @@ def cmd_score(args) -> None:
     for sid in args.shots.split(","):
         shot = shots[sid]
         fr = shot_frames(shot, args)
-        ref = decode_ref(fr.start, fr.stop)
+        ref = decode_ref(fr.start, fr.stop, Path(args.video), args.video_offset)
         rows = []
         for f in fr:
             p = render_path(args, f)
@@ -202,10 +223,11 @@ def cmd_score(args) -> None:
             rows.append(frame_metric(rgb, alpha, ref[f - fr.start], shot, f))
         summ = summarize(rows)
         report["shots"][sid] = {"summary": summ, "perFrame": rows}
-        all_vals += [r["ssim"] for r in rows if r["ssim"] is not None]
+        all_vals += [(r["ssim360"], r["ssim720"]) for r in rows if r["ssim360"] is not None]
         print(f"{sid}: {json.dumps(summ, ensure_ascii=False)}")
     if all_vals:
-        report["overall"] = {"valid": len(all_vals), "mean": float(np.mean(all_vals))}
+        a = np.array(all_vals)
+        report["overall"] = {"valid": len(all_vals), "ssim360": float(a[:, 0].mean()), "ssim720": float(a[:, 1].mean())}
         print(f"overall: {json.dumps(report['overall'])}")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -243,9 +265,10 @@ def quad(ref: np.ndarray, comp: np.ndarray, smap, mask, excl, info: dict, half=T
     top = np.concatenate(panels[:2], 1)
     bot = np.concatenate(panels[2:], 1)
     img = np.ascontiguousarray(np.concatenate([top, bot], 0))
-    s = info.get("ssim")
-    txt = f"f={info['frame']}  SSIM={s:.3f}" if s is not None else f"f={info['frame']}  SSIM=n/a (mask<1%)"
-    label(img, txt, 1.0 if half else 1.6)
+    s = info.get("ssim360")
+    txt = (f"f={info['frame']}  SSIM@360={s:.3f}  @720={info['ssim720']:.3f}" if s is not None
+           else f"f={info['frame']}  SSIM=n/a (mask<1%)")
+    label(img, txt, 0.8 if half else 1.3)
     return img
 
 
@@ -256,7 +279,7 @@ def cmd_review(args) -> None:
     for sid in args.shots.split(","):
         shot = shots[sid]
         fr = shot_frames(shot, args)
-        ref = decode_ref(fr.start, fr.stop)
+        ref = decode_ref(fr.start, fr.stop, Path(args.video), args.video_offset)
         video = out_dir / f"{sid}.mp4"
         enc = subprocess.Popen(
             ["ffmpeg", "-v", "error", "-y", "-nostdin",
@@ -276,10 +299,10 @@ def cmd_review(args) -> None:
         if enc.wait() != 0:
             raise RuntimeError("ffmpeg 编码失败")
         # 关键帧：最差、中位、最好（有效帧中），全分辨率四宫格
-        valid = [r for r in rows if r["ssim"] is not None]
+        valid = [r for r in rows if r["ssim360"] is not None]
         picks = []
         if valid:
-            srt = sorted(valid, key=lambda r: r["ssim"])
+            srt = sorted(valid, key=lambda r: r["ssim360"])
             picks = [("worst", srt[0]), ("median", srt[len(srt) // 2]), ("best", srt[-1])]
         for tag, r in picks:
             f = r["frame"]
@@ -287,7 +310,7 @@ def cmd_review(args) -> None:
             info, comp, smap, mask = frame_metric(rgb, alpha, ref[f - fr.start], shot, f, want_maps=True)
             img = quad(ref[f - fr.start], comp, smap, mask, exclusion_mask(shot, f), info, half=False)
             Image.fromarray(img).save(out_dir / f"{sid}_{tag}_{f}.png")
-        print(f"{sid}: {video}  关键帧 {[(t, r['frame'], round(r['ssim'], 4)) for t, r in picks]}")
+        print(f"{sid}: {video}  关键帧 {[(t, r['frame'], round(r['ssim360'], 4)) for t, r in picks]}")
 
 
 def main(argv=None) -> None:
@@ -299,6 +322,8 @@ def main(argv=None) -> None:
         p.add_argument("--shots", required=True, help="镜头 ID，逗号分隔")
         p.add_argument("--frames", help="只算这一段（含两端），如 3690-3721")
         p.add_argument("--out", help="score：报告 JSON 路径；review：输出目录")
+        p.add_argument("--video", default=str(VIDEO), help="参考视频（缺省为原 PV）")
+        p.add_argument("--video-offset", type=int, default=0, help="参考视频第 0 帧对应的场景帧号")
     args = ap.parse_args(argv)
     if args.cmd == "score":
         cmd_score(args)

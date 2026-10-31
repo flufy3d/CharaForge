@@ -6,7 +6,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseScene } from '../../../packages/scene/src/index.ts';
-import { FIT_DIR, MODEL_URI, REPO } from './paths.ts';
+import { FIT_DIR, FIT_TAG, MODEL_URI, REPO } from './paths.ts';
 import { loadShots } from './shotsutil.ts';
 
 export const MODEL_CREDITS =
@@ -19,7 +19,7 @@ export function assembleScene(out?: string): void {
   const markers: unknown[] = [];
   const fitted: Record<string, unknown> = {};
   for (const shot of shots.shots) {
-    const file = join(FIT_DIR, shot.id, 'result.json');
+    const file = join(FIT_DIR, shot.id + FIT_TAG, 'result.json');
     if (!existsSync(file)) continue;
     const r = JSON.parse(readFileSync(file, 'utf8'));
     layers.push(...r.layers);
@@ -31,7 +31,7 @@ export function assembleScene(out?: string): void {
     format: 'charaforge.scene',
     version: 1,
     meta: {
-      title: 'DeepSeek-chan PV 复刻（打样：s15 / s24 / s43）',
+      title: 'DeepSeek-chan PV 复刻（打样第二轮：s15 / s24 / s43）',
       description: '由 tools/fit 从参考视频逐帧反推；只包含已拟合镜头的角色图层，其余时间为空。',
       credits: [MODEL_CREDITS],
       provenance: { source: 'fit', tool: '@charaforge/fit', detail: { shots: fitted, reference: shots.video.uri, sha256: shots.video.sha256 } },
