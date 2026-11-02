@@ -6,7 +6,7 @@
  *   keyEvery  图层变换关键帧间隔（帧）；小间隔 ≈ 模型随头部在画面上移动（ModelPositionMovement）
  *   consts    镜头常量（前倾、体型）作为连续未知量进 GN（--fixed 给的是初值）
  *   clamp     GN 步长逐分量截断（缺省整步等比缩小）
- *   reg       变换初值粗配准（逐关键帧、低分辨率梯度 NCC 的多起点 CMA）
+ *   reg       变换初值粗配准（缺省按图层规划，目前只有 s15 开；true/false 强制）：逐关键帧多尺度模板匹配（tools/fit/reg.py）
  *   anneal    鲁棒核（Cauchy）尺度退火的起点（px），每次 GN ×0.85
  *   perframe  逐帧精修迭代数（缺省 12；0 关闭）：每个节点帧放开全部可见参数（postPhysics add）与变换偏移，光流 GN，节点间插值后导出
  *   upper     诊断：拟合结束后每个节点帧独立放开全部可见参数与变换，做 N 次光流 GN，测表达能力上限

@@ -92,5 +92,7 @@ export function planS15v3(shot: Shot): { plans: LayerPlan[]; order: string[] } {
     in: 1352, clipRange: [1352, 1400],
     switches: [{ param: 'key4', from: 0, to: 1, window: [1400, 1431], est: 1400, fade: 30 }],
   });
+  // s15 的 shots 眼睛轨迹是人工锚点间的线性插值（尺度可差约 2 倍）：变换初值先做粗配准（traj2 的 reg）
+  for (const q of [left, chibi, center]) (q as LayerPlan & { reg?: boolean }).reg = true;
   return { plans: [left, chibi, center], order: ['s15.left', 's15.chibi', 's15.center'] };
 }

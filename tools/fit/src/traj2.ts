@@ -571,36 +571,42 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     return r;
   };
 
-  // ---- (0) MODELX.reg：变换初值的粗配准（shots 的眼睛轨迹多为人工锚点插值，s15 的尺度可差 2 倍，光流追不回来）----
-  //   逐变换关键帧：中性姿态下对 (dx, dy, dls) 做 CMA，损失 = 低分辨率（1/8）的梯度 NCC + 软类别 + 颜色；只接受明显更好的结果
-  if (MODELX.reg) {
+  // ---- (0) 变换初值的粗配准（图层规划 reg: true 时开启，目前只有 s15；FIT_MODEL='{"reg":true|false}' 强制）----
+  //   s24 实测有害（0.687 → 0.524：快速运动 + 划过特效的前几个关键帧给出错误尺度），s43 小幅有益（27 → 28/30 帧 ≥ 0.7）。
+  //   shots 的眼睛轨迹多为人工锚点插值（s15 的尺度可差 2 倍），光流追不回来。逐变换关键帧：只渲染本图层（中性姿态），
+  //   tools/fit/reg.py 做多尺度模板匹配（梯度幅值的掩码 NCC，与掩码面积无关），相关明显更高才采纳。
+  if ((MODELX.reg ?? (p as LayerPlan & { reg?: boolean }).reg) === true) {
     const t = Date.now();
     await setupPages();
+    const others = opts.others ? (opts.others() as any[]).map((l) => l.id).filter((id) => id !== p.id) : [];
+    await pool.all((h) => (window as any).__fit.setHidden(h), [...(opts.hidden ?? []), ...others]);
+    const n = pool.size;
+    const regEyes = new Map<number, [number, number][]>();
+    await Promise.all(pool.pages.map(async (pg, k) => {
+      for (const f of keys.filter((_, i) => i % n === k)) {
+        const img = (await pg.evaluate((f) => (window as any).__fit.render(f, 1), f)) as { data: string };
+        writeFileSync(join(work, `reg_${f}.rgba`), Buffer.from(img.data, 'base64'));
+        regEyes.set(f, (await pg.evaluate(([lid, f]) => (window as any).__fit.irisScreen(lid, f), [p.id, f] as const)) as [number, number][]);
+      }
+    }));
+    writeFileSync(join(work, 'reg.json'), JSON.stringify({
+      search: 200, logScale: 0.8,
+      frames: keys.map((f, k) => ({ frame: f, ours: join(work, `reg_${f}.rgba`), ref: ref.file, refIndex: f - shot.start, excl: exclusionsAt(shot, f), anchor: regEyes.get(f) ? [(regEyes.get(f)![0]![0] + regEyes.get(f)![1]![0]) / 2, (regEyes.get(f)![0]![1] + regEyes.get(f)![1]![1]) / 2] : [st.tf[k]!.x, st.tf[k]!.y],
+        eyeDist: regEyes.get(f) ? Math.hypot(regEyes.get(f)![1]![0] - regEyes.get(f)![0]![0], regEyes.get(f)![1]![1] - regEyes.get(f)![0]![1]) : mdx * Math.exp(st.tf[k]!.ls) })),
+    }));
+    const r = JSON.parse(py('tools/fit/reg.py', join(work, 'reg.json'))) as Record<string, { dx: number; dy: number; dls: number; drot: number; ncc0: number; ncc: number } | null>;
     const accepted: string[] = [];
-    for (let k = 0; k < keys.length; k++) {
-      const f = keys[k]!;
-      await pool.all(([b64, ex]) => { (window as any).__fit.setRef(b64); (window as any).__fit.setExcl(ex); }, [ref.frame(f).toString('base64'), exclusionsAt(shot, f)] as const);
-      const T0 = { ...st.tf[k]! };
-      const cand = (x: number[]) => ({ [p.id]: { tf: [T0.x + x[0]!, T0.y + x[1]!, Math.exp(T0.ls + x[2]!), T0.rot] as [number, number, number, number] } });
-      const opt = { scale: 0.125, r: 1, wcol: 0.5, weye: 0, wseg: 1, wgrad: 1, eyesOf: [] };
-      const lossX = async (xs: number[][]) => (await pool.evalBatch<{ loss: number; area: number }>(f, xs.map(cand), opt)).map((r) => (r.area > 0 ? r.loss : 99));
-      const c0 = (await lossX([[0, 0, 0]]))[0]!;
-      let best = { x: [0, 0, 0], c: c0 };
-      // 多起点：尺度 ×0.6 / ×1 / ×1.6
-      for (const ls0 of [-0.5, 0, 0.5]) {
-        const es = new CMAES([0, 0, ls0], { sigma: 1, scales: [40, 40, 0.2], lambda: 16, seed: 7 + k });
-        for (let g = 0; g < 20; g++) {
-          const xs = es.ask();
-          const cs = await lossX(xs);
-          es.tell(cs);
-          cs.forEach((c, i) => { if (c < best.c) best = { x: xs[i]!, c }; });
-        }
-      }
-      if (best.c < c0 - 0.03) {
-        st.tf[k] = { x: T0.x + best.x[0]!, y: T0.y + best.x[1]!, ls: T0.ls + best.x[2]!, rot: T0.rot };
-        accepted.push(`${f}:(${best.x.map((v) => v.toFixed(2)).join(',')}) ${c0.toFixed(3)}→${best.c.toFixed(3)}`);
-      }
-    }
+    keys.forEach((f, k) => {
+      const q = r[String(f)];
+      if (!q || q.ncc < 0.15 || q.ncc - q.ncc0 < 0.03) return;
+      // 模板绕渲染出的眼睛中点 c 缩放 e^dls、旋转 drot，再平移 (dx, dy)；图层锚点的屏幕位置 (x, y) 做同样的变换
+      const e = regEyes.get(f);
+      const cx = e ? (e[0]![0] + e[1]![0]) / 2 : st.tf[k]!.x, cy = e ? (e[0]![1] + e[1]![1]) / 2 : st.tf[k]!.y;
+      const kk = Math.exp(q.dls), th = (q.drot * Math.PI) / 180;
+      const ux = st.tf[k]!.x - cx, uy = st.tf[k]!.y - cy;
+      st.tf[k] = { x: cx + kk * (Math.cos(th) * ux - Math.sin(th) * uy) + q.dx, y: cy + kk * (Math.sin(th) * ux + Math.cos(th) * uy) + q.dy, ls: st.tf[k]!.ls + q.dls, rot: st.tf[k]!.rot + q.drot };
+      accepted.push(`${f}:(${q.dx.toFixed(0)},${q.dy.toFixed(0)},${q.dls.toFixed(2)},${q.drot}°) ${q.ncc0.toFixed(2)}→${q.ncc.toFixed(2)}`);
+    });
     log(`[${shot.id}] ${p.id} 粗配准：${accepted.length}/${keys.length} 个关键帧改动 ${accepted.join(' ')}`);
     tick('reg', t);
   }

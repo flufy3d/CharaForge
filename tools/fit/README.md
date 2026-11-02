@@ -75,6 +75,15 @@ node --experimental-strip-types tools/fit/scripts/freefit.ts <scene.json> s24.ma
 node --import ./tools/fit/src/geom/register.mjs --experimental-strip-types tools/fit/scripts/params.ts <scene.json> s24.main 2420
 ```
 
+### 粗配准（reg）与速度
+
+- `reg`：变换初值的多尺度模板匹配（`tools/fit/reg.py`；只渲染本图层，以渲染出的两眼中点为缩放/旋转中心，
+  梯度幅值的掩码 NCC）。图层规划 `reg: true` 时开启，目前只有 s15（shots 眼睛轨迹为锚点插值，尺度差约 2 倍）。
+  s24 上有害（0.687 → 0.524：快速运动 + 白色划过特效的前三个关键帧给出假峰，尺度 ×0.5），s43 小幅有益（27 → 28/30）。
+- 逐帧精修 16 次（缺省 12）：耳朵分区 0.54 → 0.56～0.57，逐帧精修耗时 +50%，不改缺省。
+- 两个镜头并行（各 `--geom 5 --workers 2`）总吞吐只提高约 14%（CPU 瓶颈：有限差分雅可比 + 光流）。
+- 生成 shots 修正建议：`node --experimental-strip-types tools/fit/scripts/eyes.ts scenes/deepseek-chan/scene.json s15 20`
+
 ## 第三轮续：面捕输入空间的轨迹拟合（`fit4`）
 
 前向模型：面捕输入（每个新画面一个节点）→ `src/vts.ts`（读 `大肥鱼.vtube.json` 的 ParameterSettings：区间线性映射、
