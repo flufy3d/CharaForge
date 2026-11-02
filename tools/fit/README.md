@@ -35,7 +35,23 @@ for s in s43 s24 s15; do tools/.venv/bin/python -I tools/qa/metric.py review --r
 node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/scripts/check_consistency.ts s24 2368,2416,2440
 ```
 
-## 第三轮续：面捕输入空间的轨迹拟合（`fit4`，当前主线；合成基准接近但未全部达标）
+## 真实镜头（第三轮续，当前产出）
+
+```bash
+# s43、s24：单图层；镜头常量（体型、前倾）多假设按 SSIM@360 挑
+node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts fit4 --shot s43,s24 --itersB 22
+# s15：三图层（left → chibi → center 顺序拟合，已拟合的图层参与渲染），翻牌 scaleX、开窗 clip、景深、开关斜坡（plans.ts 的 planS15v3）
+node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts fit4 --shot s15 --fixed '{"lean":0}' --itersB 10
+#    平滑系数：--smoothC c（缺省 0.15；标定见汇报）
+node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts assemble
+# 然后按上面「重跑」第 3～5 步 pnpm render、metric.py score / review
+```
+
+外观常量：清晰度（blur、resample）由 `tools/fit/sharp.py` 用「角色内部多尺度梯度能量」匹配估计，只用光流残差最低、
+观测充分的帧，与几何误差无关；颜色、呼吸相位/周期再在这些帧上用像素损失拟合。图层起点不做 stabilize、预热 90 帧；
+镜头首末两个节点和排除区刚结束的帧，数据项权重 ×3。
+
+## 第三轮续：面捕输入空间的轨迹拟合（`fit4`）
 
 前向模型：面捕输入（每个新画面一个节点）→ `src/vts.ts`（读 `大肥鱼.vtube.json` 的 ParameterSettings：区间线性映射、
 指数平滑 α = 1/(1 + c·smoothing)，c 为全局常量）→ 模型参数 → runtime 物理 → 顶点/渲染。图层变换为稀疏关键帧

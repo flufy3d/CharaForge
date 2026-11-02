@@ -20,7 +20,7 @@ import { buildLayer, fitInputs } from './traj2.ts';
 import { loadVts } from './vts.ts';
 import { encodePng } from '../../../apps/player/scripts/png.ts';
 import { FIT_DIR, FIT_TAG, MODEL_URI, REPO } from './paths.ts';
-import { planFor } from './plans.ts';
+import { planFor, planS15v3 } from './plans.ts';
 import { loadShots } from './shotsutil.ts';
 
 /** 模型参考姿态（全部默认参数、物理静止）下的双眼虹膜中心（画布像素），用于由 shots 的 eyes 求初始变换 */
@@ -170,7 +170,8 @@ async function runInputs(cmd: string, values: Record<string, unknown>) {
     const smoothC = values.smoothC ? Number(values.smoothC) : 0.15;
     for (const id of String(values.shot).split(',')) {
       const shot = shots.shots.find((s) => s.id === id)!;
-      const { plans } = planFor(shot);
+      const multi = id === 's15' ? planS15v3(shot) : null;
+      const plans = multi ? multi.plans : planFor(shot).plans;
       if (cmd === 'synth2') { synthTruth(shot, plans[0]!, vts, calib, smoothC); continue; }
       const dir = join(FIT_DIR, id + FIT_TAG);
       mkdirSync(dir, { recursive: true });
@@ -178,13 +179,30 @@ async function runInputs(cmd: string, values: Record<string, unknown>) {
       writeFileSync(logFile, '');
       const log = (s: string) => { console.log(s); appendFileSync(logFile, `${s}\n`); };
       const fixed = values.fixed ? JSON.parse(String(values.fixed)) : undefined;
-      const r = await fitInputs(pool, gpool!, shot, plans[0]!, calib, vts, {
-        smoothC, log, fixedConsts: fixed,
-        itersA: values.itersA ? Number(values.itersA) : undefined,
-        itersB: values.itersB ? Number(values.itersB) : undefined,
-        refineRounds: values.refine ? Number(values.refine) : 0,
-      });
-      writeFileSync(join(dir, 'result.json'), JSON.stringify({ shot: id, range: [shot.start, shot.end], method: 'vts-input-gn', elapsedSec: r.elapsed, timing: r.timing, layers: [r.layer], state: r.state }));
+      const order = multi ? multi.order : [plans[0]!.id];
+      const built = new Map<string, unknown>();
+      const layers: unknown[] = [];
+      const states: Record<string, unknown> = {};
+      const scores: Record<string, unknown> = {};
+      let elapsed = 0;
+      for (const lid of order) {
+        const p = plans.find((x) => x.id === lid)!;
+        const r = await fitInputs(pool, gpool!, shot, p, calib, vts, {
+          smoothC, log, fixedConsts: multi ? { clothes2: 0, ...(fixed ?? {}) } : fixed,
+          others: () => [...built.values()],
+          itersA: values.itersA ? Number(values.itersA) : undefined,
+          itersB: values.itersB ? Number(values.itersB) : undefined,
+          refineRounds: values.refine ? Number(values.refine) : 0,
+        });
+        built.set(lid, r.built);
+        layers.push(r.layer);
+        states[lid] = r.state;
+        scores[lid] = r.score;
+        elapsed += r.elapsed;
+      }
+      const zOf = (lid: string) => shot.instances.find((i) => i.id === lid)?.z ?? 0;
+      layers.sort((a: any, b: any) => zOf(a.id) - zOf(b.id));
+      writeFileSync(join(dir, 'result.json'), JSON.stringify({ shot: id, range: [shot.start, shot.end], method: 'vts-input-gn', smoothC, elapsedSec: elapsed, layers, state: order.length === 1 ? states[order[0]!] : states, scores }));
     }
   } finally {
     await gpool?.close();

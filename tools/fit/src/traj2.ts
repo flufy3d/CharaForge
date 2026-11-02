@@ -61,6 +61,10 @@ export interface LayerState {
   keys: number[];
   tf: { x: number; y: number; ls: number; rot: number }[];
   consts: ShotConsts;
+  /** 圆形开窗 clip 的关键帧（clipRange 内；含不透明度 a） */
+  clip?: ClipKey[];
+  /** 景深模糊倍率（DOF 段 blur = dofK × shots 效果强度曲线） */
+  dofK?: number;
 }
 
 const interp = (xs: number[], f: number): [number, number, number] => {
@@ -108,13 +112,41 @@ export function buildLayer(p: LayerPlan, vts: VtsModel, st: LayerState, calib: M
   const filters: unknown[] = [];
   if (st.consts.color) filters.push({ type: 'color', ...st.consts.color });
   filters.push({ type: 'resample', factor: st.consts.resample, method: 'bilinear' });
-  filters.push({ type: 'blur', sigma: bk(Array(n).fill(st.consts.blur)) });
+  // 景深：blur = 常量（DOF 段外）或 dofK × 效果强度（DOF 段内，强度曲线来自 shots 的 depthOfField 效果）
+  const dofAt = (g: number) => {
+    if (!p.blurRanges.some(([a, b]) => g >= a && g < b)) return null;
+    return (st.dofK ?? 1) * (p.dofStrength ? p.dofStrength(g) : 8);
+  };
+  filters.push({ type: 'blur', sigma: bk(Array.from({ length: n }, (_, i) => dofAt(p.in + i) ?? st.consts.blur)) });
+  // 圆形开窗 clip 与淡入（关键帧线性插值；区间外为覆盖全画面的大矩形、不透明）
+  const clipAt = (g: number) => {
+    const ks = st.clip;
+    if (!ks || !p.clipRange || g < p.clipRange[0] || g >= p.clipRange[1]) return null;
+    const [l, r, w] = interp(ks.map((k) => k.f), g);
+    const A = ks[l]!, B = ks[r]!;
+    const m = (k: 'cx' | 'cy' | 'r' | 'a') => A[k] * (1 - w) + B[k] * w;
+    return { cx: m('cx'), cy: m('cy'), r: Math.max(0, m('r')), a: Math.min(1, Math.max(0, m('a'))) };
+  };
+  const clips = Array.from({ length: n }, (_, i) => clipAt(p.in + i));
+  const scaleX = p.flipRamp ? Array.from({ length: n }, (_, i) => {
+    const g = p.in + i, [a, b] = p.flipRamp!;
+    return g >= b ? 1 : Math.max(0.02, (g - a) / (b - a));
+  }) : null;
   const constants = Object.entries(p.constants).filter(([k]) => k !== 'Clothes2' && k !== 'LeanInput');
   return {
     id: p.id, kind: 'model', model: 'dsc', in: p.in, out: p.out,
-    transform: { x: bk(tf.map((t) => t.x)), y: bk(tf.map((t) => t.y)), scale: bk(tf.map((t) => Math.exp(t.ls))), rotation: bk(tf.map((t) => t.rot)), anchorX: ax, anchorY: ay },
+    transform: { x: bk(tf.map((t) => t.x)), y: bk(tf.map((t) => t.y)), scale: bk(tf.map((t) => Math.exp(t.ls))), ...(scaleX ? { scaleX: bk(scaleX) } : {}), rotation: bk(tf.map((t) => t.rot)), anchorX: ax, anchorY: ay },
+    ...(p.clipRange ? {
+      clip: {
+        x: bk(clips.map((c) => (c ? c.cx - c.r : -10000))), y: bk(clips.map((c) => (c ? c.cy - c.r : -10000))),
+        width: bk(clips.map((c) => (c ? 2 * c.r : 30000))), height: bk(clips.map((c) => (c ? 2 * c.r : 30000))),
+        radius: bk(clips.map((c) => (c ? c.r : 0))), feather: 3,
+      },
+      opacity: bk(clips.map((c) => (c ? c.a : 1))),
+    } : {}),
     filters,
-    physics: { warmup: 60, stabilize: true },
+    // 没有 continues 的实例：起点不做 stabilize，从更早 90 帧开始用首帧输入预热（规范 4：预热帧用帧 in 的输入）
+    physics: { warmup: 90, stabilize: false },
     params: [
       ...constants.map(([id, v]) => ({ id, curve: { keys: [{ t: p.in, v }] } })),
       { id: 'LeanInput', curve: bk(Array(n).fill(st.consts.lean)) },
@@ -125,7 +157,15 @@ export function buildLayer(p: LayerPlan, vts: VtsModel, st: LayerState, calib: M
   };
 }
 
+export interface ClipKey { f: number; cx: number; cy: number; r: number; a: number }
+
 export interface Fit2Options {
+  /** 其他（已拟合或待拟合）图层：参与渲染与合成 */
+  others?: () => unknown[];
+  /** 本图层拟合期间隐藏的图层 */
+  hidden?: string[];
+  /** 只拟合这些面捕输入（其余保持中性值），例如强虚化的背景实例只解头部角度 */
+  inputs?: string[];
   log?: (s: string) => void;
   smoothC: number;
   /** 镜头常量的固定值（跳过搜索），用于诊断 */
@@ -146,7 +186,13 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   const ref = new RefFrames(shot.start, shot.end);
   const timing: Record<string, number> = {};
   const tick = (k: string, t: number) => (timing[k] = (timing[k] ?? 0) + (Date.now() - t) / 1000);
+  const zOf = (id: string) => shot.instances.find((i) => i.id === id)?.z ?? 0;
+  // 只拟合的输入子集（其余固定中性值）
+  const fitInputs = opts.inputs ?? vts.inputs;
+  const vtsFit: VtsModel = { ...vts, inputs: vts.inputs };
+  void vtsFit;
   const Din = vts.inputs.length;
+  const inputMask = vts.inputs.map((k) => fitInputs.includes(k));
 
   // ---- 节点、关键帧、初值 ----
   const { isNew } = detectNewFrames(ref, shot, p.inst, p.in, p.out);
@@ -177,13 +223,26 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
       ...(opts.fixedConsts ?? {}),
     },
   };
-  log(`[${shot.id}] ${p.id}: ${nodes.length} 个输入节点 × ${Din} 个面捕输入，${keys.length} 个变换关键帧（每 ${every} 帧）`);
+  if (p.clipRange) {
+    const [a, b] = p.clipRange;
+    st.clip = [];
+    for (let f = a; f <= b; f += 8) {
+      const t = tfAt(st, Math.min(f, p.out - 1));
+      const u = (f - a) / (b - a);
+      st.clip.push({ f, cx: t.x, cy: t.y + 80, r: 60 + 700 * u, a: Math.min(1, 0.2 + 1.6 * u) });
+    }
+  }
+  st.dofK = 1;
+  log(`[${shot.id}] ${p.id}: ${nodes.length} 个输入节点 × ${fitInputs.length} 个面捕输入，${keys.length} 个变换关键帧（每 ${every} 帧）`);
 
   // ---- 渲染 / 光流 / 打分 ----
   let layer = buildLayer(p, vts, st, calib, opts.smoothC);
   const setupPages = async () => {
     layer = buildLayer(p, vts, st, calib, opts.smoothC);
-    await pool.all(([ls, uri, off]) => (window as any).__fit.setup(ls, uri, off), [[layer], MODEL_URI, calib.irisOffset] as const);
+    const others = opts.others ? (opts.others() as any[]).filter((l) => l.id !== p.id) : [];
+    const all = [...others, layer].sort((a: any, b: any) => (zOf(a.id) - zOf(b.id)));
+    await pool.all(([ls, uri, off]) => (window as any).__fit.setup(ls, uri, off), [all, MODEL_URI, calib.irisOffset] as const);
+    await pool.all((h) => (window as any).__fit.setHidden(h), opts.hidden ?? []);
   };
   const renderFrames = async (frames: number[]) => {
     const t = Date.now();
@@ -247,34 +306,43 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   // ---- 灵敏度：可见参数（节点帧）对输入节点 ----
   const links = linearLinks(vts, opts.smoothC).filter((l) => vts.inputs.includes(l.input));
   const sens = () => {
-    // S[fi][r][n*Din+i]
+    // S[fi] = { n0, r → Float64Array((n1−n0)·Din) }：只保留对帧 f 有影响的节点窗口（f 前 HORIZON 帧到 f 后一个节点）
     const N = nodes.length, n = p.out - p.in;
-    const S = nodes.map(() => VIS.map(() => new Float64Array(N * Din)));
-    const fIndex = new Map(nodes.map((f, i) => [f, i]));
+    const HORIZON = 90;
+    const win = nodes.map((f) => {
+      let n0 = 0;
+      while (n0 < N - 1 && nodes[n0]! < f - HORIZON) n0++;
+      let n1 = 0;
+      while (n1 < N && nodes[n1]! <= f) n1++;
+      n1 = Math.min(N, n1 + 1);
+      return { n0, n1 };
+    });
+    const S = nodes.map((_, fi) => ({ n0: win[fi]!.n0, rows: VIS.map(() => new Float64Array((win[fi]!.n1 - win[fi]!.n0) * Din)) }));
     for (let nn = 0; nn < N; nn++) {
-      // 节点 nn 的插值权重序列
+      // 节点 nn 的插值权重序列（只在 [前一节点, 后一节点] 非零）
       const w = new Float64Array(n);
-      for (let j = 0; j < n; j++) {
+      const ja = Math.max(0, (nn > 0 ? nodes[nn - 1]! : p.in) - p.in), jb = Math.min(n - 1, (nn + 1 < N ? nodes[nn + 1]! : p.out - 1) - p.in);
+      for (let j = (nn === 0 ? 0 : ja); j <= (nn === N - 1 ? n - 1 : jb); j++) {
         const [l, r, ww] = interp(nodes, p.in + j);
         w[j] = (l === nn ? 1 - ww : 0) + (r === nn ? ww : 0) - (l === nn && r === nn ? 1 - ww : 0);
       }
+      const fis = nodes.map((f, fi) => [f, fi] as const).filter(([, fi]) => nn >= win[fi]!.n0 && nn < win[fi]!.n1);
       for (let i = 0; i < Din; i++) {
         const name = vts.inputs[i]!;
         for (const lk of links.filter((x) => x.input === name)) {
-          // 指数平滑后的灵敏度序列
           const q = new Float64Array(n);
           let prev = w[0]!;
           for (let j = 0; j < n; j++) { prev = prev + lk.alpha * (w[j]! - prev); q[j] = lk.slope * prev; }
           const vi = VIS.indexOf(lk.output);
-          if (vi >= 0 && DIRECT.includes(lk.output)) for (const [f, fi] of fIndex) S[fi]![vi]![nn * Din + i] += q[f - p.in]!;
+          if (vi >= 0 && DIRECT.includes(lk.output)) for (const [f, fi] of fis) S[fi]!.rows[vi]![(nn - S[fi]!.n0) * Din + i] += q[f - p.in]!;
           const hq = H_.get(lk.output);
           if (hq) for (const [o, h] of hq) {
             const ri = VIS.indexOf(o);
-            for (const [f, fi] of fIndex) {
+            for (const [f, fi] of fis) {
               const j0 = f - p.in;
               let acc = 0;
               for (let tau = 0; tau < h.length && tau <= j0; tau++) acc += h[tau]! * q[j0 - tau]!;
-              S[fi]![ri]![nn * Din + i] += acc;
+              S[fi]!.rows[ri]![(nn - S[fi]!.n0) * Din + i] += acc;
             }
           }
         }
@@ -298,6 +366,8 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   const NT = K * 4 + N * Din;
   const sdOf = (c: number) => (c < K * 4 ? TF_SD[TF_KEYS[c % 4]!]! : INPUT_DIMS[vts.inputs[(c - K * 4) % Din]!]!.sd);
   let lastMedian = 20;
+  const frameResid = new Map<number, number>();
+  const framePts = new Map<number, number>();
   let jacCache: Map<number, import('./geom/worker.ts').JacFrame> | null = null;
   let gnCount = 0;
   const gn = async (lam: number, useInputs: boolean) => {
@@ -358,7 +428,13 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
         cnt++;
       }
       if (!cnt) return;
-      const norm = 600 / cnt;
+      // 边界帧（镜头首末两个节点、排除区刚结束的帧）数据项加权：它们的观测窗口短，只靠平滑会被拖偏
+      const prevEx = exclusionsAt(shot, f - 2).length > exclusionsAt(shot, f).length;
+      const boundary = fi < 2 || fi >= nodes.length - 2 || prevEx;
+      const norm = (600 / cnt) * (boundary ? 3 : 1);
+      const fm = rows.map((r) => Math.hypot(r.e[0], r.e[1])).sort((x, y) => x - y);
+      frameResid.set(f, fm[fm.length >> 1]!);
+      framePts.set(f, cnt);
       const D = 4 + V;
       for (const rw of rows) {
         const m = Math.hypot(rw.e[0], rw.e[1]);
@@ -384,8 +460,8 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
         if (kr !== kl) addC(kr * 4 + a, a, kw);
       }
       if (useInputs) for (let r = 0; r < V; r++) {
-        const sr = S[fi]![r]!;
-        for (let c = 0; c < N * Din; c++) if (sr[c] !== 0) addC(K * 4 + c, 4 + r, sr[c]!);
+        const sr = S[fi]!.rows[r]!, off = S[fi]!.n0 * Din;
+        for (let c = 0; c < sr.length; c++) if (Math.abs(sr[c]!) > 1e-7 && inputMask[c % Din]) addC(K * 4 + off + c, 4 + r, sr[c]!);
       }
       for (const [c, row] of colMap) cols.push({ c, row });
       // H += Cᵀ M C，g += Cᵀ b
@@ -433,6 +509,7 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     const scale = mx > lim ? lim / mx : 1;
     for (let k = 0; k < K; k++) TF_KEYS.forEach((key, a) => (st.tf[k]![key] += du[k * 4 + a]! * scale * TF_SD[key]!));
     if (useInputs) for (let m = 0; m < N; m++) vts.inputs.forEach((name, i) => {
+      if (!inputMask[i]) return;
       const d = INPUT_DIMS[name]!;
       st.inputs[m]![name] = Math.min(d.hi, Math.max(d.lo, st.inputs[m]![name]! + du[K * 4 + m * Din + i]! * scale * d.sd));
     });
@@ -489,21 +566,37 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   // ---- (3) 继续 GN ----
   await runGN(opts.itersB ?? 6, '细', 5);
   // ---- (4) 外观常量 + 呼吸（像素损失）----
+  // 外观常量只在几何残差最低的 30% 帧上拟合（防止用模糊掩盖几何误差），最多 5 帧
+  let appFrames: number[] = [];
   const appearance = async () => {
+    // 只在观测充分（有效光流点数 ≥ 最大值 60%）的帧里挑残差最低的
+    const maxPts = Math.max(...framePts.values());
+    const ranked = [...frameResid.entries()].filter(([f]) => nodes.includes(f) && (framePts.get(f) ?? 0) >= 0.6 * maxPts).sort((a, b) => a[1] - b[1]);
+    appFrames = ranked.slice(0, Math.max(3, Math.min(5, Math.ceil(ranked.length * 0.3)))).map(([f]) => f);
+    log(`[${shot.id}] ${p.id} 外观拟合帧（光流残差最低）：${appFrames.join(',')}（残差 ${appFrames.map((f) => frameResid.get(f)!.toFixed(2)).join('/')} px）`);
+    // 清晰度（blur、resample）用与几何无关的梯度能量匹配估计（tools/fit/sharp.py）：先渲染不加这两个滤镜的版本
+    if (!p.blurRanges.length) {
+      const keep = { blur: st.consts.blur, resample: st.consts.resample };
+      st.consts.blur = 0; st.consts.resample = 1;
+      await renderFrames(appFrames);
+      const r = JSON.parse(py('tools/fit/sharp.py', manifest(appFrames))) as { blur: number; resample: number; dist: number; frames: number };
+      if (r.frames > 0) { st.consts.blur = r.blur; st.consts.resample = r.resample; } else Object.assign(st.consts, keep);
+      log(`[${shot.id}] ${p.id} 清晰度（梯度能量匹配，${r.frames} 帧）：blur ${st.consts.blur}、resample ${st.consts.resample}（距离 ${r.dist.toFixed(4)}）`);
+    }
     await setupPages();
     const dims: { key: string; lo: number; hi: number; sd: number }[] = [
-      { key: 'blur', lo: 0, hi: 3, sd: 0.4 }, { key: 'resample', lo: 0.35, hi: 1, sd: 0.1 },
       // VTS 自动呼吸的相位与周期（经物理影响身体与头发；候选改写 [in, f] 的 ParamBreath，物理从头重放）
       { key: 'bph', lo: -Math.PI, hi: Math.PI, sd: 0.8 }, { key: 'bper', lo: 2.5, hi: 6, sd: 0.5 },
+      ...(p.blurRanges.length ? [{ key: 'dofK', lo: 0.4, hi: 1.6, sd: 0.15 }] : []),
       ...(st.consts.color ? [
         { key: 'brightness', lo: -0.3, hi: 0.3, sd: 0.03 }, { key: 'contrast', lo: 0.6, hi: 1.5, sd: 0.05 }, { key: 'saturation', lo: 0.5, hi: 1.6, sd: 0.06 },
         { key: 'mr', lo: 0.7, hi: 1.3, sd: 0.03 }, { key: 'mg', lo: 0.7, hi: 1.3, sd: 0.03 }, { key: 'mb', lo: 0.7, hi: 1.3, sd: 0.03 },
       ] : []),
     ];
     const c = st.consts;
-    const x0 = dims.map((d) => ({ blur: c.blur, resample: c.resample, bph: c.breathPhase, bper: c.breathPeriod, brightness: c.color?.brightness ?? 0, contrast: c.color?.contrast ?? 1, saturation: c.color?.saturation ?? 1, mr: c.color?.multiply[0] ?? 1, mg: c.color?.multiply[1] ?? 1, mb: c.color?.multiply[2] ?? 1 } as Record<string, number>)[d.key]!);
+    const x0 = dims.map((d) => ({ dofK: st.dofK ?? 1, blur: c.blur, resample: c.resample, bph: c.breathPhase, bper: c.breathPeriod, brightness: c.color?.brightness ?? 0, contrast: c.color?.contrast ?? 1, saturation: c.color?.saturation ?? 1, mr: c.color?.multiply[0] ?? 1, mg: c.color?.multiply[1] ?? 1, mb: c.color?.multiply[2] ?? 1 } as Record<string, number>)[d.key]!);
     const vals = (x: number[]) => Object.fromEntries(dims.map((d, i) => [d.key, Math.min(d.hi, Math.max(d.lo, x[i]!))]));
-    const cand = (v: Record<string, number>) => ({ blur: v.blur, resample: v.resample, ...(st.consts.color ? { color: { brightness: v.brightness, contrast: v.contrast, saturation: v.saturation, multiply: [v.mr, v.mg, v.mb] } } : {}) });
+    const cand = (v: Record<string, number>) => ({ blur: v.blur ?? st.consts.blur, resample: v.resample ?? st.consts.resample, ...(st.consts.color ? { color: { brightness: v.brightness, contrast: v.contrast, saturation: v.saturation, multiply: [v.mr, v.mg, v.mb] } } : {}) });
     const breathSet = (v: Record<string, number>, f: number) => {
       const set: [number, Record<string, number>][] = [];
       for (let g = p.in; g <= f; g++) set.push([g, { ParamBreath: 0.5 + 0.5 * Math.sin((2 * Math.PI * g) / 60 / v.bper! + v.bph!) }]);
@@ -511,9 +604,10 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     };
     const loss = async (cs: Record<string, number>[]) => {
       const acc = cs.map(() => 0);
-      for (const f of probe.slice(0, 4)) {
+      for (const f of appFrames) {
         await pool.all(([b64, ex]) => { (window as any).__fit.setRef(b64); (window as any).__fit.setExcl(ex); }, [ref.frame(f).toString('base64'), exclusionsAt(shot, f)] as const);
-        const rs = await pool.evalBatch<{ loss: number }>(f, cs.map((v) => ({ [p.id]: { ...cand(v), set: breathSet(v, f) } })), { scale: 0.5, r: 3, wcol: 1, weye: 0, wseg: 1, wgrad: 0.5, eyesOf: [] });
+        const inDof = p.blurRanges.some(([a, b]) => f >= a && f < b);
+        const rs = await pool.evalBatch<{ loss: number }>(f, cs.map((v) => ({ [p.id]: { ...cand(v), ...(inDof ? { blur: v.dofK! * (p.dofStrength ? p.dofStrength(f) : 8) } : {}), set: breathSet(v, f) } })), { scale: 0.5, r: 3, wcol: 1, weye: 0, wseg: 1, wgrad: 0.5, eyesOf: [] });
         rs.forEach((r, i) => (acc[i] += r.loss));
       }
       return acc;
@@ -526,8 +620,10 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
       es.tell(cs);
       cs.forEach((cc, i) => { if (cc < bestA.c) bestA = { c: cc, v: vals(xs[i]!) }; });
     }
-    st.consts.blur = bestA.v.blur!; st.consts.resample = bestA.v.resample!;
+    if (bestA.v.blur !== undefined) st.consts.blur = bestA.v.blur;
+    if (bestA.v.resample !== undefined) st.consts.resample = bestA.v.resample;
     st.consts.breathPhase = bestA.v.bph!; st.consts.breathPeriod = bestA.v.bper!;
+    if (bestA.v.dofK !== undefined) st.dofK = bestA.v.dofK;
     if (st.consts.color) st.consts.color = { brightness: bestA.v.brightness!, contrast: bestA.v.contrast!, saturation: bestA.v.saturation!, multiply: [bestA.v.mr!, bestA.v.mg!, bestA.v.mb!] };
     log(`[${shot.id}] ${p.id} 外观常量 ${JSON.stringify(Object.fromEntries(Object.entries(bestA.v).map(([k, v]) => [k, +v.toFixed(3)])))}`);
   };
@@ -535,6 +631,30 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   await appearance();
   tick('appearance', t4);
   await runGN(2, '收尾', 5);
+  // ---- (4b) 开窗 clip 与淡入：逐关键帧 CMA（圆心、半径、不透明度），页面损失 ----
+  if (st.clip) {
+    const t = Date.now();
+    await setupPages();
+    for (const k of st.clip) {
+      const f = Math.min(k.f, p.out - 1);
+      await pool.all(([b64, ex]) => { (window as any).__fit.setRef(b64); (window as any).__fit.setExcl(ex); }, [ref.frame(f).toString('base64'), exclusionsAt(shot, f)] as const);
+      const x0 = [k.cx, k.cy, k.r, k.a];
+      const es = new CMAES(x0, { sigma: 1, scales: [20, 20, 40, 0.15], lambda: 10, seed: f });
+      const cand = (x: number[]) => ({ clip: [x[0]!, x[1]!, Math.max(0, x[2]!)], opacity: Math.min(1, Math.max(0, x[3]!)) });
+      const lossX = async (xs: number[][]) => (await pool.evalBatch<{ loss: number }>(f, xs.map((x) => ({ [p.id]: cand(x) })), { scale: 0.5, r: 3, wcol: 1, weye: 0, wseg: 1, wgrad: 0.3, eyesOf: [] })).map((r) => r.loss);
+      let bestK = { c: (await lossX([x0]))[0]!, x: x0 };
+      for (let gen = 0; gen < 10; gen++) {
+        const xs = es.ask();
+        const cs = await lossX(xs);
+        es.tell(cs);
+        cs.forEach((c, i) => { if (c < bestK.c) bestK = { c, x: xs[i]! }; });
+      }
+      Object.assign(k, { cx: bestK.x[0], cy: bestK.x[1], r: Math.max(0, bestK.x[2]!), a: Math.min(1, Math.max(0, bestK.x[3]!)) });
+    }
+    log(`[${shot.id}] ${p.id} 开窗 clip：${st.clip.map((k) => `${k.f}:(${k.cx.toFixed(0)},${k.cy.toFixed(0)},r${k.r.toFixed(0)},a${k.a.toFixed(2)})`).join(' ')}`);
+    tick('clip', t);
+  }
+
   // ---- (5) 像素精修：逐节点（时间正序）小维度 CMA，页面里的 SSIM 类损失在该节点帧上打分 ----
   //   候选只改本节点的面捕输入；前向模型（映射 + 平滑）重算后，把 [上一节点, 本节点] 的参数写进页面（之后的帧下一个节点再处理）
   if ((opts.refineRounds ?? 0) > 0) {
@@ -585,6 +705,9 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     tick('refine', t);
   }
 
+  const endScore = await ssim360(nodes);
+  log(`[${shot.id}] ${p.id} 结束：SSIM@360（全部节点帧，拟合内部打分）均值 ${endScore.mean.toFixed(3)}、最小 ${endScore.min.toFixed(3)}`);
+
   // ---- 导出 ----
   const final = buildLayer(p, vts, st, calib, opts.smoothC) as any;
   const params: Record<string, number[]> = {};
@@ -603,5 +726,5 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   const elapsed = (Date.now() - t0) / 1000;
   log(`[${shot.id}] ${p.id} 完成：${elapsed.toFixed(0)}s；分项 ${JSON.stringify(Object.fromEntries(Object.entries(timing).map(([k, v]) => [k, Math.round(v)])))}`);
   ref.close();
-  return { layer: out, state: st, elapsed, timing };
+  return { layer: out, state: st, elapsed, timing, score: endScore, built: final };
 }

@@ -61,6 +61,10 @@ export interface LayerPlan {
   opacityRanges: [number, number][];
   /** 逐帧拟合水平缩放 scaleX 的区间（翻牌） */
   flipRange?: [number, number];
+  /** 翻牌：scaleX 在 [a, b) 从 0 线性展开到 1（第三轮续，按画面估计） */
+  flipRamp?: [number, number];
+  /** 景深强度曲线（sigma，像素）：blurRanges 内 blur = dofK × 它 */
+  dofStrength?: (f: number) => number;
   /** 逐帧拟合圆形 clip 的区间（区间外不裁切） */
   clipRange?: [number, number];
   /** 镜头常量（SHOT_CONST_DIMS 里的 key） */
