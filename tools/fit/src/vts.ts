@@ -7,6 +7,7 @@
  * 自动呼吸（UseBreathing）：ParamBreath = 0.5 + 0.5·sin(2π·t/T + φ)，T、φ 为镜头常量。
  */
 import { readFileSync } from 'node:fs';
+import { MODELX } from './modelx.ts';
 
 export interface VtsSetting {
   name: string;
@@ -40,6 +41,10 @@ export const INPUT_DIMS: Record<string, { lo: number; hi: number; sd: number; ta
   MouthSmile: { lo: -0.2, hi: 1.2, sd: 0.06, tau: 0.3 },
   MouthOpen: { lo: 0, hi: 1, sd: 0.05, tau: 0.3 },
   Brows: { lo: 0, hi: 0.9, sd: 0.04, tau: 0.2 },
+  // MODELX.decouple：身体独立输入（映射同 vtube.json 里 PositionX/Y/Z 那几行，只换输入源）
+  BodyX: { lo: -40, hi: 40, sd: 3, tau: 8 },
+  BodyY: { lo: -40, hi: 40, sd: 3, tau: 8 },
+  BodyZ: { lo: -40, hi: 40, sd: 3, tau: 8 },
 };
 
 export function loadVts(path: string, modelDefaults: Record<string, number>): VtsModel {
@@ -48,6 +53,7 @@ export function loadVts(path: string, modelDefaults: Record<string, number>): Vt
     name: p.Name, input: p.Input ?? '', output: p.OutputLive2D, inLo: p.InputRangeLower, inHi: p.InputRangeUpper,
     outLo: p.OutputRangeLower, outHi: p.OutputRangeUpper, smoothing: p.Smoothing ?? 0, breathing: !!p.UseBreathing,
   }));
+  if (MODELX.decouple) for (const s of settings) if (/^Position[XYZ]$/.test(s.output)) s.input = `Body${s.output.slice(-1)}`;
   const neutral: Record<string, number> = {};
   for (const s of settings) {
     if (!s.input || neutral[s.input] !== undefined) continue;

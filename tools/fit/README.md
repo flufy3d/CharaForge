@@ -51,6 +51,30 @@ node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/
 观测充分的帧，与几何误差无关；颜色、呼吸相位/周期再在这些帧上用像素损失拟合。图层起点不做 stabilize、预热 90 帧；
 镜头首末两个节点和排除区刚结束的帧，数据项权重 ×3。
 
+## 第四轮：逐帧精修 + 诊断工具（C2）
+
+真实镜头与合成基准的差距**来自几何精度，不是外观**（`appear.py`：用光流把我们的渲染扭到参考上，s24 稳定段分区
+SSIM@360 0.56 → 0.90，脸 0.76 → 0.94，扫描 blur/resample/颜色都不再提高；参考帧自身平移 2px → 0.83、3px → 0.69）。
+轨迹 GN（面捕输入空间 + 物理）把整体姿态收敛到几个像素，但鲁棒核把耳朵、后发、肩这些大误差区当离群点，
+剩余位移中位 3～14px。所以 fit4 在最后加了**逐帧精修**（缺省开启，`FIT_MODEL='{"perframe":0}'` 关闭）：
+每个新画面帧独立放开全部可见参数（姿态输出、次级物理输出逐个，postPhysics add 偏移）与变换偏移，
+光流 GN 12 次（Cauchy 尺度 20px 退火到 6px，弱先验拉回 0），节点之间线性插值后导出。
+
+```bash
+# 前向模型 / 求解器变体（诊断用；见 src/modelx.ts）：decouple、bodyJac、keyEvery、consts、clamp、anneal、reg、perframe、upper
+FIT_MODEL='{"bodyJac":true}' tools/fit/scripts/exp.sh <tag> s24 --fixed '{"lean":-26.25,"clothes2":0}' --itersB 40
+#   = 拟合（FIT_TAG=_<tag>）→ 合成临时场景 → pnpm render → metric score → 分区误差，摘要在 .data/fit/diag/exp_<tag>_<shot>.txt
+# 分区误差（按 drawable 所属部件：脸、前发、侧发、后发、耳、头饰、领子、身体）
+node --import ./tools/fit/src/geom/register.mjs --experimental-strip-types tools/fit/scripts/meshes.ts <scene.json> s24.main 2396,2399 mesh.json
+tools/.venv/bin/python -I tools/fit/regions.py mesh.json --renders <png 目录> --shot s24
+# 外观上限 / 几何上限（光流扭正 + blur/resample/颜色扫描；--control N 为对照）
+tools/.venv/bin/python -I tools/fit/appear.py mesh.json --renders <png 目录> --shot s24
+# 单帧参数变体对比、单帧自由 CMA、求值后的参数
+node --experimental-strip-types tools/fit/scripts/variants.ts <scene.json> s24.main s24 2420 '[{"Clothes2":0.2,"align":1}]' out.jpg
+node --experimental-strip-types tools/fit/scripts/freefit.ts <scene.json> s24.main s24 2400,2420 tf,pose,body,hair,ears
+node --import ./tools/fit/src/geom/register.mjs --experimental-strip-types tools/fit/scripts/params.ts <scene.json> s24.main 2420
+```
+
 ## 第三轮续：面捕输入空间的轨迹拟合（`fit4`）
 
 前向模型：面捕输入（每个新画面一个节点）→ `src/vts.ts`（读 `大肥鱼.vtube.json` 的 ParameterSettings：区间线性映射、

@@ -24,6 +24,7 @@ import type { Pool } from './pool.ts';
 import { RefFrames } from './refvideo.ts';
 import { detectNewFrames, exclusionsAt, holdSegments, trackAt } from './shotsutil.ts';
 import { bandSolve } from './traj.ts';
+import { MODELX } from './modelx.ts';
 import { INPUT_DIMS, forward, linearLinks, type VtsModel } from './vts.ts';
 
 const W = 1280, H = 720;
@@ -38,8 +39,15 @@ const PHYS_JSON = JSON.parse(readFileSync(join(REPO, 'assets/models/deepseek-cha
 const PHYS_SOURCES = new Set<string>(PHYS_JSON.PhysicsSettings.flatMap((s: any) => s.Input.map((i: any) => i.Source.Id)));
 export const SECONDARY: string[] = [...new Set<string>(PHYS_JSON.PhysicsSettings.flatMap((s: any) => s.Output.map((o: any) => o.Destination.Id)))]
   .filter((id) => /^(FrontHair|SideHair|LateHair|LateSideHair|ShortPonytail|LEar|REar|LFlip|RFlip|LControl|RControl|LRibbon|RRibbon|ribbon|LSleeve|RSleeve|Chest|Lace|RBow|LBow|LowX|Hat_|ParamBrowRAngle|ParamBrowLAngle|AngleXbs|AngleYbs|PupilX|PupilY|REyeball|LEyeball|REyes|LEyes|REyeLash|LEyeLash)/.test(id))
-  .filter((id) => !POSE_OUT.includes(id));
-const VIS = [...POSE_OUT, ...DIRECT, ...SECONDARY];
+  .filter((id) => !POSE_OUT.includes(id))
+  // MODELX.bodyJac：身体链的次级物理输出（肩、盆骨、身体位移、前倾）
+  .concat(MODELX.bodyJac ? [...new Set<string>(PHYS_JSON.PhysicsSettings.flatMap((s: any) => s.Output.map((o: any) => o.Destination.Id)))]
+    .filter((id) => /^(Shoulder|HipAngle|ParamHipAngle|HipZ|ParamBodyAngleRX|ParamBodyAngleX2|ParamBodyAngleY2|Param5[034]$|LEGAngle)/.test(id)) : []);
+// MODELX.consts：镜头常量（前倾 LeanInput、体型 Clothes2）作为连续的全局未知量进 GN（直接形变 + 物理稳态增益）
+const CONST_PARAMS = MODELX.consts ? ['LeanInput', 'Clothes2'] : [];
+const CONST_SD: Record<string, number> = { LeanInput: 3, Clothes2: 0.03 };
+const CONST_BOX: Record<string, [number, number]> = { LeanInput: [-30, 30], Clothes2: [0, 1] };
+const VIS = [...POSE_OUT, ...DIRECT, ...SECONDARY, ...CONST_PARAMS];
 const TF_KEYS = ['x', 'y', 'ls', 'rot'] as const;
 const TF_SD: Record<string, number> = { x: 4, y: 4, ls: 0.015, rot: 1 };
 const TF_TAU: Record<string, number> = { x: 60, y: 60, ls: 0.1, rot: 4 };
@@ -65,6 +73,8 @@ export interface LayerState {
   clip?: ClipKey[];
   /** 景深模糊倍率（DOF 段 blur = dofK × shots 效果强度曲线） */
   dofK?: number;
+  /** 诊断（MODELX.upper）：逐节点帧的自由偏移——可见参数 postPhysics add 与变换 [dx, dy, dls, drot]，用来测表达能力上限 */
+  free?: { f: number; vis: Record<string, number>; tf: [number, number, number, number] }[];
 }
 
 const interp = (xs: number[], f: number): [number, number, number] => {
@@ -106,7 +116,19 @@ export function buildLayer(p: LayerPlan, vts: VtsModel, st: LayerState, calib: M
     if (sw.fade <= 0 || g >= sw.est + sw.fade) return sw.to;
     return sw.from + (sw.to - sw.from) * (0.5 - 0.5 * Math.cos((Math.PI * (g - sw.est)) / sw.fade));
   };
-  const tf = Array.from({ length: n }, (_, i) => tfAt(st, p.in + i));
+  // 逐帧精修偏移：节点帧上的值，节点之间线性插值（区间外保持端点）
+  const fr = [...(st.free ?? [])].sort((a, b) => a.f - b.f);
+  const freeAt = new Map<number, { vis: Record<string, number>; tf: number[] }>();
+  if (fr.length) for (let i = 0; i < n; i++) {
+    const [l, r, w] = interp(fr.map((x) => x.f), p.in + i);
+    const A = fr[l]!, B = fr[r]!;
+    freeAt.set(p.in + i, { vis: Object.fromEntries(Object.keys(A.vis).map((k) => [k, A.vis[k]! * (1 - w) + B.vis[k]! * w])), tf: A.tf.map((v, k) => v * (1 - w) + B.tf[k]! * w) });
+  }
+  const tf = Array.from({ length: n }, (_, i) => {
+    const t = tfAt(st, p.in + i), q = freeAt.get(p.in + i);
+    return q ? { x: t.x + q.tf[0], y: t.y + q.tf[1], ls: t.ls + q.tf[2], rot: t.rot + q.tf[3] } : t;
+  });
+  const freeIds = [...new Set((st.free ?? []).flatMap((x) => Object.keys(x.vis)))];
   const ax = (calib.eyes[0][0] + calib.eyes[1][0]) / 2, ay = (calib.eyes[0][1] + calib.eyes[1][1]) / 2;
   const bk = (vals: ArrayLike<number>) => ({ baked: { start: p.in, values: Array.from(vals) } });
   const filters: unknown[] = [];
@@ -153,6 +175,7 @@ export function buildLayer(p: LayerPlan, vts: VtsModel, st: LayerState, calib: M
       { id: 'Clothes2', curve: bk(Array(n).fill(st.consts.clothes2)) },
       ...p.switches.map((sw) => ({ id: sw.param, curve: bk(Array.from({ length: n }, (_, i) => ramp(sw, p.in + i))) })),
       ...Object.entries(params).map(([id, v]) => ({ id, curve: bk(v) })),
+      ...freeIds.map((id) => ({ id, stage: 'postPhysics', mode: 'add', curve: bk(Array.from({ length: n }, (_, i) => freeAt.get(p.in + i)?.vis[id] ?? 0)) })),
     ],
   };
 }
@@ -198,7 +221,7 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   const { isNew } = detectNewFrames(ref, shot, p.inst, p.in, p.out);
   const nodes = [...isNew.entries()].filter(([, v]) => v).map(([f]) => f).sort((a, b) => a - b);
   const zoom = shot.effects.some((e) => e.kind === 'zoom');
-  const every = opts.keyEvery ?? (zoom ? 12 : 24);
+  const every = opts.keyEvery ?? MODELX.keyEvery ?? (zoom ? 12 : 24);
   const keys: number[] = [];
   for (let f = p.in; f < p.out - 1; f += every) keys.push(f);
   keys.push(p.out - 1);
@@ -295,11 +318,12 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     jacCache = null;
     const base: Record<string, number> = { LeanInput: st.consts.lean, Clothes2: st.consts.clothes2 };
     // 物理输入：VTS 输出里同时是物理输入的参数（头身角度、眼开合、眉、嘴……）
-    const ins = [...new Set(links.map((l) => l.output))].filter((o) => PHYS_SOURCES.has(o));
+    const ins = [...new Set([...links.map((l) => l.output), ...CONST_PARAMS])].filter((o) => PHYS_SOURCES.has(o));
     const outs = [...POSE_OUT, ...SECONDARY];
     const deltaOf = (q: string) => (POSE_IN.includes(q) ? 2 : 0.1);
     const r: Record<string, Record<string, number[]>> = {};
     for (const q of ins) Object.assign(r, await gpool.impulse({ base, inputs: [q], outputs: outs, taps: 50, delta: deltaOf(q) }));
+    constsAtImpulse = { lean: st.consts.lean, clothes2: st.consts.clothes2 };
     H_ = new Map(ins.map((q) => [q, new Map(outs.filter((o) => r[q]![o]!.some((v) => Math.abs(v) > 1e-5)).map((o) => [o, r[q]![o]!]))]));
   };
 
@@ -358,14 +382,20 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   const smp: number[] = [];
   { let k = 0; counts.forEach((cnt, d) => { for (let i = 0; i < cnt; i++, k++) if (k % step === 0) smp.push(d, i); }); }
   const sample = new Int32Array(smp);
-  const dimSpecs = VIS.map((r) => ({ key: r, params: [[r, 1]] as [string, number][], delta: POSE_OUT.includes(r) ? 1 : 0.05 }));
+  const dimSpecs = VIS.map((r) => ({ key: r, params: [[r, 1]] as [string, number][], delta: POSE_OUT.includes(r) || r === 'LeanInput' ? 1 : r === 'Clothes2' ? 0.02 : 0.05 }));
   log(`[${shot.id}] ${p.id}: 可见参数 ${VIS.length} 个（姿态 ${POSE_OUT.length}、直接 ${DIRECT.length}、次级物理 ${SECONDARY.length}）`);
 
   // ---- GN ----
   const K = keys.length, N = nodes.length;
-  const NT = K * 4 + N * Din;
-  const sdOf = (c: number) => (c < K * 4 ? TF_SD[TF_KEYS[c % 4]!]! : INPUT_DIMS[vts.inputs[(c - K * 4) % Din]!]!.sd);
+  const NT0 = K * 4 + N * Din, NG = CONST_PARAMS.length;
+  const NT = NT0 + NG;
+  const sdOf = (c: number) => (c >= NT0 ? CONST_SD[CONST_PARAMS[c - NT0]!]! : c < K * 4 ? TF_SD[TF_KEYS[c % 4]!]! : INPUT_DIMS[vts.inputs[(c - K * 4) % Din]!]!.sd);
+  /** 常量 q 对可见参数 r 的稳态灵敏度：直接（r = q）+ 物理脉冲响应之和（常量从预热起就不变） */
+  const constGain = (q: string, r: string) => (r === q ? 1 : 0) + (H_.get(q)?.get(r)?.reduce((a, b) => a + b, 0) ?? 0);
+  let constsFree = false;
+  let constsAtImpulse: Record<string, number> = {};
   let lastMedian = 20;
+  let lastStepScale = 1;
   const frameResid = new Map<number, number>();
   const framePts = new Map<number, number>();
   let jacCache: Map<number, import('./geom/worker.ts').JacFrame> | null = null;
@@ -390,7 +420,8 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     const S = sens();
     const Hm = new Float64Array(NT * NT), g = new Float64Array(NT);
     const stats: number[] = [];
-    const cauchy = Math.max(3, 1.5 * lastMedian);
+    // MODELX.anneal：鲁棒核尺度退火（前几轮让大误差区——头发、肩、下巴——也参与，否则 Cauchy 权重把它们当离群点忽略）
+    const cauchy = Math.max(3, 1.5 * lastMedian, MODELX.anneal ? MODELX.anneal * 0.85 ** gnCount : 0);
     const L = layer as any;
     const ax = L.transform.anchorX, ay = L.transform.anchorY;
     nodes.forEach((f, fi) => {
@@ -463,6 +494,7 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
         const sr = S[fi]!.rows[r]!, off = S[fi]!.n0 * Din;
         for (let c = 0; c < sr.length; c++) if (Math.abs(sr[c]!) > 1e-7 && inputMask[c % Din]) addC(K * 4 + off + c, 4 + r, sr[c]!);
       }
+      if (constsFree) CONST_PARAMS.forEach((q, gi) => VIS.forEach((r, ri) => { const v = constGain(q, r); if (Math.abs(v) > 1e-7) addC(NT0 + gi, 4 + ri, v); }));
       for (const [c, row] of colMap) cols.push({ c, row });
       // H += Cᵀ M C，g += Cᵀ b
       const MC = cols.map(({ row }) => {
@@ -506,13 +538,25 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     let mx = 0;
     for (let i = 0; i < NT; i++) mx = Math.max(mx, Math.abs(du[i]!));
     const lim = Math.max(2, 0.7 * med) * 2; // 以 sd 计（变换 sd = 4px），粗略对应位移
-    const scale = mx > lim ? lim / mx : 1;
+    // MODELX.clamp：逐分量截断（缺省是整步按最大分量等比缩小——一个病态分量会把所有分量一起拖慢）
+    if (MODELX.clamp) for (let i = 0; i < NT; i++) du[i] = Math.max(-lim, Math.min(lim, du[i]!));
+    const scale = MODELX.clamp ? 1 : mx > lim ? lim / mx : 1;
+    lastStepScale = mx > lim ? lim / mx : 1;
     for (let k = 0; k < K; k++) TF_KEYS.forEach((key, a) => (st.tf[k]![key] += du[k * 4 + a]! * scale * TF_SD[key]!));
     if (useInputs) for (let m = 0; m < N; m++) vts.inputs.forEach((name, i) => {
       if (!inputMask[i]) return;
       const d = INPUT_DIMS[name]!;
       st.inputs[m]![name] = Math.min(d.hi, Math.max(d.lo, st.inputs[m]![name]! + du[K * 4 + m * Din + i]! * scale * d.sd));
     });
+    if (constsFree) {
+      CONST_PARAMS.forEach((q, gi) => {
+        const key = q === 'LeanInput' ? 'lean' : 'clothes2';
+        const [lo, hi] = CONST_BOX[q]!;
+        st.consts[key] = Math.min(hi, Math.max(lo, st.consts[key] + du[NT0 + gi]! * scale * CONST_SD[q]!));
+      });
+      // 常量变化较大时重测物理脉冲响应（线性化点变了）
+      if (Math.abs(st.consts.lean - (constsAtImpulse.lean ?? 0)) > 3 || Math.abs(st.consts.clothes2 - (constsAtImpulse.clothes2 ?? 0)) > 0.06) await measureImpulse();
+    }
     tick('solve', t);
     lastMedian = med;
     return { median: med, p90: stats.length ? stats[Math.floor(stats.length * 0.9)]! : NaN, points: stats.length };
@@ -522,15 +566,49 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     let r = { median: NaN, p90: NaN, points: 0 };
     for (let it = 0; it < iters; it++) {
       r = await gn(lam, useInputs);
-      log(`[${shot.id}] ${p.id} ${tag} #${it}: 光流残差中位 ${r.median.toFixed(2)}px、p90 ${r.p90.toFixed(2)}px（${r.points} 点）`);
+      log(`[${shot.id}] ${p.id} ${tag} #${it}: 光流残差中位 ${r.median.toFixed(2)}px、p90 ${r.p90.toFixed(2)}px（${r.points} 点，步长系数 ${lastStepScale.toFixed(2)}）${constsFree ? `；lean ${st.consts.lean.toFixed(2)}、clothes2 ${st.consts.clothes2.toFixed(3)}` : ''}`);
     }
     return r;
   };
 
+  // ---- (0) MODELX.reg：变换初值的粗配准（shots 的眼睛轨迹多为人工锚点插值，s15 的尺度可差 2 倍，光流追不回来）----
+  //   逐变换关键帧：中性姿态下对 (dx, dy, dls) 做 CMA，损失 = 低分辨率（1/8）的梯度 NCC + 软类别 + 颜色；只接受明显更好的结果
+  if (MODELX.reg) {
+    const t = Date.now();
+    await setupPages();
+    const accepted: string[] = [];
+    for (let k = 0; k < keys.length; k++) {
+      const f = keys[k]!;
+      await pool.all(([b64, ex]) => { (window as any).__fit.setRef(b64); (window as any).__fit.setExcl(ex); }, [ref.frame(f).toString('base64'), exclusionsAt(shot, f)] as const);
+      const T0 = { ...st.tf[k]! };
+      const cand = (x: number[]) => ({ [p.id]: { tf: [T0.x + x[0]!, T0.y + x[1]!, Math.exp(T0.ls + x[2]!), T0.rot] as [number, number, number, number] } });
+      const opt = { scale: 0.125, r: 1, wcol: 0.5, weye: 0, wseg: 1, wgrad: 1, eyesOf: [] };
+      const lossX = async (xs: number[][]) => (await pool.evalBatch<{ loss: number; area: number }>(f, xs.map(cand), opt)).map((r) => (r.area > 0 ? r.loss : 99));
+      const c0 = (await lossX([[0, 0, 0]]))[0]!;
+      let best = { x: [0, 0, 0], c: c0 };
+      // 多起点：尺度 ×0.6 / ×1 / ×1.6
+      for (const ls0 of [-0.5, 0, 0.5]) {
+        const es = new CMAES([0, 0, ls0], { sigma: 1, scales: [40, 40, 0.2], lambda: 16, seed: 7 + k });
+        for (let g = 0; g < 20; g++) {
+          const xs = es.ask();
+          const cs = await lossX(xs);
+          es.tell(cs);
+          cs.forEach((c, i) => { if (c < best.c) best = { x: xs[i]!, c }; });
+        }
+      }
+      if (best.c < c0 - 0.03) {
+        st.tf[k] = { x: T0.x + best.x[0]!, y: T0.y + best.x[1]!, ls: T0.ls + best.x[2]!, rot: T0.rot };
+        accepted.push(`${f}:(${best.x.map((v) => v.toFixed(2)).join(',')}) ${c0.toFixed(3)}→${best.c.toFixed(3)}`);
+      }
+    }
+    log(`[${shot.id}] ${p.id} 粗配准：${accepted.length}/${keys.length} 个关键帧改动 ${accepted.join(' ')}`);
+    tick('reg', t);
+  }
   // ---- (1) 只解变换，几轮 ----
   await measureImpulse();
   await runGN(3, '变换', 20, false);
-  // ---- (2) 镜头常量：多假设各自完整收敛，按 SSIM@360 挑 ----
+  // ---- (2) 镜头常量：多假设各自完整收敛，按 SSIM@360 挑（MODELX.consts 时各假设只是初值，常量随 GN 连续更新）----
+  constsFree = CONST_PARAMS.length > 0;
   const probe = nodes.filter((_, i) => i % Math.max(1, Math.floor(nodes.length / 6)) === 0);
   const snapshot = () => JSON.parse(JSON.stringify(st)) as LayerState;
   const restore = (s: LayerState) => { st.inputs = s.inputs; st.tf = s.tf; st.consts = s.consts; };
@@ -551,7 +629,7 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   const leans = opts.fixedConsts?.lean !== undefined ? [opts.fixedConsts.lean] : [0, -15, -30];
   if (c2s.length > 1) for (const c2 of c2s) await trial({ clothes2: c2 }, 2, base);
   const afterC2 = best ? (best as { s: LayerState }).s : base;
-  const c2best = best ? (best as { h: Partial<ShotConsts> }).h.clothes2 : c2s[0];
+  const c2best = best ? (constsFree ? (best as { s: LayerState }).s.consts.clothes2 : (best as { h: Partial<ShotConsts> }).h.clothes2) : c2s[0];
   best = null;
   for (const le of leans) await trial({ clothes2: c2best, lean: le }, leans.length > 1 ? 4 : 0, afterC2);
   // 前倾细化：在最优档两侧再试 ±7.5、±3.75（从当前最优状态出发）
@@ -705,13 +783,95 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     tick('refine', t);
   }
 
+  // ---- (6) 逐帧精修：每个节点帧独立放开全部可见参数（postPhysics add）与变换偏移，光流 GN 逐帧求解（鲁棒核 20px 退火到 6px）----
+  // MODELX.perframe（缺省 12）：逐帧精修，作为正式阶段导出（postPhysics add 轨 + 变换偏移）；MODELX.upper：同一算法只做诊断、不导出
+  const pfIters = MODELX.upper ?? MODELX.perframe ?? 12;
+  if (pfIters > 0) {
+    const before = await ssim360(nodes);
+    log(`[${shot.id}] ${p.id} 逐帧精修前 SSIM@360 均值 ${before.mean.toFixed(3)}`);
+    st.free = nodes.map((f) => ({ f, vis: Object.fromEntries(VIS.map((r) => [r, 0])), tf: [0, 0, 0, 0] as [number, number, number, number] }));
+    const visSd = (r: string) => (POSE_OUT.includes(r) || r === 'LeanInput' ? 3 : r === 'Clothes2' ? 0.05 : 0.3);
+    const tPf = Date.now();
+    for (let it = 0; it < pfIters; it++) {
+      layer = buildLayer(p, vts, st, calib, opts.smoothC);
+      await renderFrames(nodes);
+      const fl = flows(nodes);
+      const jac = await gpool.jacobians(layer, nodes, dimSpecs, sample);
+      const L = layer as any;
+      const ax = L.transform.anchorX, ay = L.transform.anchorY;
+      const meds: number[] = [];
+      nodes.forEach((f, fi) => {
+        const q = st.free![fi]!;
+        const j = jac.get(f)!, F = fl.get(f)!;
+        const i0 = f - p.in;
+        const T = { x: L.transform.x.baked.values[i0], y: L.transform.y.baked.values[i0], ls: Math.log(L.transform.scale.baked.values[i0]), rot: L.transform.rotation.baked.values[i0] };
+        const Sc = Math.exp(T.ls), rr = (T.rot * Math.PI) / 180, cs = Math.cos(rr), sn = Math.sin(rr);
+        const V = VIS.length, D = 4 + V, Kp = j.opa.length;
+        const M = new Float64Array(D * D), b = new Float64Array(D);
+        const es: number[] = [];
+        for (let k = 0; k < Kp; k++) {
+          if (j.opa[k]! < 0.5) continue;
+          const dx = j.pos[2 * k]! - ax, dy = j.pos[2 * k + 1]! - ay;
+          const px = T.x + Sc * (cs * dx - sn * dy), py = T.y + Sc * (sn * dx + cs * dy);
+          const u = px / 2 - 0.25, v = py / 2 - 0.25;
+          const x0 = Math.floor(u), y0 = Math.floor(v);
+          if (x0 < 0 || y0 < 0 || x0 >= 639 || y0 >= 359) continue;
+          const o = (y0 * 640 + x0) * 3;
+          if (F[o + 2]! < 0.5) continue;
+          const ex = F[o]!, ey = F[o + 1]!;
+          const J = new Float64Array(2 * D);
+          J[0] = 1; J[D + 1] = 1; J[2] = px - T.x; J[D + 2] = py - T.y;
+          J[3] = (-(py - T.y) * Math.PI) / 180; J[D + 3] = ((px - T.x) * Math.PI) / 180;
+          for (let r = 0; r < V; r++) {
+            const cx = j.J[2 * k * V + r]! * visSd(VIS[r]!), cy = j.J[(2 * k + 1) * V + r]! * visSd(VIS[r]!);
+            J[4 + r] = Sc * (cs * cx - sn * cy); J[D + 4 + r] = Sc * (sn * cx + cs * cy);
+          }
+          const m = Math.hypot(ex, ey);
+          es.push(m);
+          const wt = 1 / (1 + (m / Math.max(6, 20 * 0.8 ** it)) ** 2); // 鲁棒核尺度从 20px 退火到 6px：大误差区（耳、后发）也参与
+          for (let a = 0; a < D; a++) {
+            const ja = J[a]!, jb = J[D + a]!;
+            if (ja === 0 && jb === 0) continue;
+            b[a] += wt * (ja * ex + jb * ey);
+            for (let c2 = 0; c2 < D; c2++) M[a * D + c2] += wt * (ja * J[c2]! + jb * J[D + c2]!);
+          }
+        }
+        es.sort((x, y) => x - y);
+        meds.push(es[es.length >> 1] ?? 0);
+        // LM：对角放大 + 单位先验（可见参数以 visSd 为单位，偏离 0 有弱惩罚）
+        let tr = 0;
+        for (let a = 0; a < D; a++) tr += M[a * D + a]!;
+        for (let a = 0; a < D; a++) {
+          M[a * D + a] = M[a * D + a]! * 1.2 + 1e-3 * (tr / D) + 1e-6;
+          if (a >= 4) { const r = VIS[a - 4]!; b[a] -= 1e-3 * (tr / D) * (q.vis[r]! / visSd(r)); }
+        }
+        const du = bandSolve(M, b, D, D);
+        let mx = 0;
+        for (let a = 4; a < D; a++) mx = Math.max(mx, Math.abs(du[a]!));
+        const sc = mx > 2 ? 2 / mx : 1;
+        q.tf[0] += du[0]! * sc; q.tf[1] += du[1]! * sc; q.tf[2] += du[2]! * sc; q.tf[3] += du[3]! * sc;
+        for (let a = 4; a < D; a++) q.vis[VIS[a - 4]!] += du[a]! * sc * visSd(VIS[a - 4]!);
+      });
+      meds.sort((x, y) => x - y);
+      log(`[${shot.id}] ${p.id} 逐帧精修 #${it}: 逐帧光流残差中位数的中位 ${meds[meds.length >> 1]!.toFixed(2)}px`);
+    }
+    const after = await ssim360(nodes);
+    log(`[${shot.id}] ${p.id} 逐帧精修后 SSIM@360 均值 ${after.mean.toFixed(3)}、最小 ${after.min.toFixed(3)}（${before.mean.toFixed(3)} → ${after.mean.toFixed(3)}）`);
+    // 最常被用到的可见参数（|偏移|/sd 的均值）
+    const use = VIS.map((r) => [r, st.free!.reduce((a, x) => a + Math.abs(x.vis[r]!) / visSd(r), 0) / nodes.length] as const).sort((a, b) => b[1] - a[1]).slice(0, 15);
+    log(`[${shot.id}] ${p.id} 逐帧精修偏移最大的可见参数（sd 单位）：${use.map(([r, v]) => `${r}:${v.toFixed(2)}`).join(' ')}`);
+    log(`[${shot.id}] ${p.id} 逐帧精修变换偏移（均值 |dx|,|dy|,|dls|,|drot|）：${[0, 1, 2, 3].map((k) => (st.free!.reduce((a, x) => a + Math.abs(x.tf[k]!), 0) / nodes.length).toFixed(3)).join(',')}`);
+    writeFileSync(join(work, 'upper_layer.json'), JSON.stringify(buildLayer(p, vts, st, calib, opts.smoothC)));
+    if (MODELX.upper) st.free = undefined; // 诊断模式：导出正常拟合结果
+    tick('perframe', tPf);
+  }
   const endScore = await ssim360(nodes);
   log(`[${shot.id}] ${p.id} 结束：SSIM@360（全部节点帧，拟合内部打分）均值 ${endScore.mean.toFixed(3)}、最小 ${endScore.min.toFixed(3)}`);
 
   // ---- 导出 ----
   const final = buildLayer(p, vts, st, calib, opts.smoothC) as any;
   const params: Record<string, number[]> = {};
-  for (const t of final.params) if (t.curve.baked) params[t.id] = t.curve.baked.values;
+  for (const t of final.params) if (t.curve.baked) params[t.stage === 'postPhysics' ? `post:${t.id}` : t.id] = t.curve.baked.values;
   const d = {
     tf: { x: final.transform.x.baked.values, y: final.transform.y.baked.values, scale: final.transform.scale.baked.values, rotation: final.transform.rotation.baked.values },
     opacity: null, blur: final.filters.find((f: any) => f.type === 'blur').sigma.baked.values, clip: null,
@@ -720,7 +880,10 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   const base2 = { layers: [{ id: p.id, transform: final.transform, params: final.params }] } as any;
   const holds = holdSegments(isNew, p.in, p.out);
   const out = exportLayer(base2, p, d as any, { log: nodes } as any, holds, shot) as any;
-  for (const t of out.params) if (t.provenance?.detail) t.provenance.detail.what = 'VTS forward model: face-tracking inputs (fitted, per new frame) → mapping + smoothing';
+  for (const t of out.params) if (t.provenance?.detail) t.provenance.detail.what = t.stage === 'postPhysics'
+    ? 'per-frame refinement: offset added to the physics/pose output (optical-flow GN per new frame, linear between frames)'
+    : 'VTS forward model: face-tracking inputs (fitted, per new frame) → mapping + smoothing';
+  out.physics = final.physics; // 与拟合时同一物理起点（exportLayer 的缺省是旧引擎的 stabilize）
   out.provenance.detail.method = 'face-input-space trajectory GN on optical-flow correspondences + pixel refinement (round 3b)';
   out.provenance.detail.vts = { smoothC: opts.smoothC, consts: st.consts };
   const elapsed = (Date.now() - t0) / 1000;
