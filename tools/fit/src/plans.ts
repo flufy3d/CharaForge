@@ -60,39 +60,49 @@ export function planFor(shot: Shot, opts: { hairBake?: boolean } = {}): { plans:
   }
 }
 
+/** shots 效果强度曲线的线性插值（区间外保持端点） */
+const strengthAt = (ks: { frame: number; value: number }[], f: number) => {
+  if (f <= ks[0]!.frame) return ks[0]!.value;
+  if (f >= ks[ks.length - 1]!.frame) return ks[ks.length - 1]!.value;
+  let i = 0;
+  while (ks[i + 1]!.frame <= f) i++;
+  const t = (f - ks[i]!.frame) / (ks[i + 1]!.frame - ks[i]!.frame);
+  return ks[i]!.value + (ks[i + 1]!.value - ks[i]!.value) * t;
+};
+
 /**
- * 第三轮续（fit4）的 s15 规划：三个图层都覆盖到各自出现为止的全段。
- *   left：1187 起（泼溅擦除后可见），1340~1360 景深模糊从 0 升到 σ≈8（shots 的 depthOfField 效果强度曲线）；
- *   chibi：约 1229 以「翻牌」出现（scaleX 在 1229~1237 从 0 展开到 1，按画面估计），1264 起 Clothes2 0→1（fade 8，shots）；
- *   center：约 1352 在圆形开窗里淡入（clip 圆心/半径/不透明度逐关键帧拟合），1400 前后爱心眼（key4，闭眼期间切换，见第二轮）。
+ * 第三轮续（fit4）的 s15 规划：全部从 shots 读取（recon 重标后的结构），不再硬编码帧号。
+ *   图层起点 = 实例轨迹里第一个有 bbox 的帧（翻牌实例取 cardFlip 效果起点）；
+ *   开关 = 实例 switchEvents（frame、fade、value）；景深 = depthOfField 效果（instances、strength 曲线）；
+ *   翻牌 = cardFlip 效果（strength 即 scaleX）；圆形开窗 = 实例 clip 关键帧 + opacity 轨（之后不裁切）。
+ *   s15 的变换初值先做粗配准（reg）。
  */
 export function planS15v3(shot: Shot): { plans: LayerPlan[]; order: string[] } {
   const inst = (id: string) => shot.instances.find((i) => i.id === id)!;
-  const dof = shot.effects.find((e) => e.kind === 'depthOfField');
-  const dofStrength = (f: number) => {
-    if (!dof?.strength?.length) return 8;
-    const ks = dof.strength;
-    if (f <= ks[0]!.frame) return ks[0]!.value;
-    if (f >= ks[ks.length - 1]!.frame) return ks[ks.length - 1]!.value;
-    let i = 0;
-    while (ks[i + 1]!.frame <= f) i++;
-    const t = (f - ks[i]!.frame) / (ks[i + 1]!.frame - ks[i]!.frame);
-    return ks[i]!.value + (ks[i + 1]!.value - ks[i]!.value) * t;
+  const fx = (kind: string, id: string) => shot.effects.find((e: any) => e.kind === kind && (!e.instances || e.instances.includes(id))) as any;
+  const firstSeen = (id: string) => (inst(id) as any).track.find((t: any) => t.bbox)?.frame ?? shot.start;
+  const plan = (id: string): LayerPlan => {
+    const I = inst(id) as any;
+    const flip = fx('cardFlip', id);
+    const dof = fx('depthOfField', id);
+    const start = flip ? flip.start : firstSeen(id);
+    const switches = (I.switchEvents ?? []).map((e: any) => ({ param: e.param, from: 0, to: e.value, window: [e.frame - 8, e.frame + 8] as [number, number], est: e.frame, fade: e.fade ?? 0 }));
+    let clipKeys: LayerPlan['clipKeys'];
+    let clipRange: [number, number] | undefined;
+    if (I.clip?.length) {
+      const op = I.track.filter((t: any) => t.opacity !== undefined && t.opacity !== null).map((t: any) => ({ frame: t.frame, value: t.opacity }));
+      clipKeys = I.clip.map((c: any) => ({ f: c.frame, cx: c.rect[0] + c.rect[2] / 2, cy: c.rect[1] + c.rect[3] / 2, r: c.radius, a: op.length ? strengthAt(op, c.frame) : 1 }));
+      clipRange = [I.clip[0].frame, I.clip[I.clip.length - 1].frame + 1];
+    }
+    return {
+      id, inst: I, in: start, out: shot.end, constants: { ...I.variant }, switches, blurRanges: dof ? [[dof.start, shot.end]] : [], opacityRanges: [],
+      consts: [], colorFilter: false, hairBake: false, z: I.z,
+      ...(dof ? { dofStrength: (f: number) => (dof.strength?.length ? strengthAt(dof.strength, f) : 8) } : {}),
+      ...(flip ? { flipCurve: (f: number) => strengthAt(flip.strength, f) } : {}),
+      ...(clipKeys ? { clipKeys, clipRange } : {}),
+      reg: true,
+    } as LayerPlan;
   };
-  const base = (id: string, over: Partial<LayerPlan>): LayerPlan => ({
-    id, inst: inst(id), in: shot.start, out: shot.end, constants: { ...inst(id).variant }, switches: [], blurRanges: [], opacityRanges: [],
-    consts: [], colorFilter: false, hairBake: false, z: inst(id).z, ...over,
-  });
-  const left = base('s15.left', { in: 1187, blurRanges: [[1340, shot.end]], dofStrength });
-  const chibi = base('s15.chibi', {
-    in: 1229, blurRanges: [[1340, shot.end]], dofStrength, flipRamp: [1229, 1237],
-    switches: [{ param: 'Clothes2', from: 0, to: 1, window: [1256, 1280], est: 1264, fade: 8 }],
-  });
-  const center = base('s15.center', {
-    in: 1352, clipRange: [1352, 1400],
-    switches: [{ param: 'key4', from: 0, to: 1, window: [1400, 1431], est: 1400, fade: 30 }],
-  });
-  // s15 的 shots 眼睛轨迹是人工锚点间的线性插值（尺度可差约 2 倍）：变换初值先做粗配准（traj2 的 reg）
-  for (const q of [left, chibi, center]) (q as LayerPlan & { reg?: boolean }).reg = true;
+  const left = plan('s15.left'), chibi = plan('s15.chibi'), center = plan('s15.center');
   return { plans: [left, chibi, center], order: ['s15.left', 's15.chibi', 's15.center'] };
 }

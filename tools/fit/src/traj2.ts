@@ -150,7 +150,7 @@ export function buildLayer(p: LayerPlan, vts: VtsModel, st: LayerState, calib: M
     return { cx: m('cx'), cy: m('cy'), r: Math.max(0, m('r')), a: Math.min(1, Math.max(0, m('a'))) };
   };
   const clips = Array.from({ length: n }, (_, i) => clipAt(p.in + i));
-  const scaleX = p.flipRamp ? Array.from({ length: n }, (_, i) => {
+  const scaleX = p.flipCurve ? Array.from({ length: n }, (_, i) => Math.max(0.02, p.flipCurve!(p.in + i))) : p.flipRamp ? Array.from({ length: n }, (_, i) => {
     const g = p.in + i, [a, b] = p.flipRamp!;
     return g >= b ? 1 : Math.max(0.02, (g - a) / (b - a));
   }) : null;
@@ -246,7 +246,8 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
       ...(opts.fixedConsts ?? {}),
     },
   };
-  if (p.clipRange) {
+  if (p.clipKeys) st.clip = p.clipKeys.map((k) => ({ ...k }));
+  else if (p.clipRange) {
     const [a, b] = p.clipRange;
     st.clip = [];
     for (let f = a; f <= b; f += 8) {
@@ -575,7 +576,7 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   //   s24 实测有害（0.687 → 0.524：快速运动 + 划过特效的前几个关键帧给出错误尺度），s43 小幅有益（27 → 28/30 帧 ≥ 0.7）。
   //   shots 的眼睛轨迹多为人工锚点插值（s15 的尺度可差 2 倍），光流追不回来。逐变换关键帧：只渲染本图层（中性姿态），
   //   tools/fit/reg.py 做多尺度模板匹配（梯度幅值的掩码 NCC，与掩码面积无关），相关明显更高才采纳。
-  if ((MODELX.reg ?? (p as LayerPlan & { reg?: boolean }).reg) === true) {
+  if ((MODELX.reg ?? p.reg) === true) {
     const t = Date.now();
     await setupPages();
     const others = opts.others ? (opts.others() as any[]).map((l) => l.id).filter((id) => id !== p.id) : [];
@@ -716,7 +717,7 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   tick('appearance', t4);
   await runGN(2, '收尾', 5);
   // ---- (4b) 开窗 clip 与淡入：逐关键帧 CMA（圆心、半径、不透明度），页面损失 ----
-  if (st.clip) {
+  if (st.clip && !p.clipKeys) {
     const t = Date.now();
     await setupPages();
     for (const k of st.clip) {

@@ -63,6 +63,12 @@ export interface LayerPlan {
   flipRange?: [number, number];
   /** 翻牌：scaleX 在 [a, b) 从 0 线性展开到 1（第三轮续，按画面估计） */
   flipRamp?: [number, number];
+  /** 翻牌：逐帧 scaleX 曲线（shots 的 cardFlip 效果强度）；优先于 flipRamp */
+  flipCurve?: (f: number) => number;
+  /** 圆形开窗的关键帧（shots 的实例 clip + opacity 轨）：给出时直接使用，不再逐关键帧拟合 */
+  clipKeys?: { f: number; cx: number; cy: number; r: number; a: number }[];
+  /** 变换初值粗配准（traj2 的 reg） */
+  reg?: boolean;
   /** 景深强度曲线（sigma，像素）：blurRanges 内 blur = dofK × 它 */
   dofStrength?: (f: number) => number;
   /** 逐帧拟合圆形 clip 的区间（区间外不裁切） */
