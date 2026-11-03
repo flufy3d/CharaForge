@@ -79,6 +79,9 @@ node --experimental-strip-types -e "import('./packages/scene/src/index.ts').then
   遮挡物的外接框按帧写成排除区（reason = splash / silhouette / halftone / cloud / pageTurn），
   只保留面积 ≥ 区域 0.5% 的连通域。新镜头开头的擦除残留同样写成排除区。
 - `clip` 是关键帧数组（`manual.py` 的 `CLIPS`）；s15 的细线框不裁切角色（角色会超出框），不给 clip。
+  s15 中间实例的圆形气泡窗口（1354~1397）用 radius = 边长/2 的正方形圆角矩形表示圆。
+- 实例字段 `eyePairSearch: false`（annotations.json，只影响 build）：虹膜细化不做 head 框内整体搜索，只在粗估点附近吸附；
+  多实例重叠/景深（s15）时整体搜索会锁到别的实例的眼睛。
 - `cadence`：`cadence.py` 判定。重复帧 = 与前一帧差值 > 12 的像素占比 < 0.5%；每对帧的第一帧必须有变化证据，
   极大连续段裁剪到首尾有证据的对，至少 4 对才算。静止画面只有在两侧都有交替证据时才被包含在段内
   （静止帧本来就满足“每两帧重复”）。只有背景 60fps、角色 30fps 的“准重复”段不写入

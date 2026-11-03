@@ -53,11 +53,11 @@ def _plausible(t: dict, new, check_shift: bool = True) -> bool:
     return np.hypot(ax - px0, ay - py0) <= lim and np.hypot(bx - px1, by - py1) <= lim
 
 
-def refine_anchor(a: dict) -> dict:
+def refine_anchor(a: dict, pair_search: bool = True) -> dict:
     """人工锚点的细化：先按普通采样细化；失败时在 2 倍大的 head 框内搜一对虹膜，
     找到且合理则把 eyes 换成检测值，并把 head/bbox 平移同样的位移（人工读数常有整体偏移）。
     平移量记录到 _shift，便于复核。"""
-    t = refine_sample(dict(a))
+    t = refine_sample(dict(a), pair_search)
     if not ALLOW_ANCHOR_SHIFT or t.get("_eyesRefined") or not t.get("head") or not t.get("eyes"):
         return t
     from eyes import find_pair, refine
@@ -155,8 +155,10 @@ def annotate_eyes_state(track, inst):
 ALLOW_ANCHOR_SHIFT = False
 
 
-def refine_sample(t: dict) -> dict:
-    """用 eyes.refine 校正一个采样的 eyes；两眼都成功且几何合理才采用（标记 _eyesRefined）。"""
+def refine_sample(t: dict, pair_search: bool = True) -> dict:
+    """用 eyes.refine 校正一个采样的 eyes；两眼都成功且几何合理才采用（标记 _eyesRefined）。
+    pair_search=False（实例字段 eyePairSearch: false）时不做 head 框内整体搜索：多个实例重叠/景深时
+    整体搜索会锁到别的实例的眼睛（s15）。"""
     if not t.get("eyes") or t.get("bbox", 0) is None:
         return t
     from common import read_frame
@@ -172,7 +174,7 @@ def refine_sample(t: dict) -> dict:
         t["_eyesRefined"] = True
         return t
     # 退路：在 head 框（外扩 10%）里整体搜一对虹膜，再用 refine 复核
-    if t.get("head"):
+    if pair_search and t.get("head"):
         from eyes import find_pair
         x, y, w, h = t["head"]
         pair = find_pair(_FRAME_CACHE[f], [x - 0.1 * w, y - 0.1 * h, 1.2 * w, 1.2 * h], t["eyes"])
@@ -333,7 +335,8 @@ def build(no_track=False, only=None, thumbs=True):
             o.setdefault("variant", {}); o.setdefault("switchEvents", []); o.setdefault("motionHints", [])
             # 第 1 次细化：人工锚点的 eyes 用虹膜颜色校正（失败则保留人工值），再拿去跟踪
             inst = dict(inst)
-            inst["anchors"] = [refine_anchor(dict(a)) for a in inst["anchors"]]
+            ps = inst.get("eyePairSearch", True)
+            inst["anchors"] = [refine_anchor(dict(a), ps) for a in inst["anchors"]]
             key = f"{sh['id']}/{inst['id']}"
             sig = json.dumps([sh["start"], sh["end"], inst["anchors"], inst.get("trackMode", "lk")], sort_keys=True)
             if inst.get("trackMode") == "fixed":
@@ -350,7 +353,7 @@ def build(no_track=False, only=None, thumbs=True):
             if track[-1]["frame"] != sh["end"] - 1:
                 track.append({**track[-1], "frame": sh["end"] - 1, "source": "hold",
                               "confidence": min(0.3, track[-1].get("confidence", 0.3))})
-            track = [refine_sample(dict(t)) for t in track]   # 第 2 次细化：跟踪加密后的每个采样
+            track = [refine_sample(dict(t), ps) for t in track]   # 第 2 次细化：跟踪加密后的每个采样
             # 两眼都经虹膜细化的采样：rotation 用眼睛连线角度（顺时针为正）。脸部有偏航时会有偏差，仅作初值。
             for t in track:
                 if t.get("_eyesRefined"):
