@@ -75,6 +75,22 @@ node --experimental-strip-types tools/fit/scripts/freefit.ts <scene.json> s24.ma
 node --import ./tools/fit/src/geom/register.mjs --experimental-strip-types tools/fit/scripts/params.ts <scene.json> s24.main 2420
 ```
 
+### 锚点先验与内存（第五轮）
+
+- **锚点先验**（所有镜头）：shots 里 confidence ≥ 0.4 的 eyes 锚点（落在节点帧 ±1）进 GN 数据项——两只眼的虹膜主网格
+  （ArtMesh236/134，与页面 irisScreen 同一组）顶点质心对锚点，Cauchy 尺度 max(10px, 0.15 × 眼距)，权重约 80 个光流点。
+  每次 GN 前做发散检查：偏差 > 1.5 眼距的锚点帧，把最近的变换关键帧重锚到 shots 眼睛（日志「发散检查」）。
+- **reg 已对 s15 关闭**（c3 上把左实例推偏约 150px）；`FIT_MODEL='{"reg":true}'` 仍可强制。
+- **内存**：每个几何 Worker 约 600MB（一份 Core + 模型），雅可比缓存 = 节点数 × 2 × 采样点 × 可见参数 × 4 字节
+  （s15 左实例 280 节点 × 4000 点时约 1.6GB，逐帧精修再算一份）。现在：采样点按缓存 ≤ 1GB 自动下调、逐帧精修前释放轨迹阶段缓存；
+  fit4 缺省 `--workers 3 --geom 5`（推荐；目标峰值 ≤ 7GB）。用 systemd-run 跑长任务并设 `-p MemoryMax=11G`。
+
+- **断点续跑**（缺省开启，`FIT_RESUME=0` 关闭）：图层内各阶段完成后写 `.data/fit/<shot><tag>/work/ckpt_<图层>.json`
+  （traj = 轨迹 + 外观 + 开窗 → perframe → eyes），整个图层完成后写 `.data/fit/<shot><tag>/done_<图层>.json`；
+  指纹（FIT_MODEL、拟合参数、shots.json 内容）一致才复用。中断后原样重跑同一命令即可接着跑。
+- **页面内存**：眼睛开合网格搜索每 10 帧对各页面做一次 CDP 强制 GC（读回缓冲的外部内存回收滞后，曾把 chrome-headless 涨到 OOM），
+  每 5 帧查一次实时 cgroup 内存（memory.current − inactive_file）。
+
 ### 粗配准（reg）与速度
 
 - `reg`：变换初值的多尺度模板匹配（`tools/fit/reg.py`；只渲染本图层，以渲染出的两眼中点为缩放/旋转中心，

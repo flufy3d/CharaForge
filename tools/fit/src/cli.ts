@@ -6,7 +6,8 @@
  *
  * 详见 tools/fit/README.md。
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { assembleScene } from './assemble.ts';
@@ -155,8 +156,9 @@ async function main() {
  */
 async function runInputs(cmd: string, values: Record<string, unknown>) {
   const shots = loadShots();
-  const pool = await Pool.open(values.workers ? Number(values.workers) : 4);
-  const gpool = cmd === 'fit4' ? await GeomPool.open(join(REPO, 'assets', MODEL_URI), values.geom ? Number(values.geom) : undefined) : null;
+  // 内存：每个几何 Worker 一份 Core + 模型约 600MB，每个页面一个 Chromium；fit4 缺省 3 个页面 + 5 个几何 Worker（峰值目标 ≤ 7GB）
+  const pool = await Pool.open(values.workers ? Number(values.workers) : cmd === 'fit4' ? 3 : 4);
+  const gpool = cmd === 'fit4' ? await GeomPool.open(join(REPO, 'assets', MODEL_URI), values.geom ? Number(values.geom) : 5) : null;
   try {
     const calib = await calibrate(pool.pages[0]!);
     const defaults = await pool.pages[0]!.evaluate(async (m) => {
@@ -176,7 +178,7 @@ async function runInputs(cmd: string, values: Record<string, unknown>) {
       const dir = join(FIT_DIR, id + FIT_TAG);
       mkdirSync(dir, { recursive: true });
       const logFile = join(dir, 'fit.log');
-      writeFileSync(logFile, '');
+      appendFileSync(logFile, `==== ${new Date().toISOString()} fit4 ${id}（断点续跑时保留之前的日志）\n`);
       const log = (s: string) => { console.log(s); appendFileSync(logFile, `${s}\n`); };
       const fixed = values.fixed ? JSON.parse(String(values.fixed)) : undefined;
       const order = multi ? multi.order : [plans[0]!.id];
@@ -187,6 +189,17 @@ async function runInputs(cmd: string, values: Record<string, unknown>) {
       let elapsed = 0;
       for (const lid of order) {
         const p = plans.find((x) => x.id === lid)!;
+        // 图层级断点：整个图层拟合完成后存盘（done_<图层>.json），重跑时直接复用（指纹 = FIT_MODEL + 参数 + shots 内容；FIT_RESUME=0 关闭）
+        const fp = createHash('sha256').update(JSON.stringify({ m: process.env.FIT_MODEL ?? '', smoothC, fixed, a: values.itersA, b: values.itersB, refine: values.refine, shots: createHash('sha256').update(readFileSync(join(REPO, 'scenes/deepseek-chan/shots.json'))).digest('hex') })).digest('hex').slice(0, 16);
+        const doneFile = join(dir, `done_${lid}.json`);
+        if (process.env.FIT_RESUME !== '0' && existsSync(doneFile)) {
+          const d = JSON.parse(readFileSync(doneFile, 'utf8'));
+          if (d.fp === fp) {
+            log(`[${id}] ${lid} 图层断点：直接复用 ${doneFile}`);
+            built.set(lid, d.r.built); layers.push(d.r.layer); states[lid] = d.r.state; scores[lid] = d.r.score; elapsed += d.r.elapsed;
+            continue;
+          }
+        }
         const r = await fitInputs(pool, gpool!, shot, p, calib, vts, {
           smoothC, log, fixedConsts: multi ? { clothes2: 0, ...(fixed ?? {}) } : fixed,
           others: () => [...built.values()],
@@ -194,6 +207,8 @@ async function runInputs(cmd: string, values: Record<string, unknown>) {
           itersB: values.itersB ? Number(values.itersB) : undefined,
           refineRounds: values.refine ? Number(values.refine) : 0,
         });
+        writeFileSync(`${doneFile}.tmp`, JSON.stringify({ fp, r: { built: r.built, layer: r.layer, state: r.state, score: r.score, elapsed: r.elapsed } }));
+        renameSync(`${doneFile}.tmp`, doneFile);
         built.set(lid, r.built);
         layers.push(r.layer);
         states[lid] = r.state;

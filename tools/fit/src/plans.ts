@@ -75,7 +75,7 @@ const strengthAt = (ks: { frame: number; value: number }[], f: number) => {
  *   图层起点 = 实例轨迹里第一个有 bbox 的帧（翻牌实例取 cardFlip 效果起点）；
  *   开关 = 实例 switchEvents（frame、fade、value）；景深 = depthOfField 效果（instances、strength 曲线）；
  *   翻牌 = cardFlip 效果（strength 即 scaleX）；圆形开窗 = 实例 clip 关键帧 + opacity 轨（之后不裁切）。
- *   s15 的变换初值先做粗配准（reg）。
+ *   变换由 shots 眼睛锚点先验约束（traj2），不做 reg 粗配准。
  */
 export function planS15v3(shot: Shot): { plans: LayerPlan[]; order: string[] } {
   const inst = (id: string) => shot.instances.find((i) => i.id === id)!;
@@ -100,7 +100,7 @@ export function planS15v3(shot: Shot): { plans: LayerPlan[]; order: string[] } {
       ...(dof ? { dofStrength: (f: number) => (dof.strength?.length ? strengthAt(dof.strength, f) : 8) } : {}),
       ...(flip ? { flipCurve: (f: number) => strengthAt(flip.strength, f) } : {}),
       ...(clipKeys ? { clipKeys, clipRange } : {}),
-      reg: true,
+      reg: false, // reg 在 s15（c3）上把左实例推偏约 150px、s24 上也有害：关闭，改用 shots 锚点先验（traj2）
     } as LayerPlan;
   };
   const left = plan('s15.left'), chibi = plan('s15.chibi'), center = plan('s15.center');

@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 TAG=$1; SHOT=$2; shift 2
-NODE="node --experimental-strip-types --disable-warning=ExperimentalWarning"
+NODE="node --expose-gc --experimental-strip-types --disable-warning=ExperimentalWarning"
 case $SHOT in
   s24) RANGE=2368-2441; STABLE=$(seq -s, 2396 3 2441);;
   s43) RANGE=3668-3721; STABLE=$(seq -s, 3695 2 3721);;

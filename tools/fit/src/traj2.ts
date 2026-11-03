@@ -13,7 +13,8 @@
  * 之后像素精修：逐节点小维度 CMA，损失为页面里的 SSIM 类损失。
  */
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Shot } from '../../../packages/scene/src/index.ts';
 import { CMAES } from './cmaes.ts';
@@ -51,6 +52,21 @@ const VIS = [...POSE_OUT, ...DIRECT, ...SECONDARY, ...CONST_PARAMS];
 const TF_KEYS = ['x', 'y', 'ls', 'rot'] as const;
 const TF_SD: Record<string, number> = { x: 4, y: 4, ls: 0.015, rot: 1 };
 const TF_TAU: Record<string, number> = { x: 60, y: 60, ls: 0.1, rot: 4 };
+
+/** 内存阈值：软（降低批大小）8.5GB、硬（报错退出）10.3GB；cgroup 统计含 Chromium 与几何 Worker */
+const MEM_SOFT = 8.5 * 2 ** 30, MEM_HARD = 10.3 * 2 ** 30;
+function cgroupBytes(): number {
+  try {
+    const rel = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find((l) => l.startsWith('0::'))?.slice(3).trim();
+    if (rel) {
+      // memory.current 含页缓存（参考帧缓存文件等，可回收）：减去 inactive_file
+      const cur = Number(readFileSync(`/sys/fs/cgroup${rel}/memory.current`, 'utf8'));
+      const ina = Number(/^inactive_file (\d+)/m.exec(readFileSync(`/sys/fs/cgroup${rel}/memory.stat`, 'utf8'))?.[1] ?? 0);
+      return cur - ina;
+    }
+  } catch { /* 无 cgroup v2 */ }
+  return process.memoryUsage().rss;
+}
 
 export interface ShotConsts {
   lean: number;
@@ -203,6 +219,18 @@ export interface Fit2Options {
 export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: LayerPlan, calib: ModelCalib, vts: VtsModel, opts: Fit2Options) {
   const log = opts.log ?? ((s: string) => console.log(s));
   const t0 = Date.now();
+  /** 内存保护：记录本进程 RSS / heapUsed 与 cgroup（含 Chromium、几何 Worker）的总量；超过硬上限主动报错退出，不等内核 OOM */
+  const memGuard = (stage: string, quiet = false) => {
+    if (!quiet) (globalThis as any).gc?.();
+    const m = process.memoryUsage();
+    const cg = cgroupBytes();
+    if (cg > MEM_HARD) throw new Error(`内存 ${(cg / 2 ** 30).toFixed(2)}G 超过上限 ${(MEM_HARD / 2 ** 30).toFixed(1)}G（${stage}），主动退出`);
+    if (quiet) return cg;
+    log(`[${shot.id}] ${p.id} 内存（${stage}）：RSS ${(m.rss / 2 ** 30).toFixed(2)}G、heapUsed ${(m.heapUsed / 2 ** 30).toFixed(2)}G、cgroup ${(cg / 2 ** 30).toFixed(2)}G`);
+    if (cg > MEM_HARD) throw new Error(`内存 ${(cg / 2 ** 30).toFixed(2)}G 超过上限 ${(MEM_HARD / 2 ** 30).toFixed(1)}G（${stage}），主动退出`);
+    return cg;
+  };
+  memGuard('开始');
   const outDir = join(FIT_DIR, shot.id + FIT_TAG);
   const work = join(outDir, 'work');
   mkdirSync(work, { recursive: true });
@@ -379,10 +407,25 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   // ---- 采样顶点 ----
   const counts = await gpool.vertexCounts();
   const total = counts.reduce((a, b) => a + b, 0);
-  const step = Math.max(1, Math.round(total / (opts.samples ?? 4000)));
+  // 采样点数：缺省 4000，但雅可比缓存（节点数 × 2K × 可见参数 × 4 字节）不超过约 1GB（s15 左实例 280 个节点时降到约 2600）
+  const nSamples = Math.min(opts.samples ?? 4000, Math.floor(1.0e9 / (Math.max(1, nodes.length) * 2 * (VIS.length + 4) * 4)));
+  const step = Math.max(1, Math.round(total / nSamples));
   const smp: number[] = [];
   { let k = 0; counts.forEach((cnt, d) => { for (let i = 0; i < cnt; i++, k++) if (k % step === 0) smp.push(d, i); }); }
+  // 虹膜主网格（与页面 irisScreen 同一组 drawable）的全部顶点追加在末尾：锚点先验用它们的质心
+  const ids = await gpool.drawableIds();
+  const irisD = ['ArtMesh236', 'ArtMesh134'].map((id) => ids.indexOf(id));
+  const irisRange: [number, number][] = [];
+  for (const d of irisD) { const a = smp.length / 2; for (let i = 0; i < (counts[d] ?? 0); i++) smp.push(d, i); irisRange.push([a, smp.length / 2]); }
   const sample = new Int32Array(smp);
+  // 锚点先验：shots 里 confidence ≥ 0.4 的 eyes 锚点（落在节点帧 ±1 上），作为软约束进 GN 数据项（鲁棒加权）
+  const anchors = new Map<number, [[number, number], [number, number]]>();
+  for (const t of (p.inst as any).track as any[]) {
+    if (!t.eyes || (t.confidence ?? 1) < 0.4 || t.frame < p.in || t.frame >= p.out) continue;
+    const nf = nodes.find((f) => Math.abs(f - t.frame) <= 1);
+    if (nf !== undefined) anchors.set(nf, t.eyes);
+  }
+  log(`[${shot.id}] ${p.id}: 采样 ${sample.length / 2} 个顶点（含虹膜 ${irisRange.map(([a, b]) => b - a).join('+')}），锚点 ${anchors.size} 个`);
   const dimSpecs = VIS.map((r) => ({ key: r, params: [[r, 1]] as [string, number][], delta: POSE_OUT.includes(r) || r === 'LeanInput' ? 1 : r === 'Clothes2' ? 0.02 : 0.05 }));
   log(`[${shot.id}] ${p.id}: 可见参数 ${VIS.length} 个（姿态 ${POSE_OUT.length}、直接 ${DIRECT.length}、次级物理 ${SECONDARY.length}）`);
 
@@ -397,6 +440,8 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   let constsAtImpulse: Record<string, number> = {};
   let lastMedian = 20;
   let lastStepScale = 1;
+  /** 每个锚点帧：拟合虹膜到锚点的最大偏差 / 眼距（gn 里更新，用于发散检查） */
+  const anchorDev = new Map<number, number>();
   const frameResid = new Map<number, number>();
   const framePts = new Map<number, number>();
   let jacCache: Map<number, import('./geom/worker.ts').JacFrame> | null = null;
@@ -478,6 +523,39 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
         }
       }
       for (let a = 0; a < D; a++) for (let c = 0; c < a; c++) M[c * D + a] = M[a * D + c]!;
+      // 锚点先验：两只眼的虹膜质心（屏幕）对 shots 锚点；Cauchy 尺度 max(10px, 0.15 × 眼距)，权重约等于 80 个光流点
+      const anc = anchors.get(f);
+      if (anc) {
+        const ed = Math.hypot(anc[1][0] - anc[0][0], anc[1][1] - anc[0][1]);
+        const sig = Math.max(10, 0.15 * ed);
+        irisRange.forEach(([a0, a1], e) => {
+          const J = new Float64Array(2 * D);
+          let px = 0, py = 0;
+          const nn = a1 - a0;
+          for (let k = a0; k < a1; k++) {
+            const dx = j.pos[2 * k]! - ax, dy = j.pos[2 * k + 1]! - ay;
+            const qx = T.x + Sc * (cs * dx - sn * dy), qy = T.y + Sc * (sn * dx + cs * dy);
+            px += qx / nn; py += qy / nn;
+            J[0] += 1 / nn; J[D + 1] += 1 / nn;
+            J[2] += (qx - T.x) / nn; J[D + 2] += (qy - T.y) / nn;
+            J[3] += (-(qy - T.y) * Math.PI) / 180 / nn; J[D + 3] += ((qx - T.x) * Math.PI) / 180 / nn;
+            for (let r = 0; r < V; r++) {
+              const cx = j.J[2 * k * V + r]!, cy = j.J[(2 * k + 1) * V + r]!;
+              J[4 + r] += (Sc * (cs * cx - sn * cy)) / nn; J[D + 4 + r] += (Sc * (sn * cx + cs * cy)) / nn;
+            }
+          }
+          const ex = anc[e]![0] - px, ey = anc[e]![1] - py;
+          anchorDev.set(f, Math.max(anchorDev.get(f) ?? 0, Math.hypot(ex, ey) / Math.max(1, ed)));
+          // 自适应：眼距 ≤ 60px（小全身）全权重，≥ 120px（特写，光流约 1px 精度、人工锚点 ±5～10px）为 0，只做发散检查
+          const fa = MODELX.anchorW ?? Math.min(1, Math.max(0, (120 - ed) / 60));
+          if (fa <= 0) return;
+          const wt = (fa * norm * 80) / (1 + (Math.hypot(ex, ey) / sig) ** 2);
+          for (let a = 0; a < D; a++) {
+            b[a] += wt * (J[a]! * ex + J[D + a]! * ey);
+            for (let c = 0; c < D; c++) M[a * D + c] += wt * (J[a]! * J[c]! + J[D + a]! * J[D + c]!);
+          }
+        });
+      }
       // 链式矩阵 C（D × NT，归一化单位）：变换行 → 关键帧插值权重；可见参数行 → 灵敏度
       const [kl, kr, kw] = interp(keys, f);
       const cols: { c: number; row: Float64Array }[] = [];
@@ -563,15 +641,43 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     return { median: med, p90: stats.length ? stats[Math.floor(stats.length * 0.9)]! : NaN, points: stats.length };
   };
 
+  const reanchor = () => {
+    const bad = [...anchorDev.entries()].filter(([, d]) => d > 1.5).map(([f]) => f);
+    const ks = new Set(bad.map((f) => { const [l, r, w] = interp(keys, f); return w < 0.5 ? l : r; }));
+    for (const k of ks) st.tf[k] = eyeTf(keys[k]!);
+    if (ks.size) log(`[${shot.id}] ${p.id} 发散检查：${bad.length} 个锚点帧偏差 > 1.5 眼距（${bad.join(',')}），${ks.size} 个变换关键帧重锚`);
+    anchorDev.clear();
+  };
   const runGN = async (iters: number, tag: string, lam: number, useInputs = true) => {
     let r = { median: NaN, p90: NaN, points: 0 };
     for (let it = 0; it < iters; it++) {
+      if (it > 0) reanchor();
       r = await gn(lam, useInputs);
       log(`[${shot.id}] ${p.id} ${tag} #${it}: 光流残差中位 ${r.median.toFixed(2)}px、p90 ${r.p90.toFixed(2)}px（${r.points} 点，步长系数 ${lastStepScale.toFixed(2)}）${constsFree ? `；lean ${st.consts.lean.toFixed(2)}、clothes2 ${st.consts.clothes2.toFixed(3)}` : ''}`);
     }
     return r;
   };
 
+  // ---- 阶段断点（work/ckpt_<图层>.json）：traj（轨迹 + 外观 + 开窗）→ perframe → eyes。指纹不符（参数、FIT_MODEL、shots 改过）则忽略 ----
+  const ckFile = join(work, `ckpt_${p.id}.json`);
+  const fingerprint = createHash('sha256').update(JSON.stringify({
+    m: process.env.FIT_MODEL ?? '', c: opts.smoothC, a: opts.itersA, b: opts.itersB, x: opts.fixedConsts, in: p.in, out: p.out, nodes,
+    shots: createHash('sha256').update(readFileSync(join(REPO, 'scenes/deepseek-chan/shots.json'))).digest('hex'),
+  })).digest('hex').slice(0, 16);
+  const RANK: Record<string, number> = { traj: 1, perframe: 2, eyes: 3 };
+  let ck: { stage: string; fp: string; st: LayerState } | null = null;
+  if (process.env.FIT_RESUME !== '0' && existsSync(ckFile)) {
+    const c = JSON.parse(readFileSync(ckFile, 'utf8'));
+    if (c.fp === fingerprint) { ck = c; Object.assign(st, c.st); log(`[${shot.id}] ${p.id} 从断点继续：阶段「${c.stage}」已完成（${ckFile}）`); }
+    else log(`[${shot.id}] ${p.id} 断点指纹不符，忽略（${ckFile}）`);
+  }
+  const done = (stage: string) => (ck ? (RANK[ck.stage] ?? 0) >= RANK[stage]! : false);
+  const saveCk = (stage: string) => {
+    writeFileSync(`${ckFile}.tmp`, JSON.stringify({ stage, fp: fingerprint, st }));
+    renameSync(`${ckFile}.tmp`, ckFile);
+    log(`[${shot.id}] ${p.id} 断点已存：${stage}`);
+  };
+  if (!done('traj')) {
   // ---- (0) 变换初值的粗配准（图层规划 reg: true 时开启，目前只有 s15；FIT_MODEL='{"reg":true|false}' 强制）----
   //   s24 实测有害（0.687 → 0.524：快速运动 + 划过特效的前几个关键帧给出错误尺度），s43 小幅有益（27 → 28/30 帧 ≥ 0.7）。
   //   shots 的眼睛轨迹多为人工锚点插值（s15 的尺度可差 2 倍），光流追不回来。逐变换关键帧：只渲染本图层（中性姿态），
@@ -611,6 +717,7 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     log(`[${shot.id}] ${p.id} 粗配准：${accepted.length}/${keys.length} 个关键帧改动 ${accepted.join(' ')}`);
     tick('reg', t);
   }
+  memGuard('粗配准后');
   // ---- (1) 只解变换，几轮 ----
   await measureImpulse();
   await runGN(3, '变换', 20, false);
@@ -790,24 +897,34 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     tick('refine', t);
   }
 
+  saveCk('traj');
+  } // !done('traj')
   // ---- (6) 逐帧精修：每个节点帧独立放开全部可见参数（postPhysics add）与变换偏移，光流 GN 逐帧求解（鲁棒核 20px 退火到 6px）----
   // MODELX.perframe（缺省 12）：逐帧精修，作为正式阶段导出（postPhysics add 轨 + 变换偏移）；MODELX.upper：同一算法只做诊断、不导出
   const pfIters = MODELX.upper ?? MODELX.perframe ?? 12;
   if (pfIters > 0) {
+    jacCache = null; memGuard('轨迹阶段结束'); // 逐帧精修自己算雅可比；释放轨迹阶段的缓存（s15 左实例约 1GB）
     const before = await ssim360(nodes);
     log(`[${shot.id}] ${p.id} 逐帧精修前 SSIM@360 均值 ${before.mean.toFixed(3)}`);
-    st.free = nodes.map((f) => ({ f, vis: Object.fromEntries(VIS.map((r) => [r, 0])), tf: [0, 0, 0, 0] as [number, number, number, number] }));
     const visSd = (r: string) => (POSE_OUT.includes(r) || r === 'LeanInput' ? 3 : r === 'Clothes2' ? 0.05 : 0.3);
     const tPf = Date.now();
+    if (!done('perframe')) {
+    st.free = nodes.map((f) => ({ f, vis: Object.fromEntries(VIS.map((r) => [r, 0])), tf: [0, 0, 0, 0] as [number, number, number, number] }));
+    // 分块处理节点（每块渲染 + 光流 + 雅可比，解完即释放）：整段 280 个节点的雅可比约 1GB、光流约 0.8GB，
+    // 加上上一轮未回收的副本会把 s15 推到 OOM。内存超过 8.5GB 时块再减半。
+    let pfChunk = 40;
     for (let it = 0; it < pfIters; it++) {
+      const meds: number[] = [];
+      for (let c0 = 0; c0 < nodes.length; c0 += pfChunk) {
+      const chunk = nodes.slice(c0, c0 + pfChunk);
       layer = buildLayer(p, vts, st, calib, opts.smoothC);
-      await renderFrames(nodes);
-      const fl = flows(nodes);
-      const jac = await gpool.jacobians(layer, nodes, dimSpecs, sample);
+      await renderFrames(chunk);
+      const fl = flows(chunk);
+      const jac = await gpool.jacobians(layer, chunk, dimSpecs, sample);
       const L = layer as any;
       const ax = L.transform.anchorX, ay = L.transform.anchorY;
-      const meds: number[] = [];
-      nodes.forEach((f, fi) => {
+      chunk.forEach((f, ci) => {
+        const fi = c0 + ci;
         const q = st.free![fi]!;
         const j = jac.get(f)!, F = fl.get(f)!;
         const i0 = f - p.in;
@@ -859,8 +976,42 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
         q.tf[0] += du[0]! * sc; q.tf[1] += du[1]! * sc; q.tf[2] += du[2]! * sc; q.tf[3] += du[3]! * sc;
         for (let a = 4; a < D; a++) q.vis[VIS[a - 4]!] += du[a]! * sc * visSd(VIS[a - 4]!);
       });
+      fl.clear(); jac.clear();
+      if (memGuard(`逐帧精修 #${it} 块 ${c0}`) > MEM_SOFT && pfChunk > 8) { pfChunk = Math.max(8, pfChunk >> 1); log(`[${shot.id}] ${p.id} 内存超过 8.5GB：逐帧精修块大小降到 ${pfChunk}`); }
+      }
       meds.sort((x, y) => x - y);
       log(`[${shot.id}] ${p.id} 逐帧精修 #${it}: 逐帧光流残差中位数的中位 ${meds[meds.length >> 1]!.toFixed(2)}px`);
+    }
+    saveCk('perframe');
+    } // !done('perframe')
+    // 眼睛开合：每个节点帧对左右眼 ParamEyeL/ROpen 的偏移做 5×5 网格搜索（两眼独立；像素损失），用于 wink 等单眼动作
+    if (!done('eyes')) {
+      const tE = Date.now();
+      await setupPages();
+      memGuard('眼睛开合前');
+      const grid = [-1.2, -0.8, -0.4, 0, 0.3];
+      let changed = 0;
+      for (const [fi, f] of nodes.entries()) {
+        // 页面里每个候选都要读回整幅缓冲：V8 外部内存回收滞后，chrome-headless 会涨到 2GB+ 被 OOM（cf-run14）。
+        // 每 10 帧强制页面 GC（CDP HeapProfiler.collectGarbage）；每 5 帧查实时 cgroup，超过软阈值立即 GC，超过硬阈值报错。
+        if (fi % 10 === 0) await pool.gc();
+        if (fi % 5 === 0 && memGuard(`眼睛开合 ${fi}/${nodes.length}`, fi % 50 !== 0) > MEM_SOFT) await pool.gc();
+        if (!exclusionsAt(shot, f).length || true) await pool.all(([b64, ex]) => { (window as any).__fit.setRef(b64); (window as any).__fit.setExcl(ex); }, [ref.frame(f).toString('base64'), exclusionsAt(shot, f)] as const);
+        const q = st.free![fi]!;
+        const bL = q.vis.ParamEyeLOpen ?? 0, bR = q.vis.ParamEyeROpen ?? 0;
+        const cands = grid.flatMap((dl) => grid.map((dr) => [dl, dr] as const));
+        const rs = await pool.evalBatch<{ loss: number }>(f, cands.map(([dl, dr]) => ({ [p.id]: { set: [[f, { 'post:ParamEyeLOpen': bL + dl, 'post:ParamEyeROpen': bR + dr }]] } })), { scale: 0.5, r: 3, wcol: 1, weye: 0, wseg: 0, wgrad: 0.3, eyesOf: [] });
+        let bi = cands.findIndex(([dl, dr]) => dl === 0 && dr === 0);
+        rs.forEach((r, i) => { if (r.loss < rs[bi]!.loss - 1e-4) bi = i; });
+        const [dl, dr] = cands[bi]!;
+        if (dl || dr) changed++;
+        q.vis.ParamEyeLOpen = bL + dl; q.vis.ParamEyeROpen = bR + dr;
+        await pool.all(([lid, f, v]) => (window as any).__fit.commit(f, { [lid]: v }), [p.id, f, { set: [[f, { 'post:ParamEyeLOpen': bL + dl, 'post:ParamEyeROpen': bR + dr }]] }] as const);
+      }
+      log(`[${shot.id}] ${p.id} 眼睛开合网格搜索：${changed}/${nodes.length} 个节点帧改动`);
+      memGuard('眼睛开合后');
+      saveCk('eyes');
+      tick('eyes', tE);
     }
     const after = await ssim360(nodes);
     log(`[${shot.id}] ${p.id} 逐帧精修后 SSIM@360 均值 ${after.mean.toFixed(3)}、最小 ${after.min.toFixed(3)}（${before.mean.toFixed(3)} → ${after.mean.toFixed(3)}）`);
@@ -881,12 +1032,23 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   for (const t of final.params) if (t.curve.baked) params[t.stage === 'postPhysics' ? `post:${t.id}` : t.id] = t.curve.baked.values;
   const d = {
     tf: { x: final.transform.x.baked.values, y: final.transform.y.baked.values, scale: final.transform.scale.baked.values, rotation: final.transform.rotation.baked.values },
-    opacity: null, blur: final.filters.find((f: any) => f.type === 'blur').sigma.baked.values, clip: null,
-    color: st.consts.color, resample: st.consts.resample, sx: null, params,
+    opacity: final.opacity?.baked?.values ?? null, blur: final.filters.find((f: any) => f.type === 'blur').sigma.baked.values,
+    clip: final.clip ? { x: final.clip.x.baked.values, y: final.clip.y.baked.values, width: final.clip.width.baked.values, height: final.clip.height.baked.values, radius: final.clip.radius.baked.values } : null,
+    color: st.consts.color, resample: st.consts.resample, sx: final.transform.scaleX?.baked?.values ?? null, params,
   };
   const base2 = { layers: [{ id: p.id, transform: final.transform, params: final.params }] } as any;
   const holds = holdSegments(isNew, p.in, p.out);
   const out = exportLayer(base2, p, d as any, { log: nodes } as any, holds, shot) as any;
+  // 检查：翻牌段导出的 scaleX 必须等于 shots 的 cardFlip 强度
+  if (p.flipCurve) {
+    const sx = out.transform.scaleX?.baked;
+    if (!sx) throw new Error(`${p.id}：导出缺 transform.scaleX（cardFlip）`);
+    for (let g = p.in; g < Math.min(p.out, p.in + 12); g++) {
+      const want = Math.max(0.02, p.flipCurve(g)), got = sx.values[g - sx.start];
+      if (Math.abs(got - want) > 0.01) throw new Error(`${p.id}：帧 ${g} 导出 scaleX ${got} ≠ cardFlip ${want}`);
+    }
+    log(`[${shot.id}] ${p.id} 检查通过：导出 scaleX 与 cardFlip 强度一致（${p.in}～${p.in + 11}）`);
+  }
   for (const t of out.params) if (t.provenance?.detail) t.provenance.detail.what = t.stage === 'postPhysics'
     ? 'per-frame refinement: offset added to the physics/pose output (optical-flow GN per new frame, linear between frames)'
     : 'VTS forward model: face-tracking inputs (fitted, per new frame) → mapping + smoothing';

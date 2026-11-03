@@ -74,6 +74,14 @@ export class Pool {
     return cands.map((_, i) => res[i % n]![Math.floor(i / n)]!);
   }
 
+  /** 强制各页面做一次完整 GC（CDP；读回缓冲等外部内存回收滞后，不 GC 会把 chrome-headless 涨到 OOM） */
+  async gc(): Promise<void> {
+    await Promise.all(this.pages.map(async (p) => {
+      const s = await p.context().newCDPSession(p);
+      try { await s.send('HeapProfiler.collectGarbage'); } finally { await s.detach().catch(() => {}); }
+    }));
+  }
+
   /** 各页面计时之和 */
   async timing(): Promise<Record<string, number>> {
     const ts = await Promise.all(this.pages.map((p) => p.evaluate(() => (window as any).__fit.timing())));

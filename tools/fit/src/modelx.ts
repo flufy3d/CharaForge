@@ -9,7 +9,8 @@
  *   reg       变换初值粗配准（缺省按图层规划，目前只有 s15 开；true/false 强制）：逐关键帧多尺度模板匹配（tools/fit/reg.py）
  *   anneal    鲁棒核（Cauchy）尺度退火的起点（px），每次 GN ×0.85
  *   perframe  逐帧精修迭代数（缺省 12；0 关闭）：每个节点帧放开全部可见参数（postPhysics add）与变换偏移，光流 GN，节点间插值后导出
+ *   anchorW   锚点先验权重倍率（缺省按眼距自适应：≤60px 为 1，≥120px 为 0）
  *   upper     诊断：拟合结束后每个节点帧独立放开全部可见参数与变换，做 N 次光流 GN，测表达能力上限
  */
-export interface ModelX { decouple?: boolean; bodyJac?: boolean; keyEvery?: number; consts?: boolean; upper?: number; clamp?: boolean; reg?: boolean; anneal?: number; perframe?: number }
+export interface ModelX { decouple?: boolean; bodyJac?: boolean; keyEvery?: number; consts?: boolean; upper?: number; clamp?: boolean; reg?: boolean; anneal?: number; perframe?: number; anchorW?: number }
 export const MODELX: ModelX = JSON.parse(process.env.FIT_MODEL ?? '{}');

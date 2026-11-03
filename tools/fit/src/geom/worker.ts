@@ -123,6 +123,10 @@ parentPort!.on('message', (msg: { id: number; req: JacRequest; counts?: boolean;
     parentPort!.postMessage({ id: msg.id, r: impulse(msg.impulse) });
     return;
   }
+  if ((msg as any).ids) {
+    parentPort!.postMessage({ id: msg.id, r: Array.from(model.getModel().drawables.ids as string[]) });
+    return;
+  }
   if (msg.counts) {
     const counts = Array.from({ length: model.getDrawableCount() }, (_, d) => model.getDrawableVertexCount(d));
     parentPort!.postMessage({ id: msg.id, r: counts });

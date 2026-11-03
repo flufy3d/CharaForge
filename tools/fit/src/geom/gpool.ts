@@ -80,6 +80,14 @@ export class GeomPool {
       this.workers[0]!.postMessage({ id, counts: true });
     });
   }
+  /** drawable ID（按索引） */
+  drawableIds(): Promise<string[]> {
+    const id = ++this.seq;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as never, reject });
+      this.workers[0]!.postMessage({ id, ids: true });
+    });
+  }
 
   async close(): Promise<void> {
     await Promise.all(this.workers.map((w) => w.terminate()));
