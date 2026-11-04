@@ -336,7 +336,10 @@ def build(no_track=False, only=None, thumbs=True):
             # 第 1 次细化：人工锚点的 eyes 用虹膜颜色校正（失败则保留人工值），再拿去跟踪
             inst = dict(inst)
             ps = inst.get("eyePairSearch", True)
-            inst["anchors"] = [refine_anchor(dict(a), ps) for a in inst["anchors"]]
+            # irisRefine: false（manual.py 实例字段）：整段没有青色虹膜可找（><、圈圈眼等替换眼），
+            # 虹膜细化只会锁到头发/饰品上的青色，直接用人工锚点 + 跟踪传播的值
+            ir = inst.get("irisRefine", True)
+            inst["anchors"] = [refine_anchor(dict(a), ps) if ir else dict(a) for a in inst["anchors"]]
             key = f"{sh['id']}/{inst['id']}"
             sig = json.dumps([sh["start"], sh["end"], inst["anchors"], inst.get("trackMode", "lk")], sort_keys=True)
             if inst.get("trackMode") == "fixed":
@@ -353,7 +356,7 @@ def build(no_track=False, only=None, thumbs=True):
             if track[-1]["frame"] != sh["end"] - 1:
                 track.append({**track[-1], "frame": sh["end"] - 1, "source": "hold",
                               "confidence": min(0.3, track[-1].get("confidence", 0.3))})
-            track = [refine_sample(dict(t), ps) for t in track]   # 第 2 次细化：跟踪加密后的每个采样
+            track = [refine_sample(dict(t), ps) if ir else dict(t) for t in track]   # 第 2 次细化：跟踪加密后的每个采样
             # 两眼都经虹膜细化的采样：rotation 用眼睛连线角度（顺时针为正）。脸部有偏航时会有偏差，仅作初值。
             for t in track:
                 if t.get("_eyesRefined"):

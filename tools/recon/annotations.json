@@ -86,6 +86,238 @@
        "opacity": 1.0
       },
       {
+       "frame": 258,
+       "eyes": [
+        [
+         615,
+         339
+        ],
+        [
+         640,
+         334
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.3,
+       "rotation": -11.3,
+       "head": [
+        576,
+        328,
+        101,
+        50
+       ],
+       "bbox": [
+        564,
+        266,
+        168,
+        161
+       ]
+      },
+      {
+       "frame": 260,
+       "eyes": [
+        [
+         598,
+         313
+        ],
+        [
+         629,
+         306
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.3,
+       "rotation": -12.7,
+       "head": [
+        548,
+        298,
+        129,
+        64
+       ],
+       "bbox": [
+        533,
+        219,
+        215,
+        206
+       ]
+      },
+      {
+       "frame": 262,
+       "eyes": [
+        [
+         588,
+         302
+        ],
+        [
+         627,
+         290
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.4,
+       "rotation": -17.1,
+       "head": [
+        518,
+        282,
+        179,
+        90
+       ],
+       "bbox": [
+        497,
+        180,
+        299,
+        280
+       ]
+      },
+      {
+       "frame": 264,
+       "eyes": [
+        [
+         581,
+         294
+        ],
+        [
+         624,
+         279
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.35,
+       "rotation": -19.2,
+       "head": [
+        501,
+        290,
+        241,
+        120
+       ],
+       "bbox": [
+        473,
+        160,
+        402,
+        367
+       ]
+      },
+      {
+       "frame": 266,
+       "eyes": [
+        [
+         574,
+         285
+        ],
+        [
+         622,
+         268
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.35,
+       "rotation": -19.5,
+       "head": [
+        480,
+        291,
+        244,
+        122
+       ],
+       "bbox": [
+        451,
+        143,
+        406,
+        389
+       ]
+      },
+      {
+       "frame": 268,
+       "eyes": [
+        [
+         567,
+         277
+        ],
+        [
+         619,
+         257
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.45,
+       "rotation": -21.0,
+       "head": [
+        470,
+        305,
+        269,
+        134
+       ],
+       "bbox": [
+        438,
+        141,
+        448,
+        429
+       ]
+      },
+      {
+       "frame": 276,
+       "eyes": [
+        [
+         553,
+         268
+        ],
+        [
+         613,
+         249
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.45,
+       "rotation": -17.6,
+       "head": [
+        454,
+        299,
+        287,
+        144
+       ],
+       "bbox": [
+        420,
+        125,
+        479,
+        458
+       ]
+      },
+      {
+       "frame": 284,
+       "eyes": [
+        [
+         553,
+         277
+        ],
+        [
+         619,
+         262
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.45,
+       "rotation": -12.8,
+       "head": [
+        444,
+        284,
+        295,
+        148
+       ],
+       "bbox": [
+        409,
+        107,
+        492,
+        468
+       ]
+      },
+      {
        "frame": 294,
        "bbox": [
         426.7,
@@ -101,13 +333,74 @@
        ],
        "eyes": [
         [
-         570,
-         344
+         568,
+         303
         ],
         [
-         680,
-         344
+         637,
+         289
         ]
+       ],
+       "eyesState": "closed",
+       "confidence": 0.45,
+       "rotation": -11.5
+      },
+      {
+       "frame": 304,
+       "eyes": [
+        [
+         574,
+         309
+        ],
+        [
+         642,
+         293
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.45,
+       "rotation": -13.2,
+       "head": [
+        510.9,
+        185.7,
+        194.2,
+        209.6
+       ],
+       "bbox": [
+        431.6,
+        106.8,
+        460.1,
+        441.8
+       ]
+      },
+      {
+       "frame": 320,
+       "eyes": [
+        [
+         575,
+         283
+        ],
+        [
+         636,
+         269
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.45,
+       "rotation": -12.9,
+       "head": [
+        518.5,
+        172.7,
+        174.0,
+        187.8
+       ],
+       "bbox": [
+        439.3,
+        117.9,
+        449.7,
+        434.0
        ]
       },
       {
@@ -126,13 +419,132 @@
        ],
        "eyes": [
         [
-         590,
-         320
+         571,
+         281
         ],
         [
-         690,
-         310
+         637,
+         267
         ]
+       ],
+       "eyesState": "closed",
+       "confidence": 0.45,
+       "rotation": -12.0
+      },
+      {
+       "frame": 344,
+       "eyes": [
+        [
+         600,
+         272
+        ],
+        [
+         673,
+         263
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -7.0,
+       "head": [
+        534.3,
+        146.1,
+        204.5,
+        220.7
+       ],
+       "bbox": [
+        445.1,
+        127.6,
+        455.0,
+        426.7
+       ]
+      },
+      {
+       "frame": 355,
+       "eyes": [
+        [
+         599,
+         247
+        ],
+        [
+         670,
+         244
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65,
+       "rotation": -2.4,
+       "head": [
+        535.7,
+        128.2,
+        197.6,
+        213.2
+       ],
+       "bbox": [
+        443.3,
+        126.7,
+        473.4,
+        426.7
+       ]
+      },
+      {
+       "frame": 365,
+       "eyes": [
+        [
+         598,
+         241
+        ],
+        [
+         668,
+         243
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65,
+       "rotation": 1.6,
+       "head": [
+        535.7,
+        126.5,
+        194.7,
+        210.1
+       ],
+       "bbox": [
+        441.6,
+        125.8,
+        490.0,
+        426.7
+       ]
+      },
+      {
+       "frame": 371,
+       "eyes": [
+        [
+         595,
+         241
+        ],
+        [
+         667,
+         243
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65,
+       "rotation": 1.6,
+       "head": [
+        530.9,
+        123.2,
+        200.2,
+        216.1
+       ],
+       "bbox": [
+        440.7,
+        125.3,
+        500.0,
+        426.7
        ]
       },
       {
@@ -235,6 +647,56 @@
        "radius": 6
       },
       {
+       "frame": 272,
+       "rect": [
+        326,
+        125,
+        620,
+        475
+       ],
+       "radius": 6
+      },
+      {
+       "frame": 276,
+       "rect": [
+        302,
+        120,
+        676,
+        500
+       ],
+       "radius": 6
+      },
+      {
+       "frame": 284,
+       "rect": [
+        290,
+        107,
+        700,
+        513
+       ],
+       "radius": 6
+      },
+      {
+       "frame": 294,
+       "rect": [
+        302,
+        95,
+        663,
+        513
+       ],
+       "radius": 6
+      },
+      {
+       "frame": 310,
+       "rect": [
+        315,
+        107,
+        663,
+        488
+       ],
+       "radius": 6
+      },
+      {
        "frame": 330,
        "rect": [
         330,
@@ -327,8 +789,8 @@
     {
      "kind": "scale",
      "start": 254,
-     "end": 268,
-     "note": "窗口整体从小到大弹出"
+     "end": 294,
+     "note": "窗口整体从小到大弹出；角色/照片区约 284 放到最大（略过冲），约 294 后基本稳定（B3：end 268→294）"
     }
    ],
    "confidence": 0.7,
@@ -1833,9 +2295,161 @@
      "motionHints": [],
      "anchors": [
       {
-       "frame": 689,
+       "frame": 685,
        "bbox": null,
        "head": null
+      },
+      {
+       "frame": 686,
+       "head": [
+        -132.9,
+        157.9,
+        205.7,
+        222.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual",
+       "confidence": 0.2,
+       "bbox": [
+        0,
+        64,
+        110,
+        620
+       ]
+      },
+      {
+       "frame": 688,
+       "head": [
+        -42.9,
+        157.9,
+        205.7,
+        222.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual",
+       "confidence": 0.2,
+       "bbox": [
+        0,
+        60,
+        190,
+        660
+       ]
+      },
+      {
+       "frame": 690,
+       "eyes": [
+        [
+         115,
+         286
+        ],
+        [
+         188,
+         272
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.55,
+       "rotation": -10.9,
+       "head": [
+        48.2,
+        156.4,
+        206.6,
+        223.0
+       ],
+       "bbox": [
+        0,
+        64,
+        320,
+        656
+       ]
+      },
+      {
+       "frame": 696,
+       "eyes": [
+        [
+         268,
+         284
+        ],
+        [
+         350,
+         266
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -12.4,
+       "head": [
+        192.3,
+        136.5,
+        233.4,
+        251.9
+       ],
+       "bbox": [
+        0,
+        70,
+        470,
+        650
+       ]
+      },
+      {
+       "frame": 702,
+       "eyes": [
+        [
+         301,
+         278
+        ],
+        [
+         374,
+         260
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -13.9,
+       "head": [
+        233.0,
+        144.9,
+        209.0,
+        225.6
+       ],
+       "bbox": [
+        0,
+        70,
+        480,
+        650
+       ]
+      },
+      {
+       "frame": 708,
+       "eyes": [
+        [
+         265,
+         286
+        ],
+        [
+         351,
+         258
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -18.0,
+       "head": [
+        182.3,
+        122.8,
+        251.4,
+        271.3
+       ],
+       "bbox": [
+        0,
+        70,
+        450,
+        650
+       ]
       },
       {
        "frame": 715,
@@ -1853,13 +2467,45 @@
        ],
        "eyes": [
         [
-         210,
-         300
+         234,
+         281
         ],
         [
-         300,
-         310
+         308,
+         259
         ]
+       ],
+       "eyesState": "open",
+       "confidence": 0.6,
+       "rotation": -16.6
+      },
+      {
+       "frame": 730,
+       "eyes": [
+        [
+         225,
+         290
+        ],
+        [
+         305,
+         261
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -19.9,
+       "head": [
+        146.7,
+        135.1,
+        236.6,
+        255.3
+       ],
+       "bbox": [
+        0.8,
+        88.0,
+        434.9,
+        626.9
        ]
       },
       {
@@ -1878,13 +2524,74 @@
        ],
        "eyes": [
         [
-         160,
-         310
+         219,
+         291
         ],
         [
-         250,
-         310
+         299,
+         263
         ]
+       ],
+       "eyesState": "open",
+       "confidence": 0.6,
+       "rotation": -19.3
+      },
+      {
+       "frame": 760,
+       "eyes": [
+        [
+         210,
+         291
+        ],
+        [
+         290,
+         263
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -19.3,
+       "head": [
+        132.2,
+        137.1,
+        235.6,
+        254.3
+       ],
+       "bbox": [
+        0.0,
+        72.4,
+        431.4,
+        647.0
+       ]
+      },
+      {
+       "frame": 775,
+       "eyes": [
+        [
+         210,
+         291
+        ],
+        [
+         288,
+         264
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -19.1,
+       "head": [
+        134.3,
+        141.3,
+        229.5,
+        247.6
+       ],
+       "bbox": [
+        0.0,
+        73.2,
+        425.7,
+        645.5
        ]
       },
       {
@@ -1915,23 +2622,89 @@
      ],
      "trackMode": "lk",
      "flipX": false,
-     "notes": "约 690 从左侧滑入；头部框不含钢盆"
+     "notes": "686 起从左侧滑入（685 不可见），约 702 后到位；头部框不含钢盆"
     },
     {
      "id": "s08.loading",
      "role": "side",
      "z": 2,
      "variant": {
-      "key8": 1,
-      "key3": 1
+      "key8": 1
      },
-     "switchEvents": [],
+     "switchEvents": [
+      {
+       "frame": 710,
+       "param": "key3",
+       "value": 1,
+       "fade": 10,
+       "confidence": 0.5,
+       "note": "710 硬切入画时眼睛还是灰色半透明，约 720 变成纯白圆眼（实测约 10 帧）"
+      }
+     ],
      "motionHints": [],
      "anchors": [
       {
-       "frame": 710,
+       "frame": 709,
        "bbox": null,
        "head": null
+      },
+      {
+       "frame": 710,
+       "eyes": [
+        [
+         427,
+         343
+        ],
+        [
+         518,
+         330
+        ]
+       ],
+       "eyesState": "special",
+       "source": "manual",
+       "confidence": 0.5,
+       "rotation": -8.1,
+       "head": [
+        344.7,
+        184.8,
+        255.5,
+        275.8
+       ],
+       "bbox": [
+        200,
+        40,
+        560,
+        680
+       ]
+      },
+      {
+       "frame": 712,
+       "eyes": [
+        [
+         516,
+         340
+        ],
+        [
+         616,
+         329
+        ]
+       ],
+       "eyesState": "special",
+       "source": "manual",
+       "confidence": 0.5,
+       "rotation": -6.3,
+       "head": [
+        426.2,
+        168.5,
+        279.7,
+        301.8
+       ],
+       "bbox": [
+        250,
+        40,
+        560,
+        680
+       ]
       },
       {
        "frame": 715,
@@ -1949,13 +2722,103 @@
        ],
        "eyes": [
         [
-         520,
-         390
+         551,
+         341
         ],
         [
-         665,
-         385
+         657,
+         332
         ]
+       ],
+       "eyesState": "special",
+       "confidence": 0.55,
+       "rotation": -4.9
+      },
+      {
+       "frame": 720,
+       "eyes": [
+        [
+         636,
+         348
+        ],
+        [
+         728,
+         326
+        ]
+       ],
+       "eyesState": "special",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -13.4,
+       "head": [
+        550.5,
+        180.9,
+        263.0,
+        283.8
+       ],
+       "bbox": [
+        305.8,
+        112.1,
+        602.6,
+        606.6
+       ]
+      },
+      {
+       "frame": 726,
+       "eyes": [
+        [
+         631,
+         342
+        ],
+        [
+         721,
+         317
+        ]
+       ],
+       "eyesState": "special",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -15.5,
+       "head": [
+        546.2,
+        175.4,
+        259.7,
+        280.2
+       ],
+       "bbox": [
+        306.8,
+        98.5,
+        589.7,
+        618.6
+       ]
+      },
+      {
+       "frame": 736,
+       "eyes": [
+        [
+         618.5,
+         335.6
+        ],
+        [
+         707,
+         309
+        ]
+       ],
+       "eyesState": "special",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -16.7,
+       "head": [
+        534.3,
+        169.8,
+        256.9,
+        277.2
+       ],
+       "bbox": [
+        308.4,
+        75.9,
+        568.2,
+        638.7
        ]
       },
       {
@@ -1974,13 +2837,103 @@
        ],
        "eyes": [
         [
-         610,
-         304
+         609,
+         331
         ],
         [
-         700,
-         300
+         697,
+         305
         ]
+       ],
+       "eyesState": "special",
+       "confidence": 0.6,
+       "rotation": -16.5
+      },
+      {
+       "frame": 755,
+       "eyes": [
+        [
+         601,
+         328
+        ],
+        [
+         689,
+         301
+        ]
+       ],
+       "eyesState": "special",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -17.1,
+       "head": [
+        517.1,
+        162.6,
+        255.9,
+        276.1
+       ],
+       "bbox": [
+        310.5,
+        52.8,
+        527.3,
+        661.5
+       ]
+      },
+      {
+       "frame": 765,
+       "eyes": [
+        [
+         590,
+         322
+        ],
+        [
+         677,
+         295
+        ]
+       ],
+       "eyesState": "special",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -17.2,
+       "head": [
+        506.9,
+        158.2,
+        253.2,
+        273.3
+       ],
+       "bbox": [
+        311.0,
+        52.3,
+        505.8,
+        664.6
+       ]
+      },
+      {
+       "frame": 775,
+       "eyes": [
+        [
+         590,
+         322
+        ],
+        [
+         678,
+         295
+        ]
+       ],
+       "eyesState": "special",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -17.1,
+       "head": [
+        506.1,
+        156.6,
+        255.9,
+        276.1
+       ],
+       "bbox": [
+        311.6,
+        51.7,
+        484.3,
+        667.8
        ]
       },
       {
@@ -2011,7 +2964,8 @@
      ],
      "trackMode": "lk",
      "flipX": false,
-     "notes": "约 711 滑入；加载图标 + 圈圈眼（白色圆眼）"
+     "notes": "710 起出现（709 不可见），约 720 前从左向右移动到位；加载图标 + 圈圈眼（白色圆眼）",
+     "irisRefine": false
     },
     {
      "id": "s08.wink",
@@ -2022,9 +2976,96 @@
      "motionHints": [],
      "anchors": [
       {
-       "frame": 740,
+       "frame": 739,
        "bbox": null,
        "head": null
+      },
+      {
+       "frame": 740,
+       "eyes": [
+        [
+         602,
+         250
+        ],
+        [
+         731,
+         248
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -0.9,
+       "head": [
+        487.2,
+        36.1,
+        358.7,
+        387.0
+       ],
+       "bbox": [
+        450,
+        0,
+        560,
+        720
+       ]
+      },
+      {
+       "frame": 742,
+       "eyes": [
+        [
+         780,
+         252
+        ],
+        [
+         914,
+         249
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -1.3,
+       "head": [
+        660.7,
+        29.3,
+        372.6,
+        402.1
+       ],
+       "bbox": [
+        620,
+        0,
+        600,
+        720
+       ]
+      },
+      {
+       "frame": 744,
+       "eyes": [
+        [
+         871,
+         255
+        ],
+        [
+         1006,
+         251
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -1.7,
+       "head": [
+        750.8,
+        30.2,
+        375.5,
+        405.2
+       ],
+       "bbox": [
+        700,
+        0,
+        580,
+        720
+       ]
       },
       {
        "frame": 746,
@@ -2049,6 +3090,122 @@
          1050,
          250
         ]
+       ]
+      },
+      {
+       "frame": 751,
+       "eyes": [
+        [
+         927,
+         314
+        ],
+        [
+         1065,
+         302
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.5,
+       "rotation": -5.0,
+       "head": [
+        803.5,
+        79.4,
+        385.1,
+        415.6
+       ],
+       "bbox": [
+        753.5,
+        6.5,
+        526.5,
+        713.5
+       ]
+      },
+      {
+       "frame": 756,
+       "eyes": [
+        [
+         890,
+         419
+        ],
+        [
+         1051,
+         405
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.5,
+       "rotation": -5.0,
+       "head": [
+        745.9,
+        145.3,
+        449.3,
+        484.8
+       ],
+       "bbox": [
+        747.1,
+        12.9,
+        532.9,
+        707.1
+       ]
+      },
+      {
+       "frame": 766,
+       "eyes": [
+        [
+         878,
+         476
+        ],
+        [
+         1053,
+         457
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.5,
+       "rotation": -6.2,
+       "head": [
+        720.8,
+        176.1,
+        489.4,
+        528.1
+       ],
+       "bbox": [
+        734.2,
+        25.8,
+        545.8,
+        694.2
+       ]
+      },
+      {
+       "frame": 775,
+       "eyes": [
+        [
+         874,
+         462
+        ],
+        [
+         1036,
+         433
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.5,
+       "rotation": -10.1,
+       "head": [
+        726.2,
+        176.0,
+        457.5,
+        493.7
+       ],
+       "bbox": [
+        722.6,
+        37.4,
+        557.4,
+        682.6
        ]
       },
       {
@@ -2080,7 +3237,7 @@
      ],
      "trackMode": "lk",
      "flipX": false,
-     "notes": "约 741 从右下滑入；后段右眼闭（wink，为眼睛开合参数而非开关）"
+     "notes": "740 起出现（739 不可见），740~746 向右移动；后段右眼闭（wink，为眼睛开合参数而非开关）"
     }
    ],
    "exclusions": [
@@ -2662,7 +3819,24 @@
      "role": "side",
      "z": 1,
      "variant": {},
-     "switchEvents": [],
+     "switchEvents": [
+      {
+       "frame": 840,
+       "param": "key7",
+       "value": 1,
+       "fade": 30,
+       "confidence": 0.4,
+       "note": "脸约 912 起入画时已明显脸红（920 起可见红晕+斜线），起点按右侧实例"
+      },
+      {
+       "frame": 895,
+       "param": "key2",
+       "value": 1,
+       "fade": 30,
+       "confidence": 0.4,
+       "note": "940~947 可见泪滴，起点按右侧实例"
+      }
+     ],
      "motionHints": [],
      "anchors": [
       {
@@ -2673,7 +3847,149 @@
         533.3,
         626.7
        ],
-       "rotation": -30
+       "rotation": -30,
+       "head": [
+        -338.0,
+        -20.0,
+        556.0,
+        600.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual",
+       "confidence": 0.15
+      },
+      {
+       "frame": 850,
+       "head": [
+        -113.2,
+        -333.8,
+        486.5,
+        525.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual",
+       "confidence": 0.2,
+       "rotation": -12,
+       "bbox": [
+        0.5,
+        60.4,
+        516.7,
+        659.6
+       ]
+      },
+      {
+       "frame": 895,
+       "head": [
+        -100.2,
+        -352.0,
+        500.4,
+        540.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual",
+       "confidence": 0.2,
+       "rotation": -3,
+       "bbox": [
+        0.8,
+        33.6,
+        503.0,
+        686.4
+       ]
+      },
+      {
+       "frame": 910,
+       "head": [
+        -89.1,
+        -385.5,
+        528.2,
+        570.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual",
+       "confidence": 0.25,
+       "rotation": 0,
+       "bbox": [
+        1.0,
+        24.6,
+        498.5,
+        695.4
+       ]
+      },
+      {
+       "frame": 920,
+       "head": [
+        -92.0,
+        -187.7,
+        531.0,
+        573.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual",
+       "confidence": 0.5,
+       "rotation": 2.1,
+       "bbox": [
+        1.1,
+        18.6,
+        495.5,
+        701.4
+       ]
+      },
+      {
+       "frame": 930,
+       "head": [
+        -98.4,
+        -166.0,
+        508.7,
+        549.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual",
+       "confidence": 0.5,
+       "rotation": 5.6,
+       "bbox": [
+        1.1,
+        12.7,
+        492.4,
+        707.3
+       ]
+      },
+      {
+       "frame": 940,
+       "head": [
+        -140.8,
+        -295.4,
+        636.6,
+        687.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual",
+       "confidence": 0.5,
+       "rotation": 6.8,
+       "bbox": [
+        1.2,
+        6.7,
+        489.4,
+        713.3
+       ]
+      },
+      {
+       "frame": 947,
+       "head": [
+        -129.7,
+        -334.5,
+        639.4,
+        690.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual",
+       "confidence": 0.3,
+       "rotation": 5,
+       "bbox": [
+        1.3,
+        2.5,
+        487.3,
+        717.5
+       ]
       },
       {
        "frame": 949,
@@ -2688,7 +4004,7 @@
      ],
      "trackMode": "linear",
      "flipX": false,
-     "notes": "躯干特写，头部基本出画，仅末段可见下巴/嘴；旋转约 -30° 逐渐回正，数值很粗"
+     "notes": "躯干特写，头部基本出画，约 912 起脸从画面上方入画（下巴→嘴→眼），920~940 可见眼睛；旋转约 -30° 逐渐回正，数值很粗"
     },
     {
      "id": "s10.right",
@@ -2697,12 +4013,12 @@
      "variant": {},
      "switchEvents": [
       {
-       "frame": 860,
+       "frame": 840,
        "param": "key7",
        "value": 1,
        "fade": 30,
-       "confidence": 0.5,
-       "note": "脸红约 860 起出现"
+       "confidence": 0.6,
+       "note": "842 已见淡红晕，850 明显，约 866 到满（B3：860→840）"
       },
       {
        "frame": 895,
@@ -2925,7 +4241,10 @@
      "continues": "s10.left",
      "role": "side",
      "z": 1,
-     "variant": {},
+     "variant": {
+      "key7": 1,
+      "key2": 1
+     },
      "switchEvents": [],
      "motionHints": [],
      "anchors": [
@@ -3237,6 +4556,33 @@
         0,
         1280,
         720
+       ],
+       "head": [
+        346.1,
+        -1135.9,
+        410.9,
+        443.4
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15
+      },
+      {
+       "frame": 1001,
+       "head": [
+        532.9,
+        -871.0,
+        352.3,
+        380.1
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15,
+       "bbox": [
+        0.6,
+        0.0,
+        1279.4,
+        720.0
        ]
       },
       {
@@ -3246,7 +4592,16 @@
         0,
         1278.7,
         720
-       ]
+       ],
+       "head": [
+        493.4,
+        -1637.2,
+        428.6,
+        462.5
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15
       }
      ],
      "trackMode": "linear",
@@ -3405,12 +4760,75 @@
        ]
       },
       {
+       "frame": 1048,
+       "head": [
+        405.2,
+        -819.6,
+        276.2,
+        298.0
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15,
+       "bbox": [
+        378.2,
+        360.5,
+        492.5,
+        266.2
+       ]
+      },
+      {
+       "frame": 1062,
+       "head": [
+        402.6,
+        -1347.8,
+        396.9,
+        428.3
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15,
+       "bbox": [
+        294.7,
+        241.5,
+        690.8,
+        385.2
+       ]
+      },
+      {
        "frame": 1081,
        "bbox": [
         181.3,
         80.0,
         960.0,
         546.7
+       ],
+       "head": [
+        498.0,
+        -1043.6,
+        301.8,
+        325.7
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15
+      },
+      {
+       "frame": 1118,
+       "head": [
+        436.3,
+        -2253.1,
+        376.3,
+        406.1
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15,
+       "bbox": [
+        469.9,
+        75.1,
+        355.7,
+        546.6
        ]
       },
       {
@@ -3419,6 +4837,30 @@
         493.3,
         74.7,
         306.7,
+        546.6
+       ],
+       "head": [
+        437.5,
+        -2274.9,
+        379.0,
+        409.0
+       ]
+      },
+      {
+       "frame": 1140,
+       "head": [
+        445.2,
+        -2413.1,
+        396.1,
+        427.5
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.1,
+       "bbox": [
+        471.8,
+        74.7,
+        325.7,
         546.6
        ]
       },
@@ -3506,6 +4948,12 @@
         1278.7,
         720
        ],
+       "head": [
+        493.4,
+        -1637.2,
+        428.6,
+        462.5
+       ],
        "frame": 1041,
        "source": "hold",
        "confidence": 0.3
@@ -3516,6 +4964,12 @@
         0,
         1278.7,
         720
+       ],
+       "head": [
+        493.4,
+        -1637.2,
+        428.6,
+        462.5
        ],
        "frame": 1046,
        "source": "hold",
@@ -10015,7 +11469,9 @@
      "id": "s16.next",
      "role": "main",
      "z": 1,
-     "variant": {},
+     "variant": {
+      "key1": 1
+     },
      "switchEvents": [],
      "motionHints": [],
      "trackMode": "fixed",
@@ -10120,7 +11576,9 @@
      "id": "s17.main",
      "role": "main",
      "z": 1,
-     "variant": {},
+     "variant": {
+      "key1": 1
+     },
      "switchEvents": [],
      "motionHints": [],
      "anchors": [
@@ -10136,6 +11594,122 @@
        "blurSigma": 4
       },
       {
+       "frame": 1548,
+       "eyes": [
+        [
+         578,
+         289
+        ],
+        [
+         745,
+         265
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.6,
+       "rotation": -8.2,
+       "head": [
+        427.0,
+        -1.4,
+        469.0,
+        506.1
+       ],
+       "bbox": [
+        152.8,
+        11.7,
+        1074.7,
+        708.3
+       ]
+      },
+      {
+       "frame": 1560,
+       "eyes": [
+        [
+         644,
+         318
+        ],
+        [
+         779,
+         299
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65,
+       "rotation": -8.0,
+       "head": [
+        522.0,
+        83.6,
+        379.0,
+        409.0
+       ],
+       "bbox": [
+        240.2,
+        18.4,
+        957.3,
+        701.6
+       ]
+      },
+      {
+       "frame": 1570,
+       "eyes": [
+        [
+         669,
+         328
+        ],
+        [
+         803,
+         308
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.55,
+       "rotation": -8.5,
+       "head": [
+        547.7,
+        94.5,
+        376.6,
+        406.5
+       ],
+       "bbox": [
+        313.0,
+        23.9,
+        859.5,
+        696.1
+       ]
+      },
+      {
+       "frame": 1580,
+       "eyes": [
+        [
+         663,
+         323
+        ],
+        [
+         775,
+         307
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65,
+       "rotation": -8.1,
+       "head": [
+        561.7,
+        128.3,
+        314.5,
+        339.4
+       ],
+       "bbox": [
+        385.8,
+        29.5,
+        761.7,
+        690.5
+       ]
+      },
+      {
        "frame": 1587,
        "bbox": [
         436.7,
@@ -10144,23 +11718,229 @@
         686.6
        ],
        "head": [
-        450,
-        40,
-        440,
-        360
+        539.0,
+        130.6,
+        309.0,
+        333.5
        ],
        "eyes": [
         [
-         600,
+         638,
+         317
+        ],
+        [
+         749,
+         311
+        ]
+       ],
+       "rotation": -3.1,
+       "blurSigma": 0,
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65
+      },
+      {
+       "frame": 1595,
+       "eyes": [
+        [
+         573,
+         323
+        ],
+        [
+         682,
+         319
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65,
+       "rotation": -2.1,
+       "head": [
+        475.9,
+        141.0,
+        303.2,
+        327.2
+       ],
+       "bbox": [
+        433.1,
+        30.5,
+        672.0,
+        689.5
+       ]
+      },
+      {
+       "frame": 1603,
+       "eyes": [
+        [
+         545,
+         318
+        ],
+        [
+         642,
+         317
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65,
+       "rotation": -0.6,
+       "head": [
+        458.7,
+        157.4,
+        269.7,
+        291.0
+       ],
+       "bbox": [
+        429.6,
+        27.6,
+        650.6,
+        692.4
+       ]
+      },
+      {
+       "frame": 1610,
+       "eyes": [
+        [
+         544,
          316
         ],
         [
-         710,
-         316
+         645,
+         313
         ]
        ],
-       "rotation": -5,
-       "blurSigma": 0
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65,
+       "rotation": -1.7,
+       "head": [
+        454.0,
+        147.8,
+        280.9,
+        303.1
+       ],
+       "bbox": [
+        426.5,
+        25.1,
+        632.0,
+        694.9
+       ]
+      },
+      {
+       "frame": 1618,
+       "eyes": [
+        [
+         554,
+         302
+        ],
+        [
+         660,
+         296
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65,
+       "rotation": -3.2,
+       "head": [
+        459.4,
+        123.8,
+        295.2,
+        318.5
+       ],
+       "bbox": [
+        422.9,
+        22.2,
+        610.6,
+        697.8
+       ]
+      },
+      {
+       "frame": 1625,
+       "eyes": [
+        [
+         583,
+         264
+        ],
+        [
+         706,
+         256
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.65,
+       "rotation": -3.7,
+       "head": [
+        473.2,
+        56.6,
+        342.7,
+        369.8
+       ],
+       "bbox": [
+        419.8,
+        19.7,
+        592.0,
+        700.3
+       ]
+      },
+      {
+       "frame": 1632,
+       "eyes": [
+        [
+         602,
+         244
+        ],
+        [
+         725,
+         246
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.55,
+       "rotation": 0.9,
+       "head": [
+        492.5,
+        42.0,
+        342.0,
+        369.0
+       ],
+       "bbox": [
+        416.7,
+        17.1,
+        573.3,
+        702.9
+       ]
+      },
+      {
+       "frame": 1640,
+       "eyes": [
+        [
+         611,
+         223
+        ],
+        [
+         736,
+         223
+        ]
+       ],
+       "eyesState": "open",
+       "source": "manual",
+       "confidence": 0.5,
+       "rotation": 0.0,
+       "head": [
+        499.8,
+        16.7,
+        347.5,
+        375.0
+       ],
+       "bbox": [
+        413.1,
+        14.2,
+        552.0,
+        705.8
+       ]
       },
       {
        "frame": 1647,
@@ -10187,6 +11967,180 @@
         ]
        ],
        "rotation": 0
+      },
+      {
+       "frame": 1655,
+       "eyes": [
+        [
+         620,
+         218
+        ],
+        [
+         740,
+         222
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.45,
+       "rotation": 1.9,
+       "head": [
+        513.1,
+        21.9,
+        333.8,
+        360.2
+       ],
+       "bbox": [
+        391.0,
+        11.5,
+        597.9,
+        708.5
+       ]
+      },
+      {
+       "frame": 1660,
+       "eyes": [
+        [
+         626,
+         215
+        ],
+        [
+         766,
+         211
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.4,
+       "rotation": -1.6,
+       "head": [
+        501.3,
+        -18.1,
+        389.4,
+        420.2
+       ],
+       "bbox": [
+        379.2,
+        11.3,
+        638.3,
+        708.7
+       ]
+      },
+      {
+       "frame": 1670,
+       "eyes": [
+        [
+         618,
+         230
+        ],
+        [
+         750,
+         226
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.4,
+       "rotation": -1.7,
+       "head": [
+        500.4,
+        10.1,
+        367.1,
+        396.2
+       ],
+       "bbox": [
+        355.4,
+        11.0,
+        719.1,
+        709.0
+       ]
+      },
+      {
+       "frame": 1680,
+       "eyes": [
+        [
+         546,
+         306
+        ],
+        [
+         730,
+         306
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.35,
+       "rotation": 0.0,
+       "head": [
+        382.2,
+        2.4,
+        511.5,
+        552.0
+       ],
+       "bbox": [
+        331.7,
+        10.7,
+        799.9,
+        709.3
+       ]
+      },
+      {
+       "frame": 1690,
+       "eyes": [
+        [
+         550,
+         286
+        ],
+        [
+         734,
+         284
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.4,
+       "rotation": -0.6,
+       "head": [
+        386.2,
+        -18.6,
+        511.6,
+        552.0
+       ],
+       "bbox": [
+        308.0,
+        10.5,
+        880.7,
+        709.5
+       ]
+      },
+      {
+       "frame": 1700,
+       "eyes": [
+        [
+         581,
+         171
+        ],
+        [
+         780,
+         168
+        ]
+       ],
+       "eyesState": "closed",
+       "source": "manual",
+       "confidence": 0.4,
+       "rotation": -0.9,
+       "head": [
+        403.9,
+        -158.9,
+        553.3,
+        597.1
+       ],
+       "bbox": [
+        284.2,
+        10.2,
+        961.5,
+        709.8
+       ]
       },
       {
        "frame": 1706,
@@ -10217,7 +12171,7 @@
      "trackMode": "linear",
      "flipX": false,
      "colorGrade": "整体压暗约 30%、去饱和偏青灰；四周重暗角",
-     "notes": "开头为旋转模糊的极近特写（1527~约 1545）；末段闭眼张嘴，推近",
+     "notes": "开头为旋转模糊的极近特写（1527~约 1545）；末段闭眼张嘴，推近；全程黑脸（key1，眼部一带压暗，1548~1706 均可见）",
      "continues": "s16.next"
     }
    ],
@@ -10292,7 +12246,9 @@
      "id": "s18.main",
      "role": "main",
      "z": 1,
-     "variant": {},
+     "variant": {
+      "key1": 1
+     },
      "switchEvents": [],
      "motionHints": [],
      "anchors": [
@@ -10362,7 +12318,7 @@
      "trackMode": "linear",
      "flipX": false,
      "colorGrade": "开头整体压暗、重暗角；随后迅速提亮发白、去饱和",
-     "notes": "闭眼张嘴；眼睛位置为估计（眼睛被刘海遮住）；1715 后模糊很重，基本不可用于拟合"
+     "notes": "闭眼张嘴；眼睛位置为估计（眼睛被刘海遮住）；1715 后模糊很重，基本不可用于拟合；黑脸延续自上一镜头（1707~1712 眼部压暗带可见）"
     }
    ],
    "exclusions": [],
@@ -11373,12 +13329,12 @@
      },
      "switchEvents": [
       {
-       "frame": 2280,
+       "frame": 2252,
        "param": "key4",
        "value": 1,
-       "fade": 30,
-       "confidence": 0.4,
-       "note": "爱心眼约 2280 出现"
+       "fade": 12,
+       "confidence": 0.6,
+       "note": "2250~2256 闭眼，2262 睁眼时已是粉色爱心眼（B3：2280→2252）"
       }
      ],
      "motionHints": [],
@@ -11491,7 +13447,9 @@
      "id": "s22.side",
      "role": "fullBody",
      "z": 1,
-     "variant": {},
+     "variant": {
+      "key5": 1
+     },
      "switchEvents": [],
      "motionHints": [],
      "anchors": [
@@ -11584,7 +13542,8 @@
      ],
      "trackMode": "linear",
      "flipX": false,
-     "notes": "短裙+尾巴；笑眼"
+     "notes": "短裙+尾巴；全程 >< 眼（key5，2150~2303 可见）",
+     "irisRefine": false
     }
    ],
    "exclusions": [
@@ -11676,12 +13635,12 @@
        "note": "加载图标约 2318 出现"
       },
       {
-       "frame": 2335,
+       "frame": 2325,
        "param": "key3",
        "value": 1,
-       "fade": 30,
-       "confidence": 0.5,
-       "note": "圈圈眼约 2335 出现"
+       "fade": 18,
+       "confidence": 0.7,
+       "note": "2326 开始变灰，约 2343 成纯白圆眼（B3：2335→2325，实测约 18 帧）"
       }
      ],
      "motionHints": [
@@ -12517,10 +14476,34 @@
      "role": "pip",
      "z": 1,
      "variant": {
-      "key5": 1,
-      "key7": 1
+      "key12": 1
      },
-     "switchEvents": [],
+     "switchEvents": [
+      {
+       "frame": 2530,
+       "param": "key5",
+       "value": 1,
+       "fade": 0,
+       "confidence": 0.9,
+       "note": "切点处（白色笔刷遮挡）切换：2530 起即为 >< 眼"
+      },
+      {
+       "frame": 2530,
+       "param": "key7",
+       "value": 1,
+       "fade": 0,
+       "confidence": 0.9,
+       "note": "切点处切换：2534 已满脸红"
+      },
+      {
+       "frame": 2530,
+       "param": "key12",
+       "value": 0,
+       "fade": 0,
+       "confidence": 0.9,
+       "note": "切点处切换：2529 仍有单片眼镜，2530~2607 全程没有"
+      }
+     ],
      "motionHints": [],
      "anchors": [
       {
@@ -12858,7 +14841,9 @@
      "id": "s27.body",
      "role": "side",
      "z": -9,
-     "variant": {},
+     "variant": {
+      "Clothes5": 0
+     },
      "switchEvents": [],
      "motionHints": [],
      "trackMode": "fixed",
@@ -12893,7 +14878,12 @@
         666.7,
         720
        ],
-       "head": null,
+       "head": [
+        166.6,
+        -441.9,
+        227.4,
+        245.4
+       ],
        "source": "manual",
        "confidence": 0.3
       }
@@ -12904,7 +14894,9 @@
      "id": "s27.full",
      "role": "fullBody",
      "z": -8,
-     "variant": {},
+     "variant": {
+      "Clothes5": 0
+     },
      "switchEvents": [],
      "motionHints": [],
      "trackMode": "fixed",
@@ -13035,7 +15027,9 @@
      "id": "s28.body",
      "role": "side",
      "z": 1,
-     "variant": {},
+     "variant": {
+      "Clothes5": 0
+     },
      "switchEvents": [],
      "motionHints": [],
      "anchors": [
@@ -13046,7 +15040,16 @@
         0,
         666.7,
         720
-       ]
+       ],
+       "head": [
+        166.6,
+        -441.9,
+        227.4,
+        245.4
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15
       },
       {
        "frame": 2622,
@@ -13055,6 +15058,30 @@
         0,
         661.3,
         720
+       ],
+       "head": [
+        194.7,
+        -399.4,
+        210.4,
+        227.1
+       ]
+      },
+      {
+       "frame": 2626,
+       "head": [
+        208.7,
+        -378.1,
+        201.9,
+        217.9
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15,
+       "bbox": [
+        22.0,
+        0.3,
+        646.0,
+        719.7
        ]
       },
       {
@@ -13064,19 +15091,30 @@
         1.3,
         600.0,
         718.7
-       ]
+       ],
+       "head": [
+        210.1,
+        -367.3,
+        206.0,
+        222.3
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15
       }
      ],
      "trackMode": "linear",
      "flipX": false,
-     "notes": "腰部到大腿特写，无头部；短裙",
+     "notes": "腰部到大腿特写，无头部；短裙；无尾巴（Clothes5=0，2614~2638 腿两侧只有白色飘带）",
      "continues": "s27.body"
     },
     {
      "id": "s28.full",
      "role": "fullBody",
      "z": 2,
-     "variant": {},
+     "variant": {
+      "Clothes5": 0
+     },
      "switchEvents": [],
      "motionHints": [],
      "anchors": [
@@ -13195,7 +15233,7 @@
        "radius": 12
       }
      ],
-     "notes": "闭眼；短裙",
+     "notes": "闭眼；短裙；无尾巴（Clothes5=0，2626 全身可见脚下没有尾巴）",
      "continues": "s27.full"
     }
    ],
@@ -13269,7 +15307,8 @@
      "role": "side",
      "z": 1,
      "variant": {
-      "Clothes1": 0
+      "Clothes1": 0,
+      "Clothes5": 0
      },
      "switchEvents": [],
      "motionHints": [],
@@ -13281,7 +15320,16 @@
         40.0,
         720.0,
         613.3
-       ]
+       ],
+       "head": [
+        205.1,
+        -435.3,
+        206.0,
+        222.3
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15
       },
       {
        "frame": 2656,
@@ -13290,6 +15338,30 @@
         0,
         661.3,
         720
+       ],
+       "head": [
+        217.2,
+        -455.5,
+        206.0,
+        222.3
+       ]
+      },
+      {
+       "frame": 2660,
+       "head": [
+        220.1,
+        -460.3,
+        206.0,
+        222.3
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15,
+       "bbox": [
+        0.0,
+        5.0,
+        662.6,
+        715.0
        ]
       },
       {
@@ -13299,6 +15371,30 @@
         21.3,
         666.7,
         698.7
+       ],
+       "head": [
+        132.2,
+        -587.4,
+        240.3,
+        259.4
+       ]
+      },
+      {
+       "frame": 2684,
+       "head": [
+        57.8,
+        -694.9,
+        269.4,
+        290.7
+       ],
+       "eyesState": "hidden",
+       "source": "manual-body",
+       "confidence": 0.15,
+       "bbox": [
+        0.0,
+        6.7,
+        1088.3,
+        713.3
        ]
       },
       {
@@ -13314,14 +15410,15 @@
      ],
      "trackMode": "linear",
      "flipX": false,
-     "notes": "腰部到裙摆特写，无头部；长裙（Clothes1=0）"
+     "notes": "腰部到裙摆特写，无头部；长裙（Clothes1=0）；无尾巴（Clothes5=0）"
     },
     {
      "id": "s29.full",
      "role": "fullBody",
      "z": 2,
      "variant": {
-      "Clothes1": 0
+      "Clothes1": 0,
+      "Clothes5": 0
      },
      "switchEvents": [],
      "motionHints": [],
@@ -13421,7 +15518,7 @@
        "radius": 12
       }
      ],
-     "notes": "长裙（Clothes1=0）"
+     "notes": "长裙（Clothes1=0）；无尾巴（Clothes5=0：2659 全身可见裙摆下、脚边没有尾巴，对比 s30/s32 长裙有尾巴卷在脚后）"
     }
    ],
    "exclusions": [
@@ -14553,7 +16650,9 @@
      "id": "s33.main",
      "role": "main",
      "z": 1,
-     "variant": {},
+     "variant": {
+      "key1": 1
+     },
      "switchEvents": [],
      "motionHints": [],
      "anchors": [
@@ -14661,7 +16760,7 @@
      "trackMode": "lk",
      "flipX": false,
      "colorGrade": "全屏半调网点风格背景；角色本身未见明显压暗，但整帧有轻微锐化/色阶压缩（疑似全屏滤镜），偏蓝",
-     "notes": "3097~3104 快速拉远"
+     "notes": "3097~3104 快速拉远；全程黑脸（key1，3100~3144 眼部压暗带可见）"
     }
    ],
    "exclusions": [
@@ -15564,12 +17663,12 @@
      "variant": {},
      "switchEvents": [
       {
-       "frame": 3307,
+       "frame": 3340,
        "param": "Clothes2",
        "value": 1,
-       "fade": 30,
-       "confidence": 0.4,
-       "note": "右侧全身约 3306~3309 变 Q 版，不确定"
+       "fade": 12,
+       "confidence": 0.6,
+       "note": "3306~3339 为正常比例（3306~3310 只是整体缩小），约 3340~3352 变 Q 版（B3：3307→3340）"
       }
      ],
      "motionHints": [],
@@ -16027,12 +18126,12 @@
      },
      "switchEvents": [
       {
-       "frame": 3440,
+       "frame": 3420,
        "param": "key7",
        "value": 1,
        "fade": 30,
-       "confidence": 0.4,
-       "note": "脸红约 3440 出现"
+       "confidence": 0.5,
+       "note": "约 3424 起泛红，3436 明显（B3：3440→3420）"
       }
      ],
      "motionHints": [],
@@ -16104,14 +18203,17 @@
      "id": "s40.full",
      "role": "fullBody",
      "z": 1,
-     "variant": {},
+     "variant": {
+      "Movement2": 1
+     },
      "switchEvents": [
       {
-       "frame": 3440,
-       "param": "Movement2",
+       "frame": 3420,
+       "param": "key7",
        "value": 1,
-       "fade": 0,
-       "confidence": 0.3
+       "fade": 30,
+       "confidence": 0.5,
+       "note": "约 3424 起泛红，3436 明显"
       }
      ],
      "motionHints": [],
@@ -16169,7 +18271,7 @@
      ],
      "trackMode": "linear",
      "flipX": false,
-     "notes": "短裙+尾巴；后段抚胸（Movement2）+脸红，切换时间不确定"
+     "notes": "短裙+尾巴；3400 起手已在胸前（抚胸 Movement2 从镜头开头就开着，B3 去掉 3440 的切换）；约 3424 起脸红"
     }
    ],
    "exclusions": [
