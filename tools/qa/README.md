@@ -51,9 +51,9 @@ tools/.venv/bin/python -I tools/qa/report.py --scene .data/fit/diag/scene_x.json
 
 参数：
 - `--shots s15,s24`：只跑这些镜头（缺省全部 46 个）。视频只包含这些镜头，音频取原 wav 的对应区段并拼接，保持音画同步。
-- `--scene`：判断哪些镜头已拟合（图层 id 前缀 `<镜头>.`）；`--render` 时也用它渲染。缺省 `scenes/deepseek-chan/scene.json`。
+- `--scene`：判断哪些镜头已拟合：镜头 [start, end) 与任一模型图层的 [in, out) 有交集即算已拟合（不看图层 id；continues 串起来的跨镜头实例会合并成一个图层，如 s16.next 覆盖 s17）；`--render` 时也用它渲染。缺省 `scenes/deepseek-chan/scene.json`。
 - `--renders`：渲染帧目录，缺省 `<out>/renders`。不加 `--render` 时直接读取，缺帧会报错。
-- `--render`：先跑 `pnpm render`，渲染选中镜头里已拟合镜头的全部帧（会覆盖同名帧）。
+- `--render`：先跑 `pnpm render`，只渲染选中镜头与图层区间的交集（会覆盖同名帧）。已拟合镜头里没有图层覆盖的帧按空渲染（全透明）计算，遮罩 <1%，不计有效帧。
 - `--layout`：差异视频布局：
   - `sbs`：并排，2560×720，缺省；
   - `overlay`：渲染以 50% 不透明度叠在原视频上，错位处会出现重影；
@@ -75,8 +75,8 @@ tools/.venv/bin/python -I tools/qa/report.py --scene .data/fit/diag/scene_x.json
 镜头状态：
 - `达标`：普通帧全部 ≥ 0.7；
 - `不达标`：存在 < 0.7 的普通帧；
-- `无普通帧`：只有目测帧或特效帧，以肉眼为准；
-- `未拟合`：scene.json 里没有这个镜头的图层。
+- `无有效普通帧`：没有有效的普通帧（只有目测帧或特效帧，或普通帧都落在无图层/无角色区段），以肉眼为准；
+- `未拟合`：镜头区间与 scene.json 里任何模型图层都没有交集。
 
 最差镜头排行：
 - 普通帧按 < 0.7 的帧数降序排，再按均值升序；

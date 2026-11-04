@@ -51,9 +51,30 @@ def log(*a) -> None:
 
 # ---------------- 输入 ----------------
 
-def fitted_shots(scene: dict) -> set[str]:
-    """有图层的镜头：图层 id 形如 <镜头 id>.<实例名>。"""
-    return {l["id"].split(".")[0] for l in scene.get("layers", []) if "." in l.get("id", "")}
+def layer_spans(scene: dict) -> list[tuple[int, int]]:
+    """模型图层的 [in, out) 区间（缺省为整片）。用 continues 串起来的跨镜头实例会合并成一个图层，
+    所以不能按图层 id 前缀判断镜头归属，只能按区间。"""
+    dur = int(scene.get("duration", metric.load_shots()["shots"][-1]["end"]))
+    return [(int(l.get("in", 0)), int(l.get("out", dur))) for l in scene.get("layers", []) if l.get("kind") == "model"]
+
+
+def covered_frames(shot: dict, lspans: list[tuple[int, int]]) -> list[int]:
+    """镜头 [start, end) 与所有模型图层区间之并的交集（升序帧号）。非空即视为「已拟合」。"""
+    fs: set[int] = set()
+    for a, b in lspans:
+        fs.update(range(max(a, shot["start"]), min(b, shot["end"])))
+    return sorted(fs)
+
+
+def frame_ranges(frames: list[int]) -> list[tuple[int, int]]:
+    """升序帧号 → 闭区间列表。"""
+    out: list[tuple[int, int]] = []
+    for f in frames:
+        if out and out[-1][1] == f - 1:
+            out[-1] = (out[-1][0], f)
+        else:
+            out.append((f, f))
+    return out
 
 
 def spans(shots: list[dict]) -> list[list[dict]]:
@@ -84,9 +105,9 @@ def ref_stream(a: int, b: int):
         p.wait()
 
 
-def run_render(scene_path: Path, shots: list[dict], renders: Path) -> None:
-    """用 pnpm render（与播放器同一份代码）渲染这些镜头的全部帧。"""
-    spec = ",".join(f"{s['start']}-{s['end'] - 1}" for s in shots)
+def run_render(scene_path: Path, frames: list[int], renders: Path) -> None:
+    """用 pnpm render（与播放器同一份代码）渲染这些帧（镜头与图层区间的交集）。"""
+    spec = ",".join(f"{a}-{b}" if b > a else f"{a}" for a, b in frame_ranges(sorted(set(frames))))
     renders.mkdir(parents=True, exist_ok=True)
     log(f"pnpm render {spec} → {renders}")
     subprocess.run(["pnpm", "-s", "render", "--scene", str(scene_path), "--frames", spec, "--out", str(renders)],
@@ -239,7 +260,7 @@ def shot_status(fitted: bool, summ: dict | None) -> str:
         return "未拟合"
     n = summ["normal"]["ssim360"]
     if n.get("valid", 0) == 0:
-        return "无普通帧"
+        return "无有效普通帧"
     return "达标" if summ["normalPass"] else "不达标"
 
 
@@ -304,7 +325,7 @@ def pct(v):
 
 
 def status_cls(st: str) -> str:
-    return {"达标": "pass", "不达标": "fail", "无普通帧": "na", "未拟合": "unfit"}[st]
+    return {"达标": "pass", "不达标": "fail", "无有效普通帧": "na", "未拟合": "unfit"}[st]
 
 
 def svg_curve(sid: str, a: int, b: int, rows: list[dict]) -> str:
@@ -461,7 +482,7 @@ def main(argv=None) -> None:
     renders = Path(args.renders) if args.renders else out / "renders"
     scene_path = Path(args.scene)
     scene = json.loads(scene_path.read_text(encoding="utf-8"))
-    fit_ids = fitted_shots(scene)
+    lspans = layer_spans(scene)
     all_shots = sorted(metric.load_shots()["shots"], key=lambda s: s["start"])
     if args.shots:
         want = args.shots.split(",")
@@ -471,12 +492,14 @@ def main(argv=None) -> None:
         sel = [s for s in all_shots if s["id"] in want]
     else:
         sel = all_shots
-    fit_sel = [s for s in sel if s["id"] in fit_ids]
-    log(f"镜头 {len(sel)} 个，其中已拟合 {len(fit_sel)} 个：{[s['id'] for s in fit_sel]}")
+    covered = {s["id"]: covered_frames(s, lspans) for s in sel}
+    fit_sel = [s for s in sel if covered[s["id"]]]
+    log(f"镜头 {len(sel)} 个，其中已拟合（与图层区间有交集）{len(fit_sel)} 个：{[s['id'] for s in fit_sel]}")
 
-    if args.render and fit_sel:
-        run_render(scene_path, fit_sel, renders)
-    missing = [f for s in fit_sel for f in range(s["start"], s["end"]) if not (renders / f"frame_{f:06d}.png").exists()]
+    need = [f for s in fit_sel for f in covered[s["id"]]]
+    if args.render and need:
+        run_render(scene_path, need, renders)
+    missing = [f for f in need if not (renders / f"frame_{f:06d}.png").exists()]
     if missing:
         sys.exit(f"渲染帧缺失 {len(missing)} 帧（如 {missing[:5]}），目录 {renders}；加 --render 先渲染")
 
@@ -500,14 +523,20 @@ def main(argv=None) -> None:
     for sp in spans(sel):
         stream = ref_stream(sp[0]["start"], sp[-1]["end"])
         for shot in sp:
-            sid, fitted = shot["id"], shot["id"] in fit_ids
+            sid = shot["id"]
+            cov = set(covered[sid])
+            fitted = bool(cov)
             rows: list[dict] = []
             worst: dict[str, list] = {c: [] for c in metric.CLASSES}  # 最大堆（取负）：保留最差 K 帧
             counter = 0
             for f in range(shot["start"], shot["end"]):
                 ref = next(stream)
                 if fitted:
-                    rgb, alpha = metric.load_render(renders / f"frame_{f:06d}.png")
+                    if f in cov:
+                        rgb, alpha = metric.load_render(renders / f"frame_{f:06d}.png")
+                    else:
+                        # 没有任何图层覆盖的帧：渲染器在这里输出全透明，直接按空渲染算（遮罩 <1% → 无角色，不计有效帧）
+                        rgb, alpha = np.zeros((H, W, 3)), np.zeros((H, W))
                     info, comp, smap, mask = metric.frame_metric(rgb, alpha, ref, shot, f, want_maps=True)
                     fr = {"comp": comp, "rgb": rgb, "alpha": alpha, "smap": smap, "mask": mask,
                           "excl": metric.exclusion_mask(shot, f)}
@@ -547,6 +576,7 @@ def main(argv=None) -> None:
             classes = {c: sum(1 for r in rows if r["class"] == c) for c in metric.CLASSES}
             summ = metric.summarize(rows) if fitted else None
             shots_out[sid] = {"start": shot["start"], "end": shot["end"], "fitted": fitted, "classFrames": classes,
+                              "layerFrames": [list(r) for r in frame_ranges(covered[sid])],
                               "status": shot_status(fitted, summ), "summary": summ, "thumbs": thumbs, "perFrame": rows}
             if fitted:
                 all_rows += rows
