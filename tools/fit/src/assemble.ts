@@ -13,25 +13,33 @@ export const MODEL_CREDITS =
   'DeepSeek-chan — Illustration & PSD Layer Separation: Kamiya Ryoko / Live2D Rigging: 霓虹猫_NeonNeko / ' +
   'Free model distributed by Kamiya Ryoko (https://vgen.co/KAMIYA, https://x.com/kamiya_ryoko)';
 
-export function assembleScene(out?: string): void {
+export function assembleScene(out?: string, only?: string[]): void {
   const shots = loadShots();
   const layers: unknown[] = [];
   const markers: unknown[] = [];
   const fitted: Record<string, unknown> = {};
+  const covered = new Set<string>();
   for (const shot of shots.shots) {
     const file = join(FIT_DIR, shot.id + FIT_TAG, 'result.json');
-    if (!existsSync(file)) continue;
+    if (!existsSync(file) || covered.has(shot.id)) continue;
     const r = JSON.parse(readFileSync(file, 'utf8'));
+    // P3：一个结果可覆盖多个镜头（continues 合并的拟合单元，r.shots）
+    const ids: string[] = r.shots ?? [shot.id];
+    if (only && !ids.some((x) => only.includes(x))) continue;
     layers.push(...r.layers);
-    markers.push({ id: shot.id, start: shot.start, end: shot.end, kind: 'shot', label: `${shot.id} ${shot.category}` });
-    fitted[shot.id] = { elapsedSec: Math.round(r.elapsedSec), fittedFrames: r.fittedFrames, renders: r.evals };
+    for (const id of ids) {
+      covered.add(id);
+      const s = shots.shots.find((x) => x.id === id)!;
+      markers.push({ id: s.id, start: s.start, end: s.end, kind: 'shot', label: `${s.id} ${s.category}` });
+    }
+    fitted[shot.id] = { shots: ids, elapsedSec: Math.round(r.elapsedSec), fittedFrames: r.fittedFrames, renders: r.evals };
   }
   const scene = {
     $schema: '../../packages/scene/schema/scene.v1.json',
     format: 'charaforge.scene',
     version: 1,
     meta: {
-      title: 'DeepSeek-chan PV 复刻（打样第二轮：s15 / s24 / s43）',
+      title: 'DeepSeek-chan PV 复刻（P3 全片拟合）',
       description: '由 tools/fit 从参考视频逐帧反推；只包含已拟合镜头的角色图层，其余时间为空。',
       credits: [MODEL_CREDITS],
       provenance: { source: 'fit', tool: '@charaforge/fit', detail: { shots: fitted, reference: shots.video.uri, sha256: shots.video.sha256 } },

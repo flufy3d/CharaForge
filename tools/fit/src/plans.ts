@@ -106,3 +106,232 @@ export function planS15v3(shot: Shot): { plans: LayerPlan[]; order: string[] } {
   const left = plan('s15.left'), chibi = plan('s15.chibi'), center = plan('s15.center');
   return { plans: [left, chibi, center], order: ['s15.left', 's15.chibi', 's15.center'] };
 }
+
+// ======================================================================================
+// P3：全片通用规划（全部从 shots.json 推出）
+// ======================================================================================
+
+/** 已用专门规划正式拟合过的镜头（结果直接复用，不重跑）；跨镜头 continues 链在这些镜头处断开 */
+export const LEGACY_SHOTS = new Set(['s15', 's24', 's43']);
+
+/** shots 问题清单的一行（汇报用；不直接改 shots.json） */
+export interface ShotIssue { shot: string; inst: string; frame: number | null; field: string; problem: string; suggest: string }
+
+/** 拟合单元：一组由 continues 连起来的镜头（同一实例跨镜头 = 一个图层，物理不重置） */
+export interface FitUnit {
+  /** 单元 ID = 首个镜头 ID（结果写 .data/fit/<id>/result.json） */
+  id: string;
+  shots: string[];
+  /** 合并后的虚拟镜头：区间 = 各镜头之并，实例 = continues 链合并，排除区/效果取并 */
+  shot: Shot;
+  issues: ShotIssue[];
+}
+
+/** 按镜头顺序把 continues 连接的镜头并成拟合单元；无角色镜头不成单元；LEGACY 镜头单独成单元 */
+export function fitUnits(shots: Shot[]): FitUnit[] {
+  const byInst = new Map<string, Shot>();
+  for (const s of shots) for (const i of s.instances) byInst.set(i.id, s);
+  const parent = new Map<string, string>(shots.map((s) => [s.id, s.id]));
+  const find = (x: string): string => (parent.get(x) === x ? x : find(parent.get(x)!));
+  for (const s of shots) {
+    if (!s.hasCharacter || LEGACY_SHOTS.has(s.id)) continue;
+    for (const i of s.instances) {
+      const prev = i.continues ? byInst.get(i.continues) : undefined;
+      if (!prev || LEGACY_SHOTS.has(prev.id) || !prev.hasCharacter) continue;
+      parent.set(find(s.id), find(prev.id));
+    }
+  }
+  const groups = new Map<string, Shot[]>();
+  for (const s of shots) {
+    if (!s.hasCharacter) continue;
+    const r = find(s.id);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r)!.push(s);
+  }
+  return [...groups.values()]
+    .map((g) => g.sort((a, b) => a.start - b.start))
+    .sort((a, b) => a[0]!.start - b[0]!.start)
+    .map((g) => mergeUnit(g, byInst));
+}
+
+/** 合并一个单元内的镜头（单镜头单元原样返回镜头对象，但实例会做眼睛初值补全） */
+function mergeUnit(g: Shot[], byInst: Map<string, Shot>): FitUnit {
+  const issues: ShotIssue[] = [];
+  const ids = new Set(g.map((s) => s.id));
+  // continues 链：实例 → 链根（只在单元内追溯；指向单元外的实例视为链根，并记下前驱）
+  const rootOf = (i: ShotInstance): string => {
+    let cur = i;
+    for (;;) {
+      const prevShot = cur.continues ? byInst.get(cur.continues) : undefined;
+      if (!prevShot || !ids.has(prevShot.id)) return cur.id;
+      cur = prevShot.instances.find((x) => x.id === cur.continues)!;
+    }
+  };
+  const chains = new Map<string, { shot: Shot; inst: ShotInstance }[]>();
+  for (const s of g) for (const i of s.instances) {
+    const r = rootOf(i);
+    if (!chains.has(r)) chains.set(r, []);
+    chains.get(r)!.push({ shot: s, inst: i });
+  }
+  const instances: ShotInstance[] = [];
+  for (const [rid, segs] of chains) {
+    const head = segs[0]!.inst;
+    // 开关：链根 variant + 各段 switchEvents；后续段 variant 与累计状态不一致时补一个阶跃切换并记问题
+    const state: Record<string, number> = { ...head.variant };
+    const events: ShotInstance['switchEvents'] = [];
+    segs.forEach(({ shot, inst }, k) => {
+      if (k > 0) {
+        for (const [key, v] of Object.entries(inst.variant)) {
+          if ((state[key] ?? 0) !== v) {
+            issues.push({ shot: shot.id, inst: inst.id, frame: shot.start, field: `variant.${key}`, problem: `continues 链上前一段结束时 ${key}=${state[key] ?? 0}，本段 variant 为 ${v}，前一段没有对应 switchEvent`, suggest: `在前一段补 switchEvent（param ${key}, value ${v}），或改本段 variant` });
+            events.push({ frame: shot.start, param: key, value: v, fade: 0 });
+            state[key] = v;
+          }
+        }
+        for (const [key, v] of Object.entries(state)) {
+          if (v !== 0 && inst.variant[key] === undefined) issues.push({ shot: shot.id, inst: inst.id, frame: shot.start, field: `variant.${key}`, problem: `continues 链上累计 ${key}=${v}，本段 variant 未列出（按规范即默认值）`, suggest: `本段 variant 补 ${key}: ${v}（若确实切回默认则在前一段补 switchEvent）` });
+        }
+      }
+      for (const e of inst.switchEvents) { events.push(e); state[e.param] = e.value; }
+    });
+    const track = segs.flatMap(({ inst }) => inst.track).sort((a, b) => a.frame - b.frame);
+    const clipSegs = segs.filter(({ inst }) => inst.clip?.length);
+    const clip = clipSegs.length ? clipSegs.flatMap(({ inst }) => inst.clip!).sort((a, b) => a.frame - b.frame) : null;
+    // z：取可见帧最多的那段（同一时刻各实例的相对前后与 shots 一致即可）
+    const span = (i: ShotInstance) => i.track.filter((t) => t.bbox).length;
+    const zSeg = segs.reduce((a, b) => (span(b.inst) > span(a.inst) ? b : a));
+    instances.push({
+      ...head, id: rid, z: zSeg.inst.z, track, switchEvents: events, clip,
+      colorGrade: segs.map(({ inst }) => inst.colorGrade).filter(Boolean).join('；') || undefined,
+      notes: segs.map(({ inst }) => `${inst.id}: ${inst.notes ?? ''}`).join(' | '),
+      // continues 指向单元外（已拟合镜头）的实例：保留，供汇报
+      continues: head.continues,
+    } as ShotInstance);
+  }
+  const first = g[0]!, last = g[g.length - 1]!;
+  const shot: Shot = g.length === 1 ? { ...first, instances } : {
+    ...first,
+    end: last.end,
+    category: g.map((s) => s.category).join('+'),
+    instances,
+    exclusions: g.flatMap((s) => s.exclusions),
+    effects: g.flatMap((s) => s.effects),
+    notes: g.map((s) => `${s.id}: ${s.notes ?? ''}`).join(' | '),
+  };
+  return { id: first.id, shots: g.map((s) => s.id), shot, issues };
+}
+
+/** shots 轨迹某字段的分段线性插值（只用非空采样；区间外保持端点） */
+const sampleAt = (inst: ShotInstance, key: 'opacity' | 'blurSigma', f: number): number | null => {
+  const ks = inst.track.filter((t) => typeof t[key] === 'number').map((t) => ({ frame: t.frame, value: t[key] as number }));
+  return ks.length ? strengthAt(ks, f) : null;
+};
+
+/**
+ * 通用图层规划（P3）：从（合并后的）镜头推出全部图层，规则与 planS15v3 一致并推广：
+ *   - in = 轨迹第一个有 bbox 的采样（翻牌实例取 cardFlip 起点），out = 最后一个 bbox 之后第一个 bbox=null 的采样帧（无则镜头末）；
+ *   - 开关：variant 为常量，switchEvents（含 fade）为斜坡，from 取切换前的累计值；
+ *   - clip：circleWindow 效果作用的实例为圆形开窗（关键帧区间内裁切，之后不裁切）；其余为画中画圆角矩形（整层裁切，区间外保持端点）；
+ *     不透明度取轨迹 opacity（无 clip 时也作为图层不透明度轨）；
+ *   - 景深 depthOfField → 逐帧 blur = dofK × 强度曲线；其他实例轨迹 blurSigma ≥ 1.5 的区间同样处理（强度 = blurSigma）；
+ *   - cardFlip → scaleX 曲线；颜色滤镜：有 colorGrade（实例或效果）、单实例镜头或 main 实例时拟合；
+ *   - 镜头常量：Clothes2 取 variant（缺省 0）固定；前倾只对单元内头最大、头高 ≥ 300px 的实例搜索，其余固定 0；
+ *   - 没有任何 eyes 的实例用 head 框估一个眼睛初值（confidence 0，不进锚点先验）；head、eyes 都没有的实例跳过（记问题）。
+ */
+export function planAuto(shot: Shot): { plans: LayerPlan[]; order: string[]; skipped: { id: string; reason: string }[]; issues: ShotIssue[] } {
+  const issues: ShotIssue[] = [];
+  const skipped: { id: string; reason: string }[] = [];
+  const fxOf = (kind: string, id: string) => shot.effects.find((e) => e.kind === kind && (!e.instances || e.instances.includes(id))) as any;
+  const headH = (i: ShotInstance) => Math.max(0, ...i.track.filter((t) => t.head).map((t) => t.head![3]));
+  const shotGrade = shot.effects.some((e) => e.kind === 'colorGrade');
+  const plans: LayerPlan[] = [];
+  for (const I0 of shot.instances) {
+    const I = { ...I0, track: I0.track.map((t) => ({ ...t })) } as ShotInstance;
+    const seen = I.track.filter((t) => t.bbox);
+    if (!seen.length) { skipped.push({ id: I.id, reason: '轨迹里没有 bbox（不可见）' }); continue; }
+    // continues 指向单元外（已正式拟合的打样镜头）的短尾段：前驱图层已单独导出，这里不再另起一个物理重置的图层
+    if (I.continues && !shot.instances.some((x) => x.id === I.continues) && seen[seen.length - 1]!.frame - seen[0]!.frame <= 30) {
+      skipped.push({ id: I.id, reason: `转场尾段（continues ${I.continues}，前驱已在打样镜头中拟合），不单独起图层` });
+      issues.push({ shot: shot.id, inst: I.id, frame: seen[0]!.frame, field: 'continues', problem: `continues ${I.continues} 指向已拟合的打样镜头；本段 ${seen[0]!.frame}～${seen[seen.length - 1]!.frame} 没有图层（转场特效帧）`, suggest: '若要连续，需重跑前驱镜头并把本段并入（全片阶段再定）' });
+      continue;
+    }
+    if (!I.track.some((t) => t.eyes)) {
+      const heads = I.track.filter((t) => t.head);
+      if (!heads.length) {
+        skipped.push({ id: I.id, reason: '没有 eyes 也没有 head，无法给变换初值' });
+        issues.push({ shot: shot.id, inst: I.id, frame: seen[0]!.frame, field: 'track.eyes/head', problem: '可见（有 bbox）但没有任何 eyes/head 采样，拟合无法初始化', suggest: '补至少首尾两个 eyes 锚点（或 head 框）；若角色只露身体，标 eyesState hidden 并给 head 的画面外估计' });
+        continue;
+      }
+      // 用 head 框估眼睛（参考姿态下两眼约在头框 55% 高度、水平 ±18%）
+      for (const t of I.track) if (t.head && !t.eyes) {
+        const [x, y, w, h] = t.head;
+        t.eyes = [[x + w * 0.32, y + h * 0.55], [x + w * 0.68, y + h * 0.55]];
+        t.confidence = 0;
+      }
+      issues.push({ shot: shot.id, inst: I.id, frame: heads[0]!.frame, field: 'track.eyes', problem: '没有任何 eyes 采样（拟合用 head 框估初值，不进锚点先验）', suggest: '补 eyes 锚点（至少首尾与转身处）' });
+    }
+    const flip = fxOf('cardFlip', I.id);
+    const dof = fxOf('depthOfField', I.id);
+    const circ = fxOf('circleWindow', I.id);
+    const lastSeen = seen[seen.length - 1]!.frame;
+    const after = I.track.find((t) => t.frame > lastSeen && t.bbox === null);
+    const start = flip ? flip.start : seen[0]!.frame;
+    const end = Math.min(shot.end, after ? after.frame : shot.end);
+    if (end - start < 2) { skipped.push({ id: I.id, reason: `可见区间过短 [${start}, ${end})` }); continue; }
+    // 开关：from = 切换前累计值
+    const cur: Record<string, number> = { ...I.variant };
+    const switches = [...I.switchEvents].sort((a, b) => a.frame - b.frame).map((e) => {
+      const from = cur[e.param] ?? 0;
+      cur[e.param] = e.value;
+      return { param: e.param, from, to: e.value, window: [e.frame - 8, e.frame + 8] as [number, number], est: e.frame, fade: e.fade ?? 0 };
+    });
+    for (const sw of switches) if (sw.est < start || sw.est >= end) issues.push({ shot: shot.id, inst: I.id, frame: sw.est, field: `switchEvents.${sw.param}`, problem: `切换帧 ${sw.est} 不在可见区间 [${start}, ${end}) 内`, suggest: '核对切换帧或 bbox 可见区间' });
+    // 不透明度轨
+    const opS = I.track.filter((t) => typeof t.opacity === 'number');
+    const opCurve = opS.some((t) => t.opacity! < 0.99) ? (f: number) => sampleAt(I, 'opacity', f)! : undefined;
+    // clip
+    let clipKeys: LayerPlan['clipKeys'];
+    let clipRange: [number, number] | undefined;
+    if (I.clip?.length) {
+      const a = (f: number) => (opCurve ? opCurve(f) : 1);
+      if (circ) {
+        clipKeys = I.clip.map((c) => ({ f: c.frame, cx: c.rect[0] + c.rect[2] / 2, cy: c.rect[1] + c.rect[3] / 2, r: c.radius ?? Math.min(c.rect[2], c.rect[3]) / 2, a: a(c.frame) }));
+        clipRange = [I.clip[0]!.frame, I.clip[I.clip.length - 1]!.frame + 1];
+      } else {
+        clipKeys = I.clip.map((c) => ({ f: c.frame, cx: c.rect[0] + c.rect[2] / 2, cy: c.rect[1] + c.rect[3] / 2, w: c.rect[2], h: c.rect[3], r: c.radius ?? 0, a: a(c.frame) }));
+        clipRange = [start, end];
+      }
+      if (I.clip[0]!.frame > start + 2 && !circ) issues.push({ shot: shot.id, inst: I.id, frame: start, field: 'clip', problem: `首个 clip 关键帧 ${I.clip[0]!.frame} 晚于可见起点 ${start}（之前按首帧窗口保持）`, suggest: `在 ${start} 补 clip 关键帧` });
+    }
+    // 模糊：景深效果，或轨迹 blurSigma ≥ 1.5 的区间
+    let blurRanges: [number, number][] = [];
+    let dofStrength: ((f: number) => number) | undefined;
+    if (dof) {
+      blurRanges = [[Math.max(start, dof.start), end]];
+      dofStrength = (f: number) => (dof.strength?.length ? strengthAt(dof.strength, f) : 8);
+    } else if (I.track.some((t) => (t.blurSigma ?? 0) >= 1.5)) {
+      const fs: number[] = [];
+      for (let f = start; f < end; f++) if ((sampleAt(I, 'blurSigma', f) ?? 0) >= 1.5) fs.push(f);
+      if (fs.length) {
+        blurRanges = [[fs[0]!, fs[fs.length - 1]! + 1]];
+        dofStrength = (f: number) => Math.max(0.3, sampleAt(I, 'blurSigma', f)!);
+      }
+    }
+    plans.push({
+      id: I.id, inst: I, in: start, out: end, constants: { ...I.variant }, switches, blurRanges, opacityRanges: [],
+      consts: [], colorFilter: !!I.colorGrade || shotGrade || shot.instances.length === 1 || I.role === 'main', hairBake: false, z: I.z,
+      ...(dofStrength ? { dofStrength } : {}),
+      ...(flip ? { flipCurve: (f: number) => strengthAt(flip.strength, f) } : {}),
+      ...(clipKeys ? { clipKeys, clipRange } : {}),
+      ...(opCurve && !clipKeys ? { opacityCurve: opCurve } : {}),
+      fixed: { clothes2: I.variant.Clothes2 ?? 0, lean: 0 },
+      reg: false,
+    } as LayerPlan);
+  }
+  // 前倾搜索：只对（未跳过的）头最大、头高 ≥ 300px 的实例
+  const big = [...plans].sort((a, b) => headH(b.inst) - headH(a.inst))[0];
+  if (big && headH(big.inst) >= 300) delete big.fixed!.lean;
+  // 拟合顺序：先靠后（z 小）的图层，已拟合的图层参与后续图层的渲染；同 z 先出现的先拟合
+  const order = [...plans].sort((a, b) => a.z - b.z || a.in - b.in).map((p) => p.id);
+  return { plans, order, skipped, issues };
+}

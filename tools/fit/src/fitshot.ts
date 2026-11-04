@@ -66,7 +66,11 @@ export interface LayerPlan {
   /** 翻牌：逐帧 scaleX 曲线（shots 的 cardFlip 效果强度）；优先于 flipRamp */
   flipCurve?: (f: number) => number;
   /** 圆形开窗的关键帧（shots 的实例 clip + opacity 轨）：给出时直接使用，不再逐关键帧拟合 */
-  clipKeys?: { f: number; cx: number; cy: number; r: number; a: number }[];
+  clipKeys?: { f: number; cx: number; cy: number; r: number; a: number; w?: number; h?: number }[];
+  /** 图层不透明度曲线（shots 轨迹 opacity；没有 clip 时使用） */
+  opacityCurve?: (f: number) => number;
+  /** 本图层的镜头常量固定值（P3 通用规划：Clothes2 取 variant、小实例前倾固定 0）；命令行 --fixed 覆盖 */
+  fixed?: Record<string, number>;
   /** 变换初值粗配准（traj2 的 reg） */
   reg?: boolean;
   /** 景深强度曲线（sigma，像素）：blurRanges 内 blur = dofK × 它 */

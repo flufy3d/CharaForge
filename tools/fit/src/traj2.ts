@@ -23,7 +23,7 @@ import type { GeomPool } from './geom/gpool.ts';
 import { FIT_DIR, FIT_TAG, MODEL_URI, REPO } from './paths.ts';
 import type { Pool } from './pool.ts';
 import { RefFrames } from './refvideo.ts';
-import { detectNewFrames, exclusionsAt, holdSegments, trackAt } from './shotsutil.ts';
+import { detectNewFrames, exclusionsAt, holdSegments, loadShots, trackAt } from './shotsutil.ts';
 import { bandSolve } from './traj.ts';
 import { MODELX } from './modelx.ts';
 import { INPUT_DIMS, forward, linearLinks, type VtsModel } from './vts.ts';
@@ -163,7 +163,10 @@ export function buildLayer(p: LayerPlan, vts: VtsModel, st: LayerState, calib: M
     const [l, r, w] = interp(ks.map((k) => k.f), g);
     const A = ks[l]!, B = ks[r]!;
     const m = (k: 'cx' | 'cy' | 'r' | 'a') => A[k] * (1 - w) + B[k] * w;
-    return { cx: m('cx'), cy: m('cy'), r: Math.max(0, m('r')), a: Math.min(1, Math.max(0, m('a'))) };
+    // 画中画圆角矩形（P3）：关键帧带 w、h 时按矩形插值；否则为圆形开窗
+    const rw = A.w !== undefined && B.w !== undefined ? A.w * (1 - w) + B.w * w : undefined;
+    const rh = A.h !== undefined && B.h !== undefined ? A.h * (1 - w) + B.h * w : undefined;
+    return { cx: m('cx'), cy: m('cy'), r: Math.max(0, m('r')), a: Math.min(1, Math.max(0, m('a'))), w: rw, h: rh };
   };
   const clips = Array.from({ length: n }, (_, i) => clipAt(p.in + i));
   const scaleX = p.flipCurve ? Array.from({ length: n }, (_, i) => Math.max(0.02, p.flipCurve!(p.in + i))) : p.flipRamp ? Array.from({ length: n }, (_, i) => {
@@ -176,12 +179,12 @@ export function buildLayer(p: LayerPlan, vts: VtsModel, st: LayerState, calib: M
     transform: { x: bk(tf.map((t) => t.x)), y: bk(tf.map((t) => t.y)), scale: bk(tf.map((t) => Math.exp(t.ls))), ...(scaleX ? { scaleX: bk(scaleX) } : {}), rotation: bk(tf.map((t) => t.rot)), anchorX: ax, anchorY: ay },
     ...(p.clipRange ? {
       clip: {
-        x: bk(clips.map((c) => (c ? c.cx - c.r : -10000))), y: bk(clips.map((c) => (c ? c.cy - c.r : -10000))),
-        width: bk(clips.map((c) => (c ? 2 * c.r : 30000))), height: bk(clips.map((c) => (c ? 2 * c.r : 30000))),
-        radius: bk(clips.map((c) => (c ? c.r : 0))), feather: 3,
+        x: bk(clips.map((c) => (c ? c.cx - (c.w ?? 2 * c.r) / 2 : -10000))), y: bk(clips.map((c) => (c ? c.cy - (c.h ?? 2 * c.r) / 2 : -10000))),
+        width: bk(clips.map((c) => (c ? c.w ?? 2 * c.r : 30000))), height: bk(clips.map((c) => (c ? c.h ?? 2 * c.r : 30000))),
+        radius: bk(clips.map((c) => (c ? c.r : 0))), feather: clips.some((c) => c?.w !== undefined) ? 1 : 3,
       },
-      opacity: bk(clips.map((c) => (c ? c.a : 1))),
-    } : {}),
+      opacity: bk(clips.map((c, i) => (c ? c.a : p.opacityCurve ? p.opacityCurve(p.in + i) : 1))),
+    } : p.opacityCurve ? { opacity: bk(Array.from({ length: n }, (_, i) => Math.min(1, Math.max(0, p.opacityCurve!(p.in + i))))) } : {}),
     filters,
     // 没有 continues 的实例：起点不做 stabilize，从更早 90 帧开始用首帧输入预热（规范 4：预热帧用帧 in 的输入）
     physics: { warmup: 90, stabilize: false },
@@ -196,7 +199,7 @@ export function buildLayer(p: LayerPlan, vts: VtsModel, st: LayerState, calib: M
   };
 }
 
-export interface ClipKey { f: number; cx: number; cy: number; r: number; a: number }
+export interface ClipKey { f: number; cx: number; cy: number; r: number; a: number; w?: number; h?: number }
 
 export interface Fit2Options {
   /** 其他（已拟合或待拟合）图层：参与渲染与合成 */
@@ -247,8 +250,17 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
 
   // ---- 节点、关键帧、初值 ----
   const { isNew } = detectNewFrames(ref, shot, p.inst, p.in, p.out);
+  // P3：shots.json 的 cadence（帧保持段）优先于画面检测：段内只有 start + k·every 是新画面；段外沿用检测
+  {
+    let nc = 0;
+    for (const c of loadShots().cadence ?? []) {
+      for (let f = Math.max(c.start, p.in + 1); f < Math.min(c.end, p.out); f++) { isNew.set(f, (f - c.start) % c.every === 0); nc++; }
+    }
+    if (nc) log(`[${shot.id}] ${p.id}: cadence 覆盖 ${nc} 帧（shots.json）`);
+  }
   const nodes = [...isNew.entries()].filter(([, v]) => v).map(([f]) => f).sort((a, b) => a - b);
-  const zoom = shot.effects.some((e) => e.kind === 'zoom');
+  // 推拉/平移/缩放镜头：变换关键帧加密（P3：pan、scale 与 zoom 同等处理）
+  const zoom = shot.effects.some((e) => e.kind === 'zoom' || e.kind === 'pan' || e.kind === 'scale');
   const every = opts.keyEvery ?? MODELX.keyEvery ?? (zoom ? 12 : 24);
   const keys: number[] = [];
   for (let f = p.in; f < p.out - 1; f += every) keys.push(f);

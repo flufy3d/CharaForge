@@ -21,7 +21,7 @@ import { buildLayer, fitInputs } from './traj2.ts';
 import { loadVts } from './vts.ts';
 import { encodePng } from '../../../apps/player/scripts/png.ts';
 import { FIT_DIR, FIT_TAG, MODEL_URI, REPO } from './paths.ts';
-import { planFor, planS15v3 } from './plans.ts';
+import { fitUnits, LEGACY_SHOTS, planAuto, planFor, planS15v3 } from './plans.ts';
 import { loadShots } from './shotsutil.ts';
 
 /** 模型参考姿态（全部默认参数、物理静止）下的双眼虹膜中心（画布像素），用于由 shots 的 eyes 求初始变换 */
@@ -100,7 +100,24 @@ async function main() {
     options: { shot: { type: 'string' }, until: { type: 'string' }, start: { type: 'string' }, geom: { type: 'string' }, itersA: { type: 'string' }, itersB: { type: 'string' }, noconst: { type: 'boolean' }, smoothC: { type: 'string' }, fixed: { type: 'string' }, refine: { type: 'string' }, workers: { type: 'string' }, effort: { type: 'string' }, hair: { type: 'boolean' }, only: { type: 'string' }, scene: { type: 'string' }, frames: { type: 'string' }, preview: { type: 'string' }, out: { type: 'string' } },
   });
   if (cmd === 'assemble') {
-    assembleScene(values.out);
+    // --only s08,s17：只合成覆盖这些镜头的结果（批量驱动逐镜头打分用的临时场景）
+    assembleScene(values.out, values.only ? String(values.only).split(',') : undefined);
+    return;
+  }
+  if (cmd === 'units') {
+    // P3：列出全片拟合单元与通用规划（不拟合）；--out 写 JSON（含 shots 问题清单）
+    const shots = loadShots();
+    const rows = fitUnits(shots.shots).map((u) => {
+      if (LEGACY_SHOTS.has(u.id)) return { unit: u.id, shots: u.shots, range: [u.shot.start, u.shot.end], legacy: true, layers: [], skipped: [], issues: [] };
+      const a = planAuto(u.shot);
+      return {
+        unit: u.id, shots: u.shots, range: [u.shot.start, u.shot.end],
+        layers: a.order.map((l) => { const q = a.plans.find((x) => x.id === l)!; return { id: l, in: q.in, out: q.out, z: q.z, switches: q.switches.map((w) => `${w.param}:${w.from}->${w.to}@${w.est}/${w.fade}`), clip: q.clipKeys ? (q.clipKeys[0]!.w !== undefined ? 'rect' : 'circle') : null, blur: q.blurRanges, flip: !!q.flipCurve, opacity: !!q.opacityCurve, color: q.colorFilter, fixed: q.fixed }; }),
+        skipped: a.skipped, issues: [...u.issues, ...a.issues],
+      };
+    });
+    for (const r of rows) console.log(`${r.unit}\t${r.shots.join('+')}\t[${r.range.join(',')})\t${(r as any).legacy ? 'LEGACY' : r.layers.map((l: any) => `${l.id}[${l.in},${l.out})`).join(' ')}${r.skipped.length ? `\t跳过 ${r.skipped.map((k: any) => k.id).join(',')}` : ''}`);
+    if (values.out) writeFileSync(String(values.out), JSON.stringify(rows, null, 1));
     return;
   }
   if (cmd === 'switches' && values.shot) {
@@ -170,9 +187,18 @@ async function runInputs(cmd: string, values: Record<string, unknown>) {
     }, MODEL_URI);
     const vts = loadVts(join(REPO, 'assets/models/deepseek-chan/DeepSeek/大肥鱼.vtube.json'), defaults);
     const smoothC = values.smoothC ? Number(values.smoothC) : 0.15;
-    for (const id of String(values.shot).split(',')) {
-      const shot = shots.shots.find((s) => s.id === id)!;
-      const multi = id === 's15' ? planS15v3(shot) : null;
+    const units = fitUnits(shots.shots);
+    const doneUnits = new Set<string>();
+    for (const sid of String(values.shot).split(',')) {
+      // P3：非打样镜头按拟合单元（continues 连起来的镜头合成一个虚拟镜头）跑，结果写 .data/fit/<单元首镜头>/
+      const unit = LEGACY_SHOTS.has(sid) ? null : units.find((u) => u.shots.includes(sid));
+      if (!LEGACY_SHOTS.has(sid) && !unit) throw new Error(`镜头 ${sid} 没有角色或不存在`);
+      if (unit && doneUnits.has(unit.id)) continue;
+      if (unit) doneUnits.add(unit.id);
+      const id = unit ? unit.id : sid;
+      const shot = unit ? unit.shot : shots.shots.find((s) => s.id === sid)!;
+      const auto = unit ? planAuto(shot) : null;
+      const multi = auto ?? (id === 's15' ? planS15v3(shot) : null);
       const plans = multi ? multi.plans : planFor(shot).plans;
       if (cmd === 'synth2') { synthTruth(shot, plans[0]!, vts, calib, smoothC); continue; }
       const dir = join(FIT_DIR, id + FIT_TAG);
@@ -180,6 +206,11 @@ async function runInputs(cmd: string, values: Record<string, unknown>) {
       const logFile = join(dir, 'fit.log');
       appendFileSync(logFile, `==== ${new Date().toISOString()} fit4 ${id}（断点续跑时保留之前的日志）\n`);
       const log = (s: string) => { console.log(s); appendFileSync(logFile, `${s}\n`); };
+      if (auto) {
+        log(`[${id}] 拟合单元 ${unit!.shots.join('+')} [${shot.start}, ${shot.end})：图层 ${auto.order.map((l) => { const q = plans.find((x) => x.id === l)!; return `${l}[${q.in},${q.out})`; }).join('、')}`);
+        for (const k of auto.skipped) log(`[${id}] 跳过实例 ${k.id}：${k.reason}`);
+        if (!auto.order.length) throw new Error(`单元 ${id} 没有可拟合的实例`);
+      }
       const fixed = values.fixed ? JSON.parse(String(values.fixed)) : undefined;
       const order = multi ? multi.order : [plans[0]!.id];
       const built = new Map<string, unknown>();
@@ -201,7 +232,7 @@ async function runInputs(cmd: string, values: Record<string, unknown>) {
           }
         }
         const r = await fitInputs(pool, gpool!, shot, p, calib, vts, {
-          smoothC, log, fixedConsts: multi ? { clothes2: 0, ...(fixed ?? {}) } : fixed,
+          smoothC, log, fixedConsts: auto ? { ...(p.fixed ?? {}), ...(fixed ?? {}) } : multi ? { clothes2: 0, ...(fixed ?? {}) } : fixed,
           others: () => [...built.values()],
           itersA: values.itersA ? Number(values.itersA) : undefined,
           itersB: values.itersB ? Number(values.itersB) : undefined,
@@ -217,7 +248,7 @@ async function runInputs(cmd: string, values: Record<string, unknown>) {
       }
       const zOf = (lid: string) => shot.instances.find((i) => i.id === lid)?.z ?? 0;
       layers.sort((a: any, b: any) => zOf(a.id) - zOf(b.id));
-      writeFileSync(join(dir, 'result.json'), JSON.stringify({ shot: id, range: [shot.start, shot.end], method: 'vts-input-gn', smoothC, elapsedSec: elapsed, layers, state: order.length === 1 ? states[order[0]!] : states, scores }));
+      writeFileSync(join(dir, 'result.json'), JSON.stringify({ shot: id, shots: unit ? unit.shots : [id], skipped: auto?.skipped ?? [], issues: [...(unit?.issues ?? []), ...(auto?.issues ?? [])], range: [shot.start, shot.end], method: 'vts-input-gn', smoothC, elapsedSec: elapsed, layers, state: order.length === 1 ? states[order[0]!] : states, scores }));
     }
   } finally {
     await gpool?.close();

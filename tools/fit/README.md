@@ -35,6 +35,42 @@ for s in s43 s24 s15; do tools/.venv/bin/python -I tools/qa/metric.py review --r
 node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/scripts/check_consistency.ts s24 2368,2416,2440
 ```
 
+## P3：全片批量（通用规划 + 批量驱动）
+
+所有非打样镜头的规划都从 shots.json 自动推出（`src/plans.ts` 的 `fitUnits` + `planAuto`）；s15、s24、s43 是打样镜头
+（`LEGACY_SHOTS`），沿用原规划和 `.data/fit/<shot>/result.json`，批量里不重跑。
+
+- **拟合单元**：`continues` 把同一实例跨镜头连起来的镜头并成一个单元（虚拟镜头：区间、排除区、效果取并），
+  同一条 continues 链 = 一个图层（图层 ID = 链根实例 ID），物理不重置。结果写 `.data/fit/<单元首镜头>/result.json`
+  （`shots` 字段列出覆盖的镜头，assemble 按它打镜头标记）。continues 指向打样镜头的短尾段（s16.center、s25.prev）不单独起图层。
+- **图层**：in = 第一个有 bbox 的采样（翻牌取 cardFlip 起点），out = 最后一个 bbox 之后第一个 bbox=null 的采样；
+  variant 为常量，switchEvents（含 fade，from 取切换前累计值）为斜坡；链上后续镜头 variant 与累计状态不符时补阶跃并记问题。
+- **clip**：circleWindow 作用的实例 = 圆形开窗（同 s15）；其余 clip = 画中画圆角矩形（整层裁切，关键帧外保持端点）；
+  轨迹 opacity 作为不透明度轨。**模糊**：depthOfField 效果，或轨迹 blurSigma ≥ 1.5 的区间（blur = dofK × 强度）。
+  **cadence**：shots.json 的帧保持段优先于画面检测。pan / scale 与 zoom 一样加密变换关键帧（每 12 帧）。
+- **常量**：Clothes2 取 variant（缺省 0）；前倾只对单元里头最大且头高 ≥ 300px 的实例搜索，其余固定 0；
+  颜色滤镜对有 colorGrade（实例或效果）、单实例或 main 实例拟合。
+- 没有 eyes 的实例用 head 框估初值（不进锚点先验）；eyes、head 都没有的实例跳过并记入问题清单。
+
+```bash
+# 列出全片单元与规划（不拟合）；JSON 里有 skipped 与 shots 问题清单（issues）
+node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts units --out .data/fit/units.json
+# 单个单元（参数可以是单元内任一镜头）
+FIT_MODEL='{"bodyJac":true}' node --expose-gc --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts fit4 --shot s17 --workers 3 --geom 5 --itersB 40
+# 只合成某些单元的临时场景
+node --experimental-strip-types --disable-warning=ExperimentalWarning tools/fit/src/cli.ts assemble --only s16 --out /tmp/x.json
+
+# 批量驱动：tools/fit/scripts/batch.sh [all | 镜头ID,...]（逐单元：拟合 → 合成临时场景 → render → metric score → review → 摘要一行）
+#   已有 result.json 的单元跳过拟合（未打分的补打分）；失败记 FAIL 与原因后继续；最后 assemble 全片 scenes/deepseek-chan/scene.json
+#   环境变量：FIT_MODEL（缺省 {"bodyJac":true}）、FIT_ARGS（追加 fit4 参数）、ITERS_B（缺省按图层帧数和 ≤200→40、≤400→20、否则 10）、
+#            REVIEW=0（不出对照视频）、KEEP_RENDERS=1（保留渲染 PNG）
+#   产出：.data/fit/batch/summary.tsv、<单元>.fit.log、metric_<单元>.json；对照视频 .data/fit/review/<镜头>.mp4
+systemd-run --user --unit=cf-batch --collect --working-directory=$PWD --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
+  -p MemoryMax=11G -p StandardOutput=append:$PWD/.data/fit/batch/run.log -p StandardError=append:$PWD/.data/fit/batch/run.log \
+  bash tools/fit/scripts/batch.sh all
+systemctl --user is-active cf-batch     # 中断后原样重跑同一命令即可续跑（单元级跳过 + 图层/阶段断点）
+```
+
 ## 真实镜头（第三轮续，当前产出）
 
 ```bash
