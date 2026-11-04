@@ -22,7 +22,13 @@
   7. 镜头指标：两种 SSIM 各自的均值、最小值、5% 分位数、≥0.9 的帧比例；全片 = 所有有效帧的平均；
   8. 每帧分类：普通帧 / 特效帧（落在 halftone、radialBlur、zoomBlur、swirl、silhouette、fadeFromWhite、
      fadeFromBlack、particles 效果区间内；落在 transitionIn 过渡区间内；或任一实例估计 blurSigma > 3），
-     输出类别与判定依据；普通帧门槛 SSIM@360 ≥ 0.85，特效帧单独统计、以肉眼对比为准。
+     输出类别与判定依据；普通帧门槛 SSIM@360 ≥ 0.7（2026-11-02 下调），特效帧单独统计、以肉眼对比为准；
+  9. 目测帧（2026-11-04）：同一帧 ≥2 个可见实例（bbox 非 null），或最大可见实例的 head 高度 < 200px
+     （head 在相邻采样间线性插值）；SSIM 照常统计、不卡门槛。优先级：特效帧 > 目测帧 > 普通帧。
+     每帧另外输出 visibleInstances、maxHeadH、whyVisual（目测判定依据，与类别无关，特效帧上也给出）。
+
+输出 JSON 向后兼容：旧字段（含 fracGE0.85、framesBelow0.85）保留，新增 visual 分类、fracGE0.7、framesBelow0.7、
+threshold360；normalPass 按现行门槛 0.7 判定。
 
 参考帧用 ffmpeg 解码，颜色转换参数与 tools/fit/src/refvideo.ts 逐字一致。
 --video / --video-offset 可换成别的参考视频（上限实验的合成参考）：视频第 0 帧对应场景帧 offset。
@@ -146,11 +152,56 @@ def ssim_map(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 EFFECT_KINDS = {"halftone", "radialBlur", "zoomBlur", "swirl", "silhouette", "fadeFromWhite", "fadeFromBlack", "particles"}
-THRESHOLD_360 = 0.85
+THRESHOLD_360 = 0.7          # 普通帧门槛（docs/pipeline.md，2026-11-02 由 0.85 下调）
+LEGACY_THRESHOLD_360 = 0.85  # 旧门槛：只为保留旧输出字段 fracGE0.85 / framesBelow0.85
+VISUAL_HEAD_H = 200.0        # 目测帧：最大可见实例 head 高度 < 200px
+CLASSES = ("normal", "visual", "effect")
 
 
-def classify(shot: dict, f: int) -> tuple[str, list[str]]:
-    """普通帧 / 特效帧（docs/pipeline.md 验收门槛）。返回类别与判定依据列表。"""
+def _interp_skip_null(keys: list[dict], f: int, field: str):
+    """跳过 null 的线性插值（只用 field 非空的采样）；区间外取首/尾值。"""
+    ks = [k for k in keys if k.get(field) is not None]
+    if not ks:
+        return None
+    if f <= ks[0]["frame"]:
+        return ks[0][field]
+    if f >= ks[-1]["frame"]:
+        return ks[-1][field]
+    for a, b in zip(ks, ks[1:]):
+        if a["frame"] <= f < b["frame"]:
+            t = (f - a["frame"]) / (b["frame"] - a["frame"])
+            return [x + (y - x) * t for x, y in zip(a[field], b[field])]
+    return ks[-1][field]
+
+
+def visible_instances(shot: dict, f: int) -> list[tuple[str, float | None]]:
+    """帧 f 的可见实例及其 head 高度。可见 = bbox 非 null（与 bbox_mask 同一插值规则：
+    相邻采样任一端为 null 则区间内不可见）；head 高度在非 null 的相邻 head 采样间线性插值，无 head 采样为 None。"""
+    out = []
+    for inst in shot["instances"]:
+        ks = [t for t in inst["track"] if "bbox" in t]
+        if not ks or _interp_rects(ks, f, "bbox") is None:
+            continue
+        hd = _interp_skip_null(inst["track"], f, "head")
+        out.append((inst["id"], float(hd[3]) if hd is not None else None))
+    return out
+
+
+def visual_reasons(shot: dict, f: int) -> tuple[list[str], int, float | None]:
+    """目测帧判定依据（不看优先级）。返回 (依据列表, 可见实例数, 最大 head 高度)。"""
+    vis = visible_instances(shot, f)
+    why: list[str] = []
+    if len(vis) >= 2:
+        why.append(f"instances>=2:{','.join(i for i, _ in vis)}")
+    hs = [h for _, h in vis if h is not None]
+    max_h = max(hs) if hs else None
+    if max_h is not None and max_h < VISUAL_HEAD_H:
+        why.append(f"headH<{VISUAL_HEAD_H:.0f}:{max_h:.1f}")
+    return why, len(vis), max_h
+
+
+def effect_reasons(shot: dict, f: int) -> list[str]:
+    """特效帧判定依据（空列表 = 不是特效帧）。"""
     why: list[str] = []
     for e in shot["effects"]:
         if e["kind"] in EFFECT_KINDS and e["start"] <= f < e["end"]:
@@ -166,7 +217,19 @@ def classify(shot: dict, f: int) -> tuple[str, list[str]]:
         sig = _interp_rects([{**k, "b": [k["blurSigma"]]} for k in ks], f, "b")
         if sig is not None and sig[0] > 3:
             why.append(f"blurSigma>3:{inst['id']}({sig[0]:.1f})")
-    return ("effect" if why else "normal"), why
+    return why
+
+
+def classify(shot: dict, f: int) -> tuple[str, list[str]]:
+    """普通帧 / 目测帧 / 特效帧（docs/pipeline.md 验收门槛；优先级 特效 > 目测 > 普通）。
+    返回类别与该类别的判定依据（普通帧为空列表）。"""
+    why = effect_reasons(shot, f)
+    if why:
+        return "effect", why
+    vwhy, _, _ = visual_reasons(shot, f)
+    if vwhy:
+        return "visual", vwhy
+    return "normal", []
 
 
 def frame_metric(rgb: np.ndarray, alpha: np.ndarray, ref: np.ndarray, shot: dict, f: int, want_maps=False):
@@ -177,7 +240,9 @@ def frame_metric(rgb: np.ndarray, alpha: np.ndarray, ref: np.ndarray, shot: dict
     mask &= ~excl
     area = int(mask.sum())
     cls, why = classify(shot, f)
-    out = {"frame": f, "class": cls, "why": why, "maskArea": area}
+    vwhy, nvis, max_h = visual_reasons(shot, f)
+    out = {"frame": f, "class": cls, "why": why, "maskArea": area,
+           "visibleInstances": nvis, "maxHeadH": max_h, "whyVisual": vwhy}
     bb = bbox_mask(shot, f)
     denom = int((bb & ~excl).sum())
     out["coverage"] = (float((mask & bb).sum()) / denom) if denom > 0 else None
@@ -221,8 +286,11 @@ def _stats(rows: list[dict], key: str) -> dict:
         "worstFrame": int(valid[int(np.argmin(vals))]["frame"]),
     }
     if key == "ssim360":
-        out["fracGE0.85"] = float((vals >= THRESHOLD_360).mean())
-        out["framesBelow0.85"] = [int(r["frame"]) for r in valid if r[key] < THRESHOLD_360]
+        # 旧字段（0.85）保留不变，新增现行门槛 0.7 的字段
+        out["fracGE0.85"] = float((vals >= LEGACY_THRESHOLD_360).mean())
+        out["framesBelow0.85"] = [int(r["frame"]) for r in valid if r[key] < LEGACY_THRESHOLD_360]
+        out["fracGE0.7"] = float((vals >= THRESHOLD_360).mean())
+        out["framesBelow0.7"] = [int(r["frame"]) for r in valid if r[key] < THRESHOLD_360]
     return out
 
 
@@ -230,8 +298,9 @@ def summarize(rows: list[dict]) -> dict:
     out: dict = {"frames": len(rows)}
     for key in ("ssim360", "ssim720"):
         out[key] = _stats(rows, key)
-    # 普通帧 / 特效帧分开统计（门槛只对普通帧：SSIM@360 ≥ 0.85）
-    for cls in ("normal", "effect"):
+    # 普通帧 / 目测帧 / 特效帧分开统计（门槛只对普通帧：SSIM@360 ≥ THRESHOLD_360）
+    out["threshold360"] = THRESHOLD_360
+    for cls in CLASSES:
         sub = [r for r in rows if r["class"] == cls]
         out[cls] = {"frames": len(sub), "ssim360": _stats(sub, "ssim360"), "ssim720": _stats(sub, "ssim720")}
     nv = out["normal"]["ssim360"]
@@ -307,7 +376,7 @@ def quad(ref: np.ndarray, comp: np.ndarray, smap, mask, excl, info: dict, half=T
     bot = np.concatenate(panels[2:], 1)
     img = np.ascontiguousarray(np.concatenate([top, bot], 0))
     s = info.get("ssim360")
-    tag = "EFFECT" if info.get("class") == "effect" else "normal"
+    tag = {"effect": "EFFECT", "visual": "VISUAL"}.get(info.get("class"), "normal")
     txt = (f"f={info['frame']} [{tag}]  SSIM@360={s:.3f}  @720={info['ssim720']:.3f}" if s is not None
            else f"f={info['frame']} [{tag}]  SSIM=n/a (mask<1%)")
     label(img, txt, 0.8 if half else 1.3)
