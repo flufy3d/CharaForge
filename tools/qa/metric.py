@@ -152,7 +152,7 @@ def ssim_map(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 EFFECT_KINDS = {"halftone", "radialBlur", "zoomBlur", "swirl", "silhouette", "fadeFromWhite", "fadeFromBlack", "particles"}
-THRESHOLD_360 = 0.7          # 普通帧门槛（docs/pipeline.md，2026-11-02 由 0.85 下调）
+THRESHOLD_360 = 0.6          # 普通帧门槛（docs/pipeline.md：2026-11-06 用户下调为 0.6，此前 0.7、0.85）
 LEGACY_THRESHOLD_360 = 0.85  # 旧门槛：只为保留旧输出字段 fracGE0.85 / framesBelow0.85
 VISUAL_HEAD_H = 200.0        # 目测帧：最大可见实例 head 高度 < 200px
 CLASSES = ("normal", "visual", "effect")
