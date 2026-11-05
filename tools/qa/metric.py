@@ -22,13 +22,13 @@
   7. 镜头指标：两种 SSIM 各自的均值、最小值、5% 分位数、≥0.9 的帧比例；全片 = 所有有效帧的平均；
   8. 每帧分类：普通帧 / 特效帧（落在 halftone、radialBlur、zoomBlur、swirl、silhouette、fadeFromWhite、
      fadeFromBlack、particles 效果区间内；落在 transitionIn 过渡区间内；或任一实例估计 blurSigma > 3），
-     输出类别与判定依据；普通帧门槛 SSIM@360 ≥ 0.7（2026-11-02 下调），特效帧单独统计、以肉眼对比为准；
+     输出类别与判定依据；普通帧门槛 SSIM@360 ≥ THRESHOLD_360（现为 0.6，2026-11-06 下调；此前 0.7、0.85），特效帧单独统计、以肉眼对比为准；
   9. 目测帧（2026-11-04）：同一帧 ≥2 个可见实例（bbox 非 null），或最大可见实例的 head 高度 < 200px
      （head 在相邻采样间线性插值）；SSIM 照常统计、不卡门槛。优先级：特效帧 > 目测帧 > 普通帧。
      每帧另外输出 visibleInstances、maxHeadH、whyVisual（目测判定依据，与类别无关，特效帧上也给出）。
 
-输出 JSON 向后兼容：旧字段（含 fracGE0.85、framesBelow0.85）保留，新增 visual 分类、fracGE0.7、framesBelow0.7、
-threshold360；normalPass 按现行门槛 0.7 判定。
+输出 JSON 向后兼容：旧字段 fracGE0.85 / framesBelow0.85、fracGE0.7 / framesBelow0.7 保留，且按字面的 0.85 / 0.7 计算；
+按现行门槛计算的是通用字段 fracGEthr / framesBelowThr，门槛值见汇总里的 threshold360；normalPass 按现行门槛判定。
 
 参考帧用 ffmpeg 解码，颜色转换参数与 tools/fit/src/refvideo.ts 逐字一致。
 --video / --video-offset 可换成别的参考视频（上限实验的合成参考）：视频第 0 帧对应场景帧 offset。
@@ -154,6 +154,7 @@ def ssim_map(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 EFFECT_KINDS = {"halftone", "radialBlur", "zoomBlur", "swirl", "silhouette", "fadeFromWhite", "fadeFromBlack", "particles"}
 THRESHOLD_360 = 0.6          # 普通帧门槛（docs/pipeline.md：2026-11-06 用户下调为 0.6，此前 0.7、0.85）
 LEGACY_THRESHOLD_360 = 0.85  # 旧门槛：只为保留旧输出字段 fracGE0.85 / framesBelow0.85
+LEGACY_THRESHOLD_07 = 0.7    # 旧门槛：只为保留旧输出字段 fracGE0.7 / framesBelow0.7（按字面 0.7 计算）
 VISUAL_HEAD_H = 200.0        # 目测帧：最大可见实例 head 高度 < 200px
 CLASSES = ("normal", "visual", "effect")
 
@@ -286,11 +287,13 @@ def _stats(rows: list[dict], key: str) -> dict:
         "worstFrame": int(valid[int(np.argmin(vals))]["frame"]),
     }
     if key == "ssim360":
-        # 旧字段（0.85）保留不变，新增现行门槛 0.7 的字段
+        # 旧字段按字面门槛计算（0.85、0.7），保证向后兼容；现行门槛用通用字段 fracGEthr / framesBelowThr
         out["fracGE0.85"] = float((vals >= LEGACY_THRESHOLD_360).mean())
         out["framesBelow0.85"] = [int(r["frame"]) for r in valid if r[key] < LEGACY_THRESHOLD_360]
-        out["fracGE0.7"] = float((vals >= THRESHOLD_360).mean())
-        out["framesBelow0.7"] = [int(r["frame"]) for r in valid if r[key] < THRESHOLD_360]
+        out["fracGE0.7"] = float((vals >= LEGACY_THRESHOLD_07).mean())
+        out["framesBelow0.7"] = [int(r["frame"]) for r in valid if r[key] < LEGACY_THRESHOLD_07]
+        out["fracGEthr"] = float((vals >= THRESHOLD_360).mean())
+        out["framesBelowThr"] = [int(r["frame"]) for r in valid if r[key] < THRESHOLD_360]
     return out
 
 

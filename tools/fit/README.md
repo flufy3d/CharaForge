@@ -71,6 +71,16 @@ systemd-run --user --unit=cf-batch --collect --working-directory=$PWD --setenv=P
 systemctl --user is-active cf-batch     # 中断后原样重跑同一命令即可续跑（单元级跳过 + 图层/阶段断点）
 ```
 
+### 逐帧精修的时间正则与发散回退（2026-11-06，修闪烁）
+
+- 逐帧精修每轮解完后，所有偏移量（变换 dx/dy/dls/drot 与可见参数）沿节点序列先 3 点中值、再 Whittaker 平滑
+  （二阶差分惩罚 λ，`FIT_MODEL='{"pfSmooth":4}'`，0 关闭）。
+- 变换偏移上限：位移 0.3 眼距、尺度 ±5%、旋转 3°；超限或锚点偏差比轨迹阶段大 0.5 眼距以上的节点帧回退到轨迹结果并冻结（日志「发散回退」）。
+- 眼睛开合网格搜索的结果两眼各做 5 点中值（不允许单帧、两帧来回切换）后再写回。
+- 轨迹阶段的重锚加门控：锚点偏差 > 1.5 眼距**且**该帧光流残差 > max(6px, 2×中位) 才重锚；画面已对上的判为锚点可疑（日志「锚点可疑」）。
+- `--fixed` 可按图层给：`--fixed '{"s41.main":{"lean":-3.75}}'`。
+- 闪烁统计：`tools/.venv/bin/python -I tools/fit/scripts/flicker.py <渲染目录> <起-止>`。
+
 ## 真实镜头（第三轮续，当前产出）
 
 ```bash

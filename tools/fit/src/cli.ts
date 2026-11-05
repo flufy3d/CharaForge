@@ -232,7 +232,7 @@ async function runInputs(cmd: string, values: Record<string, unknown>) {
           }
         }
         const r = await fitInputs(pool, gpool!, shot, p, calib, vts, {
-          smoothC, log, fixedConsts: auto ? { ...(p.fixed ?? {}), ...(fixed ?? {}) } : multi ? { clothes2: 0, ...(fixed ?? {}) } : fixed,
+          smoothC, log, fixedConsts: auto ? { ...(p.fixed ?? {}), ...Object.fromEntries(Object.entries(fixed ?? {}).filter(([, v]) => typeof v === 'number')), ...((fixed as any)?.[p.id] ?? {}) } : multi ? { clothes2: 0, ...(fixed ?? {}) } : fixed,
           others: () => [...built.values()],
           itersA: values.itersA ? Number(values.itersA) : undefined,
           itersB: values.itersB ? Number(values.itersB) : undefined,

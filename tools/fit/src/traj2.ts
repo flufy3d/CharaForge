@@ -199,6 +199,49 @@ export function buildLayer(p: LayerPlan, vts: VtsModel, st: LayerState, calib: M
   };
 }
 
+/** 3 点中值 + Whittaker 平滑（二阶差分惩罚 λ）：逐帧精修偏移的时间正则。冻结帧（下标）保持 0。 */
+export function smoothFree(free: { vis: Record<string, number>; tf: number[] }[], vis: string[], frozen: Set<number>, lam: number) {
+  const n = free.length;
+  if (n < 3 || lam <= 0) return;
+  const run = (get: (i: number) => number, set: (i: number, v: number) => void) => {
+    const y = Array.from({ length: n }, (_, i) => get(i));
+    const m = y.map((v, i) => (i === 0 || i === n - 1 ? v : [y[i - 1]!, v, y[i + 1]!].sort((a, b) => a - b)[1]!));
+    const z = whittaker(m, lam);
+    for (let i = 0; i < n; i++) set(i, frozen.has(i) ? 0 : z[i]!);
+  };
+  for (let k = 0; k < 4; k++) run((i) => free[i]!.tf[k]!, (i, v) => { free[i]!.tf[k] = v; });
+  for (const r of vis) run((i) => free[i]!.vis[r] ?? 0, (i, v) => { free[i]!.vis[r] = v; });
+}
+
+/** 解 (I + λ DᵀD) z = y，D 为二阶差分（五对角，带状高斯消元） */
+export function whittaker(y: number[], lam: number): number[] {
+  const n = y.length;
+  const A = Array.from({ length: n }, () => new Float64Array(5)); // A[i][j-i+2]
+  const d = (i: number, j: number, v: number) => { A[i]![j - i + 2]! += v; };
+  for (let i = 0; i < n; i++) d(i, i, 1);
+  for (let k = 0; k + 2 < n; k++) {
+    const c = [1, -2, 1];
+    for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) d(k + a, k + b, lam * c[a]! * c[b]!);
+  }
+  const b = y.slice();
+  for (let i = 0; i < n; i++) {
+    const piv = A[i]![2]!;
+    for (let r = i + 1; r <= Math.min(n - 1, i + 2); r++) {
+      const f = A[r]![i - r + 2]! / piv;
+      if (!f) continue;
+      for (let c = i; c <= Math.min(n - 1, i + 2); c++) A[r]![c - r + 2]! -= f * A[i]![c - i + 2]!;
+      b[r]! -= f * b[i]!;
+    }
+  }
+  const z = new Array<number>(n).fill(0);
+  for (let i = n - 1; i >= 0; i--) {
+    let v = b[i]!;
+    for (let c = i + 1; c <= Math.min(n - 1, i + 2); c++) v -= A[i]![c - i + 2]! * z[c]!;
+    z[i] = v / A[i]![2]!;
+  }
+  return z;
+}
+
 export interface ClipKey { f: number; cx: number; cy: number; r: number; a: number; w?: number; h?: number }
 
 export interface Fit2Options {
@@ -654,7 +697,14 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
   };
 
   const reanchor = () => {
-    const bad = [...anchorDev.entries()].filter(([, d]) => d > 1.5).map(([f]) => f);
+    // 门控（2026-11-06）：锚点偏差 > 1.5 眼距且该帧光流残差 > max(6px, 2 × 全段中位) 才视为发散并重锚；
+    // 光流残差正常（画面已对上）而锚点偏差大的，是 shots 锚点本身有误（s41 3538～3558 眼距标成约 2 倍），只记日志不重锚
+    const rs = [...frameResid.values()].sort((a, b) => a - b);
+    const rMed = rs.length ? rs[rs.length >> 1]! : 0;
+    const dev = [...anchorDev.entries()].filter(([, d]) => d > 1.5).map(([f]) => f);
+    const bad = dev.filter((f) => (frameResid.get(f) ?? Infinity) > Math.max(6, 2 * rMed));
+    const sus = dev.filter((f) => !bad.includes(f));
+    if (sus.length) log(`[${shot.id}] ${p.id} 发散检查：${sus.length} 个锚点帧偏差 > 1.5 眼距但光流残差正常（≤ ${Math.max(6, 2 * rMed).toFixed(1)}px），判为锚点可疑、不重锚（${sus.join(',')}）`);
     const ks = new Set(bad.map((f) => { const [l, r, w] = interp(keys, f); return w < 0.5 ? l : r; }));
     for (const k of ks) st.tf[k] = eyeTf(keys[k]!);
     if (ks.size) log(`[${shot.id}] ${p.id} 发散检查：${bad.length} 个锚点帧偏差 > 1.5 眼距（${bad.join(',')}），${ks.size} 个变换关键帧重锚`);
@@ -922,6 +972,17 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
     const tPf = Date.now();
     if (!done('perframe')) {
     st.free = nodes.map((f) => ({ f, vis: Object.fromEntries(VIS.map((r) => [r, 0])), tf: [0, 0, 0, 0] as [number, number, number, number] }));
+    // 发散回退（2026-11-06）：变换偏移超限（位移 > 0.3 眼距、尺度 > ±5%、旋转 > 3°）或锚点偏差比轨迹阶段大 0.5 眼距以上的节点帧，
+    // 偏移清零（= 轨迹阶段结果）并冻结，之后各轮不再求解
+    const frozen = new Set<number>();
+    const trajDev = new Map(anchorDev);
+    const freeze = (fi: number, why: string) => {
+      const q = st.free![fi]!;
+      q.tf = [0, 0, 0, 0];
+      for (const r of VIS) q.vis[r] = 0;
+      if (!frozen.has(fi)) { frozen.add(fi); pfWhy.push(`${q.f}:${why}`); }
+    };
+    const pfWhy: string[] = [];
     // 分块处理节点（每块渲染 + 光流 + 雅可比，解完即释放）：整段 280 个节点的雅可比约 1GB、光流约 0.8GB，
     // 加上上一轮未回收的副本会把 s15 推到 OOM。内存超过 8.5GB 时块再减半。
     let pfChunk = 40;
@@ -937,11 +998,27 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
       const ax = L.transform.anchorX, ay = L.transform.anchorY;
       chunk.forEach((f, ci) => {
         const fi = c0 + ci;
+        if (frozen.has(fi)) return;
         const q = st.free![fi]!;
         const j = jac.get(f)!, F = fl.get(f)!;
         const i0 = f - p.in;
         const T = { x: L.transform.x.baked.values[i0], y: L.transform.y.baked.values[i0], ls: Math.log(L.transform.scale.baked.values[i0]), rot: L.transform.rotation.baked.values[i0] };
         const Sc = Math.exp(T.ls), rr = (T.rot * Math.PI) / 180, cs = Math.cos(rr), sn = Math.sin(rr);
+        // 锚点复查：本帧（当前偏移下）虹膜质心对 shots 锚点的偏差，比轨迹阶段大 0.5 眼距以上 → 发散
+        const anc = anchors.get(f);
+        if (anc && it > 0) {
+          const ed = Math.max(1, Math.hypot(anc[1][0] - anc[0][0], anc[1][1] - anc[0][1]));
+          let dv = 0;
+          irisRange.forEach(([a0, a1], e) => {
+            let px = 0, py = 0;
+            for (let k = a0; k < a1; k++) {
+              const dx = j.pos[2 * k]! - ax, dy = j.pos[2 * k + 1]! - ay;
+              px += (T.x + Sc * (cs * dx - sn * dy)) / (a1 - a0); py += (T.y + Sc * (sn * dx + cs * dy)) / (a1 - a0);
+            }
+            dv = Math.max(dv, Math.hypot(anc[e]![0] - px, anc[e]![1] - py) / ed);
+          });
+          if (dv > (trajDev.get(f) ?? 0) + 0.5) { freeze(fi, `锚点偏差 ${(trajDev.get(f) ?? 0).toFixed(2)}→${dv.toFixed(2)} 眼距`); return; }
+        }
         const V = VIS.length, D = 4 + V, Kp = j.opa.length;
         const M = new Float64Array(D * D), b = new Float64Array(D);
         const es: number[] = [];
@@ -987,13 +1064,21 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
         const sc = mx > 2 ? 2 / mx : 1;
         q.tf[0] += du[0]! * sc; q.tf[1] += du[1]! * sc; q.tf[2] += du[2]! * sc; q.tf[3] += du[3]! * sc;
         for (let a = 4; a < D; a++) q.vis[VIS[a - 4]!] += du[a]! * sc * visSd(VIS[a - 4]!);
+        // 变换偏移上限（眼距按轨迹阶段的尺度算）
+        const ed0 = (Sc / Math.exp(q.tf[2] - du[2]! * sc)) * mdx;
+        if (Math.hypot(q.tf[0], q.tf[1]) > 0.3 * ed0 || Math.abs(q.tf[2]) > Math.log(1.05) || Math.abs(q.tf[3]) > 3) {
+          freeze(fi, `变换偏移超限 (${q.tf[0].toFixed(1)},${q.tf[1].toFixed(1)},${q.tf[2].toFixed(3)},${q.tf[3].toFixed(1)})`);
+        }
       });
       fl.clear(); jac.clear();
       if (memGuard(`逐帧精修 #${it} 块 ${c0}`) > MEM_SOFT && pfChunk > 8) { pfChunk = Math.max(8, pfChunk >> 1); log(`[${shot.id}] ${p.id} 内存超过 8.5GB：逐帧精修块大小降到 ${pfChunk}`); }
       }
       meds.sort((x, y) => x - y);
-      log(`[${shot.id}] ${p.id} 逐帧精修 #${it}: 逐帧光流残差中位数的中位 ${meds[meds.length >> 1]!.toFixed(2)}px`);
+      // 时间平滑（2026-11-06）：各偏移量沿节点序列先 3 点中值（去单帧尖峰），再二阶差分惩罚的 Whittaker 平滑；冻结帧保持 0
+      smoothFree(st.free!, VIS, frozen, MODELX.pfSmooth ?? 4);
+      log(`[${shot.id}] ${p.id} 逐帧精修 #${it}: 逐帧光流残差中位数的中位 ${(meds[meds.length >> 1] ?? 0).toFixed(2)}px${frozen.size ? `；累计回退 ${frozen.size} 帧` : ''}`);
     }
+    if (pfWhy.length) log(`[${shot.id}] ${p.id} 逐帧精修发散回退 ${pfWhy.length} 帧：${pfWhy.slice(0, 20).join('；')}${pfWhy.length > 20 ? ' …' : ''}`);
     saveCk('perframe');
     } // !done('perframe')
     // 眼睛开合：每个节点帧对左右眼 ParamEyeL/ROpen 的偏移做 5×5 网格搜索（两眼独立；像素损失），用于 wink 等单眼动作
@@ -1003,6 +1088,7 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
       memGuard('眼睛开合前');
       const grid = [-1.2, -0.8, -0.4, 0, 0.3];
       let changed = 0;
+      const picks: [number, number][] = [];
       for (const [fi, f] of nodes.entries()) {
         // 页面里每个候选都要读回整幅缓冲：V8 外部内存回收滞后，chrome-headless 会涨到 2GB+ 被 OOM（cf-run14）。
         // 每 10 帧强制页面 GC（CDP HeapProfiler.collectGarbage）；每 5 帧查实时 cgroup，超过软阈值立即 GC，超过硬阈值报错。
@@ -1016,11 +1102,21 @@ export async function fitInputs(pool: Pool, gpool: GeomPool, shot: Shot, p: Laye
         let bi = cands.findIndex(([dl, dr]) => dl === 0 && dr === 0);
         rs.forEach((r, i) => { if (r.loss < rs[bi]!.loss - 1e-4) bi = i; });
         const [dl, dr] = cands[bi]!;
-        if (dl || dr) changed++;
-        q.vis.ParamEyeLOpen = bL + dl; q.vis.ParamEyeROpen = bR + dr;
+        picks.push([dl, dr]);
         await pool.all(([lid, f, v]) => (window as any).__fit.commit(f, { [lid]: v }), [p.id, f, { set: [[f, { 'post:ParamEyeLOpen': bL + dl, 'post:ParamEyeROpen': bR + dr }]] }] as const);
       }
-      log(`[${shot.id}] ${p.id} 眼睛开合网格搜索：${changed}/${nodes.length} 个节点帧改动`);
+      // 时间约束（2026-11-06）：两眼的网格偏移各自沿节点序列做 5 点中值（单帧、两帧的睁闭/wink 来回切换被滤掉），然后写回
+      const med5 = (k: 0 | 1, i: number) => { const w = picks.slice(Math.max(0, i - 2), i + 3).map((x) => x[k]).sort((a, b) => a - b); return w[w.length >> 1]!; };
+      const filt = picks.map((_, i) => [med5(0, i), med5(1, i)] as const);
+      let flips = 0;
+      filt.forEach(([dl, dr], fi) => {
+        const q = st.free![fi]!;
+        if (dl !== picks[fi]![0] || dr !== picks[fi]![1]) flips++;
+        if (dl || dr) changed++;
+        q.vis.ParamEyeLOpen = (q.vis.ParamEyeLOpen ?? 0) + dl; q.vis.ParamEyeROpen = (q.vis.ParamEyeROpen ?? 0) + dr;
+      });
+      await setupPages();
+      log(`[${shot.id}] ${p.id} 眼睛开合网格搜索：${changed}/${nodes.length} 个节点帧改动（时间中值滤掉 ${flips} 个孤立切换）`);
       memGuard('眼睛开合后');
       saveCk('eyes');
       tick('eyes', tE);

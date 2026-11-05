@@ -13,7 +13,7 @@
 |---|---|---|
 | `effect` 特效帧 | 落在 halftone / radialBlur / zoomBlur / swirl / silhouette / fadeFromWhite / fadeFromBlack / particles 效果区间；或镜头 transitionIn 区间；或任一实例 blurSigma > 3 | 不卡门槛，肉眼为准 |
 | `visual` 目测帧 | 同一帧 ≥ 2 个可见实例；或最大可见实例的 head 高度 < 200px | 不卡门槛，并排/叠加对比为准 |
-| `normal` 普通帧 | 其余 | 逐帧 SSIM@360 ≥ 0.7 |
+| `normal` 普通帧 | 其余 | 逐帧 SSIM@360 ≥ 门槛（`metric.THRESHOLD_360`，现为 0.6） |
 
 - 可见实例：shots.json 实例 track 的 bbox 非 null（插值规则与覆盖率的 bbox 相同：相邻采样任一端为 null，区间内视为不可见）。
 - head 高度：在非 null 的相邻 head 采样之间线性插值，取 head[3]。
@@ -30,9 +30,10 @@ tools/.venv/bin/python -I tools/qa/metric.py review --renders <dir> --shots s43 
 ```
 
 输出 JSON 只新增、不删改字段：
-- 每镜头 `summary` 新增 `visual`（与 `normal`、`effect` 同结构）和 `threshold360`（0.7）；
-- `ssim360` 统计新增 `fracGE0.7`、`framesBelow0.7`；旧的 `fracGE0.85`、`framesBelow0.85` 仍按 0.85 计算并保留；
-- `normalPass` 按现行门槛 0.7 判定：普通帧有效帧数 > 0 且最小值 ≥ 0.7；
+- 每镜头 `summary` 新增 `visual`（与 `normal`、`effect` 同结构）和 `threshold360`（现行门槛的值，现为 0.6）；
+- `ssim360` 统计里，按现行门槛计算的是通用字段 `fracGEthr`、`framesBelowThr`（门槛再变时字段名不变）；
+- 旧字段按字面数值计算并保留，只为向后兼容：`fracGE0.85` / `framesBelow0.85` 按 0.85，`fracGE0.7` / `framesBelow0.7` 按 0.7；
+- `normalPass` 按现行门槛判定：普通帧有效帧数 > 0 且最小值 ≥ `threshold360`；
 - 每帧新增 `visibleInstances`、`maxHeadH`、`whyVisual`。
 
 ## report.py：全片质检报告
@@ -66,20 +67,20 @@ tools/.venv/bin/python -I tools/qa/report.py --scene .data/fit/diag/scene_x.json
 | 文件 | 内容 |
 |---|---|
 | `frames.csv` | 逐帧：frame, shot, fitted, class, why, ssim360, ssim720, coverage, maskArea, visibleInstances, maxHeadH, whyVisual（未拟合镜头的帧也列出类别，SSIM 为空） |
-| `shots.csv` | 逐镜头：状态，以及每类的 frames / valid / mean / min / p5 / fracGE0.7 / below0.7、coverageMean |
+| `shots.csv` | 逐镜头：状态，以及每类的 frames / valid / mean / min / p5 / fracGE<门槛> / below<门槛>（列名带现行门槛值，如 `normal_fracGE0.6`）、coverageMean |
 | `report.json` | 每镜头 `summary`（与 `metric.py score` 同结构）、`perFrame`、`classFrames`、`status`、`thumbs`；全片 `overall`；`ranking` |
 | `index.html` | 静态报告，可直接本地打开，无外部依赖：全片汇总、最差镜头排行、逐镜头表、每镜头 SSIM 曲线（内联 SVG，悬停看数值）、最差帧三联缩略图 |
 | `thumbs/` | 最差帧三联图，依次为原视频、渲染（合成到原视频背景）、差异图 |
 | `diff_<layout>.mp4` | 60fps 差异视频，带原音频。左上角烧录帧号、镜头、类别、SSIM；未拟合镜头显示原视频并标注「未拟合」 |
 
 镜头状态：
-- `达标`：普通帧全部 ≥ 0.7；
-- `不达标`：存在 < 0.7 的普通帧；
+- `达标`：普通帧全部 ≥ 门槛；
+- `不达标`：存在低于门槛的普通帧；
 - `无有效普通帧`：没有有效的普通帧（只有目测帧或特效帧，或普通帧都落在无图层/无角色区段），以肉眼为准；
 - `未拟合`：镜头区间与 scene.json 里任何模型图层都没有交集。
 
 最差镜头排行：
-- 普通帧按 < 0.7 的帧数降序排，再按均值升序；
+- 普通帧按低于门槛的帧数降序排，再按均值升序；
 - 目测帧、特效帧单独列表，各自按均值升序。
 
 统计只包含已拟合镜头；无角色帧（遮罩 < 1% 画面）不计入有效帧。

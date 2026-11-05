@@ -270,6 +270,12 @@ export function planAuto(shot: Shot): { plans: LayerPlan[]; order: string[]; ski
       }
       issues.push({ shot: shot.id, inst: I.id, frame: heads[0]!.frame, field: 'track.eyes', problem: '没有任何 eyes 采样（拟合用 head 框估初值，不进锚点先验）', suggest: '补 eyes 锚点（至少首尾与转身处）' });
     }
+    // 可见区间内连续缺 bbox（既非框也非 null）的采样段：多半是 recon 漏标（s30.main 2698～2740），图层照常可见，记问题
+    {
+      const a = I.track.indexOf(seen[0]!), b = I.track.indexOf(seen[seen.length - 1]!);
+      const miss = I.track.slice(a, b).filter((t) => t.bbox === undefined).map((t) => t.frame);
+      if (miss.length >= 2) issues.push({ shot: shot.id, inst: I.id, frame: miss[0]!, field: 'track.bbox', problem: `可见区间内 ${miss[0]}～${miss[miss.length - 1]} 的 ${miss.length} 个采样没有 bbox（未标注，质检会把这段当成实例不可见）`, suggest: '补 bbox/head/eyes；若确实不可见则写 bbox: null' });
+    }
     const flip = fxOf('cardFlip', I.id);
     const dof = fxOf('depthOfField', I.id);
     const circ = fxOf('circleWindow', I.id);
