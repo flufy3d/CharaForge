@@ -1309,8 +1309,9 @@ def _variant_at_end(inst):
     v = dict(inst.get("variant", {}))
     for e in sorted(inst.get("switchEvents", []), key=lambda e: e["frame"]):
         v[e["param"]] = e["value"]
-    from validate import SWITCH_DEFAULTS
-    return {k: x for k, x in v.items() if SWITCH_DEFAULTS.get(k) != x}
+    from validate import MOTION_PARAMS, SWITCH_DEFAULTS
+    dflt = {**SWITCH_DEFAULTS, **MOTION_PARAMS}
+    return {k: x for k, x in v.items() if dflt.get(k) != x}
 
 
 def _trans_records():
@@ -1758,6 +1759,47 @@ for _k, _kv in B4_INST.items():
     B3_INST.setdefault(_k, {}).update(_kv)
 
 
+# ================================================================ 动作开关的配套参数（B3，2026-11-06 开关审查）
+# Movement1/2/3 不是普通的表情开关：VTS 里由热键触发 motion（vtube.json 的 TriggerAnimation，StopsOnLastFrame=true），
+# motion 把 Movement* 置 1（换手部图层）的同时把手臂摆到位，并停在末帧。只写 Movement*=1 时手臂留在默认位置
+# （竖食指/狗尾草垂在腰侧、抚胸的手不出现，见 .data/recon/review_b3/switch_Movement*.jpg），
+# 所以这里把对应 motion 末帧的手臂参数作为配套参数一起写进 variant / switchEvents。
+# 数值 = Animation/<motion>.motion3.json 各曲线末值（Param56/57 是尾巴光效、与手臂无关，不写；末值为 0 的不写）。
+MOTION_COMPANIONS = {
+    "Movement1": ("狗尾草切换出来", {"Param36": 0.04, "Param39": 0.2, "Param41": -0.732}),
+    "Movement2": ("默认手切举手", {"Param59": 0.476, "Param60": 0.86, "Param61": 0.002, "Param62": 0.034}),
+    "Movement3": ("竖手指切出来动画", {"Param40": 1.0, "Param39": 0.322, "Param41": 0.702}),
+}
+# 镜头内切换的手臂过渡时机（看图）：(旧镜头起点, 实例) → (配套参数起始帧, fade)。
+# motion 本身约 0.85 s（51 帧）把手臂摆到位、Movement* 在 0.33 s 处翻转；实测比 motion 快，按画面填。
+MOTION_TIMING = {
+    (1918, "main"): (1920, 14),   # s21：1922 右手抬起，1934 已贴在胸前
+    (3478, "main"): (3584, 16),   # s41：3588 手在上抬，3600 食指竖到位
+    (3478, "full"): (3580, 16),   # s41 全身：3580 手臂已在侧抬，约 3596 竖到位
+}
+
+
+def apply_motion_companions():
+    for s, shot in SHOTS.items():
+        for inst in shot.get("instances", []):
+            v = inst.setdefault("variant", {})
+            for mv, (motion, comp) in MOTION_COMPANIONS.items():
+                if v.get(mv, 0) >= 0.5:
+                    for k, x in comp.items():
+                        v.setdefault(k, x)
+            evs = inst.setdefault("switchEvents", [])
+            ons = [e for e in evs if e["param"] in MOTION_COMPANIONS]
+            for e in ons:
+                motion, comp = MOTION_COMPANIONS[e["param"]]
+                f, fade = MOTION_TIMING.get((s, inst["id"]), (e["frame"], 30))
+                on = e["value"] >= 0.5   # 关（切回默认手）时配套参数回到 0
+                for k, x in comp.items():
+                    evs.append(SW(f, k, x if on else 0, e.get("confidence", 0.5),
+                                  f"{e['param']} 的配套手臂参数（{motion} 末帧值）" if on else f"{e['param']} 关：手臂回默认", fade=fade))
+            if ons:
+                evs.sort(key=lambda e: e["frame"])   # 稳定排序，同帧保持原顺序
+
+
 def _lerp_box(anchors, f):
     ks = [a for a in anchors if a.get("bbox")]
     if not ks:
@@ -1805,6 +1847,7 @@ def apply_b3():
 def build():
     apply_fixes()
     apply_b3()
+    apply_motion_companions()
     recs = _trans_records()
     rec_by = {(r["start"], r["mode"]): r for r in recs}
     old_start_of = {v: k for k, v in REMAP.items()}

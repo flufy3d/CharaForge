@@ -2116,7 +2116,10 @@
      "z": 2,
      "variant": {
       "key11": 1,
-      "Movement3": 1
+      "Movement3": 1,
+      "Param40": 1.0,
+      "Param39": 0.322,
+      "Param41": 0.702
      },
      "switchEvents": [],
      "motionHints": [],
@@ -2285,7 +2288,10 @@
      "variant": {
       "key8": 1,
       "key3": 1,
-      "Movement1": 1
+      "Movement1": 1,
+      "Param36": 0.04,
+      "Param39": 0.2,
+      "Param41": -0.732
      },
      "switchEvents": [],
      "motionHints": [
@@ -5777,7 +5783,10 @@
      "z": 2,
      "variant": {
       "key11": 1,
-      "Movement3": 1
+      "Movement3": 1,
+      "Param40": 1.0,
+      "Param39": 0.322,
+      "Param41": 0.702
      },
      "switchEvents": [],
      "motionHints": [],
@@ -5930,7 +5939,10 @@
      "variant": {
       "key8": 1,
       "key3": 1,
-      "Movement1": 1
+      "Movement1": 1,
+      "Param36": 0.04,
+      "Param39": 0.2,
+      "Param41": -0.732
      },
      "switchEvents": [],
      "motionHints": [],
@@ -15163,7 +15175,11 @@
      "z": 2,
      "variant": {
       "Movement2": 1,
-      "key7": 1
+      "key7": 1,
+      "Param59": 0.476,
+      "Param60": 0.86,
+      "Param61": 0.002,
+      "Param62": 0.034
      },
      "switchEvents": [
       {
@@ -18415,6 +18431,10 @@
      "variant": {
       "Movement2": 1,
       "key7": 1,
+      "Param59": 0.476,
+      "Param60": 0.86,
+      "Param61": 0.002,
+      "Param62": 0.034,
       "key4": 1
      },
      "switchEvents": [],
@@ -19746,7 +19766,10 @@
      "z": 2,
      "variant": {
       "key11": 1,
-      "Movement3": 1
+      "Movement3": 1,
+      "Param40": 1.0,
+      "Param39": 0.322,
+      "Param41": 0.702
      },
      "switchEvents": [],
      "motionHints": [],
@@ -21618,7 +21641,10 @@
      "z": 2,
      "variant": {
       "key11": 1,
-      "Movement3": 1
+      "Movement3": 1,
+      "Param40": 1.0,
+      "Param39": 0.322,
+      "Param41": 0.702
      },
      "switchEvents": [],
      "motionHints": [],
@@ -21812,6 +21838,38 @@
        "fade": 0,
        "confidence": 0.5,
        "note": "B1：1922 右手已在画面左缘抬起，1926 掠过脸颊，1930 在下巴，1934 已贴在胸前（原 1950 偏晚）"
+      },
+      {
+       "frame": 1920,
+       "param": "Param59",
+       "value": 0.476,
+       "fade": 14,
+       "confidence": 0.5,
+       "note": "Movement2 的配套手臂参数（默认手切举手 末帧值）"
+      },
+      {
+       "frame": 1920,
+       "param": "Param60",
+       "value": 0.86,
+       "fade": 14,
+       "confidence": 0.5,
+       "note": "Movement2 的配套手臂参数（默认手切举手 末帧值）"
+      },
+      {
+       "frame": 1920,
+       "param": "Param61",
+       "value": 0.002,
+       "fade": 14,
+       "confidence": 0.5,
+       "note": "Movement2 的配套手臂参数（默认手切举手 末帧值）"
+      },
+      {
+       "frame": 1920,
+       "param": "Param62",
+       "value": 0.034,
+       "fade": 14,
+       "confidence": 0.5,
+       "note": "Movement2 的配套手臂参数（默认手切举手 末帧值）"
       }
      ],
      "motionHints": [],
@@ -22196,7 +22254,10 @@
      "variant": {
       "key10": 1,
       "key3": 1,
-      "Movement1": 1
+      "Movement1": 1,
+      "Param36": 0.04,
+      "Param39": 0.2,
+      "Param41": -0.732
      },
      "switchEvents": [],
      "motionHints": [
@@ -29140,7 +29201,11 @@
      "z": 1,
      "variant": {
       "Movement2": 1,
-      "key7": 1
+      "key7": 1,
+      "Param59": 0.476,
+      "Param60": 0.86,
+      "Param61": 0.002,
+      "Param62": 0.034
      },
      "switchEvents": [],
      "motionHints": [],
@@ -29319,7 +29384,10 @@
      "z": 1,
      "variant": {
       "key5": 1,
-      "Movement1": 1
+      "Movement1": 1,
+      "Param36": 0.04,
+      "Param39": 0.2,
+      "Param41": -0.732
      },
      "switchEvents": [],
      "motionHints": [
@@ -31211,7 +31279,11 @@
      "role": "fullBody",
      "z": 1,
      "variant": {
-      "Movement2": 1
+      "Movement2": 1,
+      "Param59": 0.476,
+      "Param60": 0.86,
+      "Param61": 0.002,
+      "Param62": 0.034
      },
      "switchEvents": [
       {
@@ -31416,6 +31488,30 @@
       "key11": 1
      },
      "switchEvents": [
+      {
+       "frame": 3584,
+       "param": "Param40",
+       "value": 1.0,
+       "fade": 16,
+       "confidence": 0.6,
+       "note": "Movement3 的配套手臂参数（竖手指切出来动画 末帧值）"
+      },
+      {
+       "frame": 3584,
+       "param": "Param39",
+       "value": 0.322,
+       "fade": 16,
+       "confidence": 0.6,
+       "note": "Movement3 的配套手臂参数（竖手指切出来动画 末帧值）"
+      },
+      {
+       "frame": 3584,
+       "param": "Param41",
+       "value": 0.702,
+       "fade": 16,
+       "confidence": 0.6,
+       "note": "Movement3 的配套手臂参数（竖手指切出来动画 末帧值）"
+      },
       {
        "frame": 3596,
        "param": "Movement3",
@@ -31965,6 +32061,30 @@
      },
      "switchEvents": [
       {
+       "frame": 3580,
+       "param": "Param40",
+       "value": 1.0,
+       "fade": 16,
+       "confidence": 0.5,
+       "note": "Movement3 的配套手臂参数（竖手指切出来动画 末帧值）"
+      },
+      {
+       "frame": 3580,
+       "param": "Param39",
+       "value": 0.322,
+       "fade": 16,
+       "confidence": 0.5,
+       "note": "Movement3 的配套手臂参数（竖手指切出来动画 末帧值）"
+      },
+      {
+       "frame": 3580,
+       "param": "Param41",
+       "value": 0.702,
+       "fade": 16,
+       "confidence": 0.5,
+       "note": "Movement3 的配套手臂参数（竖手指切出来动画 末帧值）"
+      },
+      {
        "frame": 3596,
        "param": "Movement3",
        "value": 1,
@@ -32105,6 +32225,9 @@
      "z": 2,
      "variant": {
       "key11": 1,
+      "Param40": 1.0,
+      "Param39": 0.322,
+      "Param41": 0.702,
       "Movement3": 1
      },
      "switchEvents": [],
@@ -32178,6 +32301,9 @@
      "z": 1,
      "variant": {
       "key11": 1,
+      "Param40": 1.0,
+      "Param39": 0.322,
+      "Param41": 0.702,
       "Movement3": 1
      },
      "switchEvents": [],

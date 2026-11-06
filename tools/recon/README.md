@@ -92,6 +92,9 @@ node --experimental-strip-types -e "import('./packages/scene/src/index.ts').then
   `eyesState` 由 build.py 判定（见 `annotate_eyes_state` 注释）。
 - SwitchEvent `fade`：表情热键（key*/Clothes*）默认 30 帧（VTS 0.5s），Movement*（motion 触发）为 0；
   实测明显不同的（钢盆 15、脱鞋 8、Q 版 8~9）按实测填，note 里注明。
+- 动作开关 Movement1/2/3（2026-11-06 开关审查）：VTS 里由热键触发 motion、停在末帧，Movement* 只换手部图层，
+  手臂姿态在 motion 的手臂参数里。manual.py `MOTION_COMPANIONS` 把对应 motion 末帧的手臂参数（Param36/39/40/41、
+  Param59~62）作为配套参数一起写进 variant / switchEvents（validate.py `MOTION_PARAMS` 放行，范围 [-1,1]）。
 
 ## 文件
 

@@ -6,7 +6,7 @@
      - 实例：ID 镜头内唯一；track 按帧升序、都在 [start, end) 内、首尾帧（start 与 end-1）都有采样；
        bbox/head 在画面附近（允许出画 50%）、宽高 > 0；eyes 两点按画面左/右排序；
      - variant / switchEvents 的参数 ID 必须是 cdi3 中的开关参数（key*/Clothes*/Movement*），取值在 moc3 范围 [0,1] 内，
-       variant 不能列默认值；switchEvents/motionHints 帧号在镜头内；motionHints 引用的 motion3 文件存在；
+       variant 不能列默认值；例外：Movement* 的配套手臂参数（MOTION_PARAMS，范围 [-1,1]，须与 Movement* 同时出现）；switchEvents/motionHints 帧号在镜头内；motionHints 引用的 motion3 文件存在；
      - exclusions/effects 区间在镜头内且 end > start，rects 关键帧在区间内；
      - hasCharacter=false 的镜头不应有实例；hasCharacter=true 的镜头至少一个实例；
      - cadence 段升序不重叠、在视频范围内（--check-cadence 时逐帧核对段内重复帧确实与前一帧相同）；
@@ -32,6 +32,10 @@ SWITCH_RE = re.compile(r"^(key\d+|Clothes\d+|Movement\d+)$")
 # 由 moc3（Cubism Core 读取）核对得到的默认值；范围均为 [0, 1]
 SWITCH_DEFAULTS = {**{f"key{i}": 0 for i in range(1, 14)}, "Movement1": 0, "Movement2": 0, "Movement3": 0,
                    "Clothes1": 1, "Clothes2": 0, "Clothes3": 0, "Clothes4": 0, "Clothes5": 1}
+# 动作开关 Movement1/2/3 的配套手臂参数（B3 开关审查，2026-11-06）：VTS 热键触发的 motion 停在末帧时的手臂姿态，
+# 见 manual.py MOTION_COMPANIONS。范围 [-1, 1]，默认 0；只能和 Movement* 一起出现在 variant / switchEvents 里。
+MOTION_PARAMS = {p: 0 for p in ("Param36", "Param39", "Param40", "Param41", "Param42", "Param43",
+                                "Param59", "Param60", "Param61", "Param62")}
 
 
 def main(argv: list[str]) -> int:
@@ -142,16 +146,28 @@ def main(argv: list[str]) -> int:
                     if c["rect"][2] <= 0 or c["rect"][3] <= 0:
                         errs.append(f"{q}: clip 宽高必须为正")
             for k, val in inst["variant"].items():
-                if not SWITCH_RE.match(k) or k not in cdi_ids:
+                if k in MOTION_PARAMS:
+                    if not -1 <= val <= 1:
+                        errs.append(f"{q}: variant {k}={val} 超出 [-1,1]")
+                    elif val == MOTION_PARAMS[k]:
+                        errs.append(f"{q}: variant {k}={val} 是默认值，不应列出")
+                    elif not any(m.startswith("Movement") for m in inst["variant"]):
+                        errs.append(f"{q}: variant 配套手臂参数 {k} 没有对应的 Movement*")
+                elif not SWITCH_RE.match(k) or k not in cdi_ids:
                     errs.append(f"{q}: variant 参数 {k} 不是 cdi3 中的开关参数")
                 elif not 0 <= val <= 1:
                     errs.append(f"{q}: variant {k}={val} 超出 [0,1]")
                 elif val == SWITCH_DEFAULTS.get(k):
                     errs.append(f"{q}: variant {k}={val} 是默认值，不应列出")
             for ev in inst["switchEvents"]:
-                if not SWITCH_RE.match(ev["param"]) or ev["param"] not in cdi_ids:
+                if ev["param"] in MOTION_PARAMS:
+                    if not -1 <= ev["value"] <= 1:
+                        errs.append(f"{q}: switchEvent {ev['param']}={ev['value']} 超出 [-1,1]")
+                    if not any(m["param"].startswith("Movement") for m in inst["switchEvents"]):
+                        errs.append(f"{q}: switchEvent 配套手臂参数 {ev['param']} 没有对应的 Movement* 切换")
+                elif not SWITCH_RE.match(ev["param"]) or ev["param"] not in cdi_ids:
                     errs.append(f"{q}: switchEvent 参数 {ev['param']} 不是 cdi3 中的开关参数")
-                if not 0 <= ev["value"] <= 1:
+                elif not 0 <= ev["value"] <= 1:
                     errs.append(f"{q}: switchEvent {ev['param']}={ev['value']} 超出 [0,1]")
                 if not inside(ev["frame"]):
                     errs.append(f"{q}: switchEvent 帧 {ev['frame']} 不在镜头内")
