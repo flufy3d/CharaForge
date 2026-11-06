@@ -36,6 +36,16 @@ BLEND_SNAP = False       # blend shape 参数不吸附到 key（实测）
 CONSTRAINT_SNAP = False  # blend shape 约束曲线不吸附（本模型的约束 key 都是整数，未单独验证）
 # warp 变换按块计算：每块 B × 点数 ≈ 这么多元素（越大越快、临时显存越多；2^20 时 float32 每个临时量 4MB）
 WARP_CHUNK_ELEMS = 1 << 20
+# warp / rotation 变换用 Triton 融合核（_kernels_deform.py，与 PyTorch 实现逐式相同；没有 Triton 或不在 CUDA 上时自动退回）
+USE_TRITON = True
+try:
+    from . import _kernels_deform as _K
+except Exception:  # noqa: BLE001  没有 triton
+    _K = None
+
+
+def _use_triton(p):
+    return USE_TRITON and _K is not None and p.is_cuda
 
 
 def _t(a, device, dtype=None):
@@ -142,6 +152,9 @@ class _WarpApply(torch.autograd.Function):
     def forward(ctx, p, grid, c, du, dv, pid, C_i, R_i, goff, quad, chunk):
         ctx.save_for_backward(p, grid, c, du, dv, pid, C_i, R_i, goff, quad)
         ctx.chunk = chunk
+        ctx.triton = _use_triton(p)
+        if ctx.triton:
+            return _K.warp_forward(p, grid, c, du, dv, pid, C_i, R_i, goff, quad, WARP_BAND_LO, WARP_BAND_HI)
         outs = [_warp_core(p[:, s:s + chunk], grid, c, du, dv, pid[s:s + chunk], C_i[s:s + chunk], R_i[s:s + chunk], goff[s:s + chunk],
                            quad[s:s + chunk], False) for s in range(0, p.shape[1], chunk)]
         return torch.cat(outs, 1) if len(outs) > 1 else outs[0]
@@ -153,6 +166,10 @@ class _WarpApply(torch.autograd.Function):
         B, N = p.shape[0], p.shape[1]
         need_p, need_grid = ctx.needs_input_grad[0], ctx.needs_input_grad[1]
         need_aff = any(ctx.needs_input_grad[2:5])
+        if ctx.triton:
+            gp, ggrid, gc, gdu, gdv = _K.warp_backward(gq, p, grid, c, du, dv, pid, C_i, R_i, goff, quad, WARP_BAND_LO, WARP_BAND_HI,
+                                                       need_p, need_grid, need_aff)
+            return gp, ggrid, gc, gdu, gdv, None, None, None, None, None, None
         gp = torch.empty_like(p) if need_p else None
         ggrid = torch.zeros_like(grid) if need_grid else None
         gc, gdu, gdv = (torch.zeros_like(c), torch.zeros_like(du), torch.zeros_like(dv)) if need_aff else (None, None, None)
@@ -193,6 +210,9 @@ class _RotApply(torch.autograd.Function):
     @staticmethod
     def forward(ctx, p, o, cs, sn, sc, rx, ry, pid):
         ctx.save_for_backward(p, o, cs, sn, sc, rx, ry, pid)
+        ctx.triton = _use_triton(p)
+        if ctx.triton:
+            return _K.rot_forward(p, o, cs, sn, sc, rx, ry, pid)
         x = p[..., 0] * rx[:, pid]
         y = p[..., 1] * ry[:, pid]
         c_, s_, k_ = cs[:, pid], sn[:, pid], sc[:, pid]
@@ -201,6 +221,9 @@ class _RotApply(torch.autograd.Function):
     @staticmethod
     def backward(ctx, g):
         p, o, cs, sn, sc, rx, ry, pid = ctx.saved_tensors
+        if ctx.triton:
+            gp, go, gcs, gsn, gsc = _K.rot_backward(g, p, o, cs, sn, sc, rx, ry, pid, ctx.needs_input_grad[:5])
+            return gp, go, gcs, gsn, gsc, None, None, None
         B, n = p.shape[0], p.shape[1]
         rxp, ryp = rx[:, pid], ry[:, pid]
         x = p[..., 0] * rxp
@@ -214,6 +237,27 @@ class _RotApply(torch.autograd.Function):
         gsn = torch.zeros_like(sn).scatter_add_(1, idx, k_ * (x * gy - y * gx)) if ctx.needs_input_grad[3] else None
         gsc = torch.zeros_like(sc).scatter_add_(1, idx, (c_ * x - s_ * y) * gx + (s_ * x + c_ * y) * gy) if ctx.needs_input_grad[4] else None
         return gp, go, gcs, gsn, gsc, None, None, None
+
+
+def _prod_last(x):
+    """沿最后一维连乘（维数很小）。torch.prod 的反向为处理 0 值会做一次 GPU→CPU 同步，不能被 CUDA graph 捕获。"""
+    r = x[..., 0]
+    for i in range(1, x.shape[-1]):
+        r = r * x[..., i]
+    return r
+
+
+class _SpMM(torch.autograd.Function):
+    """常量稀疏矩阵 A（CSR）× 稠密 X；反向 dX = A^T · dY（A^T 预先转好，CSR）。"""
+
+    @staticmethod
+    def forward(ctx, X, A, At):
+        ctx.At = At
+        return torch.sparse.mm(A, X)
+
+    @staticmethod
+    def backward(ctx, g):
+        return torch.sparse.mm(ctx.At, g.contiguous()), None, None
 
 
 class _Family:
@@ -326,10 +370,16 @@ class L2D(torch.nn.Module):
                                    _t(ak['drawOrders'][:, None], dev, dtype)], 1)
         self._glue_kf = _t(g['glueKeyforms']['intensities'][:, None], dev, dtype)
 
+        self._root_props = torch.tensor([1, 1, 1, 1, 0, 0, 0, 1, 1], device=dev, dtype=dtype)
+        self._sp_t = {}
         self._plan_levels()
+        for A in (self._A_warp, self._A_mesh):
+            self._sp_t[id(A)] = (A, A.to_sparse_coo().t().coalesce().to_sparse_csr())
         self._plan_parts()
         self._glue_waves = self._glue_plan()
         self._draw_plan()
+        self._graphs = {}
+        self.auto_graph = False  # A7：True 时 forward 自动走 CUDA graph（graphed()），缺省关闭
 
     # ================================================================ 编译
 
@@ -693,10 +743,13 @@ class L2D(torch.nn.Module):
             return out
         return out.index_add(1, fam.owner, Wkf[..., None] * kf_vals[None])
 
-    @staticmethod
-    def _spmm(A, Wkf):
-        """A [R, NKF] 稀疏 × Wkf^T → [B, R/2, 2]（[R, B] 结果的置换视图，不复制）。"""
-        r = torch.sparse.mm(A, Wkf.t().contiguous())
+    def _spmm(self, A, Wkf):
+        """A [R, NKF] 稀疏 × Wkf^T → [B, R/2, 2]（[R, B] 结果的置换视图，不复制）。
+        反向用预先算好的 A^T（CSR）：torch.sparse.mm 自带的反向每次现场转置，且含 CPU 拷贝，不能被 CUDA graph 捕获。"""
+        At = self._sp_t.get(id(A))
+        if At is None:
+            At = self._sp_t[id(A)] = (A, A.to_sparse_coo().t().coalesce().to_sparse_csr())
+        r = _SpMM.apply(Wkf.t().contiguous(), A, At[1])
         return r.view(-1, 2, Wkf.shape[0]).permute(2, 0, 1)
 
     # ================================================================ 求值：变形
@@ -736,7 +789,15 @@ class L2D(torch.nn.Module):
     # ================================================================ 主流程
 
     def forward(self, params: torch.Tensor, part_opacity: torch.Tensor | None = None) -> Output:
-        """params [B, P]（模型参数值，顺序同 param_ids），part_opacity [B, Q]（部件不透明度，缺省全 1）。"""
+        """params [B, P]（模型参数值，顺序同 param_ids），part_opacity [B, Q]（部件不透明度，缺省全 1）。
+        auto_graph = True 时自动按 (B, 是否求导, 是否传 part_opacity) 走 graphed()（CUDA graph，见该方法的说明）。"""
+        if (self.auto_graph and self.debug is None and self.device.type == 'cuda'
+                and not torch.cuda.is_current_stream_capturing()):
+            grad = torch.is_grad_enabled() and params.requires_grad
+            return self.graphed(int(params.shape[0]), grad=grad, part_opacity=part_opacity is not None)(params, part_opacity)
+        return self._forward(params, part_opacity)
+
+    def _forward(self, params: torch.Tensor, part_opacity: torch.Tensor | None = None) -> Output:
         params = params.to(self.device, self.dtype)
         B = params.shape[0]
         dev, dt = self.device, self.dtype
@@ -750,7 +811,7 @@ class L2D(torch.nn.Module):
         tt = pt[:, self._kb_dims][:, :, None, :]                # [B, NKB, 1, M]
         f = torch.where(bit == 1, tt, 1 - tt)
         f = torch.where(has, f, (bit == 0).to(dt))
-        kb_w = f.prod(-1)                                       # [B, NKB, C]
+        kb_w = _prod_last(f)                                 # [B, NKB, C]
         ki = torch.minimum(pidx[:, self._kb_dims][:, :, None, :] + bit, self._kb_nk1[None, :, None, :])
         kb_off = (torch.where(has, ki, 0) * self._kb_stride[None, :, None, :]).sum(-1)
         # 参数超出绑定的 key 范围（容差 KEY_RANGE_EPS）→ 对象不可见，且其子孙不会被 Core 求值
@@ -804,8 +865,7 @@ class L2D(torch.nn.Module):
                 w_props = torch.cat([wv, w_ok[..., None], torch.ones_like(w_ok)[..., None]], -1)
                 r_props = torch.cat([rv[..., :7], r_ok[..., None], sc[..., None]], -1)
                 mesh_pts.append(mloc)
-                root = torch.tensor([1, 1, 1, 1, 0, 0, 0, 1, 1], device=dev, dtype=dt)  # 没有父变形器
-                mesh_props.append(root.expand(B, st.nM, 9))
+                mesh_props.append(self._root_props.expand(B, st.nM, 9))  # 没有父变形器（常量，避免前向里 H2D 拷贝，便于 CUDA graph 捕获）
             else:
                 # 网格点、rotation 原点与方向点、mesh 顶点，各自按父类型分两段变换
                 ow = org[:, :st.rw]
@@ -866,7 +926,7 @@ class L2D(torch.nn.Module):
         if part_opacity is None:
             part_opacity = torch.ones(B, self.Q, device=dev, dtype=dt)
         po = torch.cat([part_opacity.to(dev, dt) * self._part_enabled.to(dt), torch.ones(B, 1, device=dev, dtype=dt)], 1)
-        part_eff = po[:, self._part_chain].prod(-1)                       # [B, Q+1]（最后一列 = 没有父部件）
+        part_eff = _prod_last(po[:, self._part_chain])                       # [B, Q+1]（最后一列 = 没有父部件）
         mop = mop * part_eff[:, self._mesh_part]
         visible = computed & own_ok & (mop > 0)
         # 自身绑定超出 key 范围：Core 只做了 keyform 插值（不透明度 / 颜色 / draw order 是自身 keyform 的值，不乘父与部件），
@@ -885,6 +945,26 @@ class L2D(torch.nn.Module):
         px = torch.stack([self.origin_x + verts[..., 0] * self.ppu, self.origin_y + verts[..., 1] * self.ppu], -1)
         return Output(verts=px, opacity=opacity, draw_order=draw_order, render_order=render_order, multiply=mmul, screen=mscr,
                       visible=visible, vertex_updated=computed & own_ok)
+
+    # ================================================================ 可选快速路径：CUDA graph
+    def graphed(self, B: int, grad: bool = True, part_opacity: bool = False, max_cached: int = 4):
+        """返回一个与 forward 同语义、输出逐位相同的可调用对象 fn(params[B,P], part_opacity=None) → Output，
+        内部用 CUDA graph 重放整个前向（grad=True 时前向 + 反向各一张图），省掉约 1 万次内核发射的 CPU 开销。
+
+        - 批大小 B 固定（不同 B 各建一张图，按 (B, grad, part_opacity) 缓存最近 max_cached 个；建图约 1～2 秒，占一份私有显存池）；
+        - grad=True：params 求导（part_opacity 不求导）。同一张图上一次前向的反向没跑完之前又做前向时，
+          自动退回普通 forward（保存的中间量在图的静态显存里，会被覆盖），结果仍然正确；
+        - grad=False：只在 no_grad 下用；在求导上下文里且 params.requires_grad 时退回普通 forward；
+        - part_opacity=True 时 fn 必须传 part_opacity [B, Q]；False 时不能传（传了就退回普通 forward）。
+        输出是新张量（从图的静态缓冲复制出来），可以放心保留。"""
+        key = (int(B), bool(grad), bool(part_opacity))
+        g = self._graphs.pop(key, None)
+        if g is None:
+            while len(self._graphs) >= max(1, max_cached):
+                self._graphs.pop(next(iter(self._graphs)))
+            g = _GraphedDeform(self, *key)
+        self._graphs[key] = g  # 移到末尾（最近使用）
+        return g
 
     @staticmethod
     def _int_draw_order(x):
@@ -906,6 +986,67 @@ class L2D(torch.nn.Module):
         ro = torch.empty_like(perm)
         ro.scatter_(1, perm, torch.arange(D, device=self.device)[None].expand(B, D))
         return ro
+
+
+_OUT_FIELDS = ('verts', 'opacity', 'draw_order', 'render_order', 'multiply', 'screen', 'visible', 'vertex_updated')
+
+
+class _GraphedDeform:
+    """L2D.graphed() 的实现。"""
+
+    def __init__(self, model: L2D, B: int, grad: bool, with_po: bool, warmup: int = 3):
+        self.model, self.B, self.grad, self.with_po = model, B, grad, with_po
+        dev, dt = model.device, model.dtype
+        self.sP = model._pmin.expand(B, -1).clone()  # 任意合法值
+        self.sPo = torch.ones(B, model.Q, device=dev, dtype=dt) if with_po else None
+        self._pending = None  # grad 图：上一次前向的反向节点（弱引用）
+
+        def fn(*a):
+            o = model._forward(a[0], a[1] if with_po else None)
+            return tuple(getattr(o, f) for f in _OUT_FIELDS)
+        args = (self.sP.requires_grad_(grad),) + ((self.sPo,) if with_po else ())
+        if grad:
+            self.fn = torch.cuda.make_graphed_callables(fn, args, num_warmup_iters=warmup)
+        else:
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.no_grad(), torch.cuda.stream(s):
+                for _ in range(warmup):
+                    fn(*args)
+            torch.cuda.current_stream().wait_stream(s)
+            self.graph = torch.cuda.CUDAGraph()
+            with torch.no_grad(), torch.cuda.graph(self.graph):
+                self.outs = fn(*args)
+
+    def _eager(self, params, part_opacity):
+        return self.model._forward(params, part_opacity)
+
+    def __call__(self, params: torch.Tensor, part_opacity: torch.Tensor | None = None) -> Output:
+        m = self.model
+        if tuple(params.shape) != (self.B, m.P) or (part_opacity is not None) != self.with_po:
+            return self._eager(params, part_opacity)
+        P = params.to(m.device, m.dtype)
+        if not self.grad:
+            if torch.is_grad_enabled() and (P.requires_grad or (part_opacity is not None and part_opacity.requires_grad)):
+                return self._eager(params, part_opacity)
+            self.sP.copy_(P)
+            if self.with_po:
+                self.sPo.copy_(part_opacity)
+            self.graph.replay()
+            return Output(*[t.clone() for t in self.outs])
+        if self._pending is not None and self._pending() is not None:
+            return self._eager(params, part_opacity)  # 上一次前向的反向还没跑：静态中间量不能覆盖
+        if part_opacity is not None and part_opacity.requires_grad and torch.is_grad_enabled():
+            return self._eager(params, part_opacity)
+        args = (P,) + ((part_opacity.to(m.device, m.dtype).detach(),) if self.with_po else ())
+        outs = self.fn(*args)
+        node = outs[0].grad_fn
+        if node is not None:
+            import weakref
+            ref = weakref.ref(node)
+            self._pending = ref
+            node.register_hook(lambda gi, go: setattr(self, '_pending', None))
+        return Output(*[t.clone() for t in outs])
 
 
 def load(path, device='cuda', dtype=torch.float32, **kw) -> L2D:

@@ -45,6 +45,9 @@ img = C.composite([(buf, L["draw"])], 720, 1280, None, B=1)  # 合成缓冲
 口径相同（顶点为画布像素，y 向下）。`to_screen` 用 `affine_mul(camera_matrix(...), layer_matrix(...))` 由图层 / 相机参数算出即可对它们求导；
 世界空间到屏幕空间的约定见 `packages/scene/src/scene.ts` 第 2 条（space = "screen" 的图层不乘相机）。
 
+提速（A7）：`render(..., fast=True)`（或 `raster.FAST_DEFAULT = True`）走 Triton 融合核的快速路径，前向与梯度与本实现一致，
+单帧快约 8 倍，640×360 带边缘梯度一次能放 28 帧。说明、对拍与测量见 [perf.md](perf.md)。
+
 `render()` 的选项：
 
 | 参数 | 缺省 | 含义 |

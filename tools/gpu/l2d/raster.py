@@ -52,6 +52,18 @@ CF_INVERTED_MASK = 8
 DF_VISIBLE = 1
 DF_VPOS_CHANGED = 32
 
+# A7 快速路径（Triton 融合核，见 _kernels_raster.py 与 docs/perf.md）：render(fast=None) 时用这个缺省值
+FAST_DEFAULT = False
+# 快速路径的显存预算（字节）：不求导时每次剥离的帧数、反向时每块帧数按它来分
+FAST_TIDP_BUDGET = 384 << 20
+FAST_MASK_BUDGET = 160 << 20   # mask 缓冲剥离一次的 rast（16 字节 / 画布像素）上限：2048 级 mask 每帧约 700 万像素，通常一次一帧
+FAST_BWD_BUDGET = 512 << 20
+FAST_AA_GROUP = 8              # 反向的边缘梯度项每次处理的剥离层数（限制临时显存）
+try:
+    from . import _kernels_raster as _KR
+except Exception:  # noqa: BLE001  没有 triton
+    _KR = None
+
 CLIP_MAX_DEFAULT = 36        # ClippingMaskMaxCountOnDefault
 CLIP_MAX_MULTI = 32          # ClippingMaskMaxCountOnMultiRenderTexture
 COLOR_CHANNELS = 4
@@ -746,14 +758,22 @@ class Rasterizer:
         return (Xa - Xa.detach())[eidx]
 
     # ---------- 主绘制 ----------
-    def render(self, inp: LayerInput, W: int, H: int, aa: bool = True, quantize: bool = True, mask_grad: bool = False, aa_layers: int | None = None) -> torch.Tensor:
+    def render(self, inp: LayerInput, W: int, H: int, aa: bool = True, quantize: bool = True, mask_grad: bool = False, aa_layers: int | None = None,
+               fast: bool | None = None) -> torch.Tensor:
         """渲染一批图层缓冲（预乘 RGBA，[B, H, W, 4]）。
         aa=True：附加边缘梯度直通项（前向值不变，只在求导时生效）。
         quantize=True：每次混合后按 RGBA8 目标夹到 [0,1] 并 8 位取整（梯度直通），与 GL 逐 drawable 写入 8 位缓冲一致；
         False 时只夹取不取整。
         mask_grad=True：梯度也穿过 mask 缓冲的生成传到 mask drawable 的顶点（mask 缓冲是 2048² 级别，显存开销大）；
         缺省 False 时 mask 图不求导，被裁切 drawable 对顶点的梯度仍经采样位置（clipPos）传回。
-        aa_layers：只对最前面的 K 个剥离层加边缘梯度项（省显存；更深的层大多被遮挡），None = 全部。"""
+        aa_layers：只对最前面的 K 个剥离层加边缘梯度项（省显存；更深的层大多被遮挡），None = 全部。
+        fast：A7 快速路径（Triton 融合核，同一套公式，前向与本实现逐像素一致、梯度一致，见 docs/perf.md）；
+        None = 模块变量 FAST_DEFAULT。mask_grad=True 求导、非 float32 顶点或没有 Triton 时自动走原实现。"""
+        if fast is None:
+            fast = FAST_DEFAULT
+        if (fast and _KR is not None and inp.positions.is_cuda and inp.positions.dtype == torch.float32
+                and not (mask_grad and torch.is_grad_enabled())):
+            return self._render_fast(inp, W, H, aa, quantize, aa_layers)
         g = self.geom
         dev = inp.positions.device
         B = inp.positions.shape[0]
@@ -838,6 +858,287 @@ class Rasterizer:
         for eidx, v in extra:
             D = D.index_add(0, eidx, v)
         return D.reshape(B, H, W, 4)
+
+    # ---------- A7 快速路径 ----------
+    def _fast_tensors(self):
+        """快速路径用的常量张量（几何、贴图），首次调用时生成。"""
+        f = getattr(self, "_fast", None)
+        if f is not None:
+            return f
+        g, a = self.geom, self.atlas
+        dev = g.device
+        vctx = g.draw_ctx[g.vtx_draw]
+        sel = (vctx >= 0).nonzero()[:, 0]
+        lay = torch.tensor([lb["bounds"] for lb in g.layouts] if g.layouts else np.zeros((0, 4)), dtype=torch.float64, device=dev)
+        gt = {"tri": g.tri.reshape(-1).contiguous(), "tdraw": g.tri_draw, "uv": g.uv.reshape(-1).contiguous(), "texi": g.tex_index,
+              "blend": g.blend, "dctx": g.draw_ctx, "inv": g.inverted.to(torch.uint8), "cull": g.culling.to(torch.uint8),
+              "ptri": g.pair_tri.reshape(-1).contiguous(), "pctx": g.pair_tri_ctx, "pdraw": g.pair_tri_draw, "ptex": g.pair_tri_tex,
+              "puv": g.pair_uv.reshape(-1).contiguous(), "csel": sel, "ckey": vctx[sel], "lay": lay,
+              "off": torch.tensor([-9.0, -9.0, 0.0, 1.0], device=dev)}
+        at = {"data": a.data.view(torch.int32).reshape(-1), "tab": a.tab.reshape(-1).contiguous(), "maxlev": a.maxlev, "nlev": a.nlev}
+        self._fast = (gt, at)
+        return self._fast
+
+    def _clip_matrices_fast(self, units: torch.Tensor) -> torch.Tensor:
+        """clip_matrices 的向量化版本（同样的 float64 运算，结果逐位相同）。"""
+        g = self.geom
+        gt, _ = self._fast_tensors()
+        B = units.shape[0]
+        nctx = len(g.ctx_masks)
+        u = units.detach().double()[:, gt["csel"]]
+        big = torch.finfo(torch.float64).max
+        key = gt["ckey"][None, :, None].expand(B, -1, 2)
+        cmn = torch.full((B, nctx, 2), big, dtype=torch.float64, device=u.device).scatter_reduce_(1, key, u, "amin")
+        cmx = torch.full((B, nctx, 2), -big, dtype=torch.float64, device=u.device).scatter_reduce_(1, key, u, "amax").clamp_min(JS_MIN_VALUE)
+        w = cmx - cmn
+        bx, by = cmn[..., 0] - w[..., 0] * 0.05, cmn[..., 1] - w[..., 1] * 0.05
+        bw, bh = w[..., 0] * 1.1, w[..., 1] * 1.1
+        lay = gt["lay"]
+        lx, ly, lw, lh = lay[:, 0], lay[:, 1], lay[:, 2], lay[:, 3]
+        sx, sy = lw / bw, lh / bh
+        out = torch.zeros((B, nctx, 2, 3), dtype=torch.float64, device=u.device)
+        out[..., 0, 0] = sx
+        out[..., 0, 2] = lx - sx * bx
+        out[..., 1, 1] = sy
+        out[..., 1, 2] = ly - sy * by
+        return out
+
+    def _render_masks_fast(self, inp: LayerInput, units: torch.Tensor, Mdraw: torch.Tensor, draw_on: torch.Tensor):
+        """_render_masks（不求导）的快速版本：同样的窗口与打包，每个剥离层一个 Triton 核在整幅画布上逐像素做 Π(1 − a)。"""
+        g = self.geom
+        gt, at = self._fast_tensors()
+        B = units.shape[0]
+        R = g.mask_size
+        dev = units.device
+        nctx = len(g.ctx_masks)
+        wins = self._mask_windows(inp, units, Mdraw, draw_on)
+        table = torch.zeros((nctx, 6), dtype=torch.long, device=dev)
+        self.last_mask_layers = 0
+        if not wins:
+            return torch.ones((B, 1), device=dev), table
+        order = sorted(wins, key=lambda c: -wins[c][3])
+        best = None
+        # 画布宽只取 2 的幂（像素 → 裁剪坐标 x / CW·2 − 1 是精确的，与原实现的 1024 宽画布光栅化结果逐位相同），取面积最小的打包
+        for CW in sorted({max(1024, 1 << int(math.ceil(math.log2(max(wins[c][2] for c in wins))))) << k for k in range(3)}):
+            slots = {}
+            x = y = rowh = 0
+            for c in order:
+                w, h = wins[c][2], wins[c][3]
+                if x + w > CW:
+                    x, y, rowh = 0, y + rowh, 0
+                slots[c] = (x, y)
+                x += w
+                rowh = max(rowh, h)
+            if best is None or CW * (y + rowh) < best[0] * best[1]:
+                best = (CW, y + rowh, slots)
+        CW, CH, slots = best
+        self.last_mask_canvas = (CH, CW)
+        tab = np.zeros((nctx, 6), dtype=np.int64)
+        rect = np.zeros((nctx, 4), dtype=np.int64)  # 槽位矩形（片元属于本像素所在槽位的上下文 ⇔ 像素在该上下文的槽位里）
+        shift = np.zeros((nctx, 2), dtype=np.float64)
+        need = np.zeros(nctx, dtype=bool)
+        for c, (i0, j0, w, h) in wins.items():
+            ox, oy = slots[c]
+            tab[c] = (oy * CW + ox, i0, j0, w, h, CW)
+            rect[c] = (ox, oy, w, h)
+            shift[c] = (ox - i0, oy - j0)
+            need[c] = True
+        small = torch.tensor(np.concatenate([tab.reshape(-1), rect.reshape(-1), need.astype(np.int64)]), device=dev)
+        table = small[:nctx * 6].reshape(nctx, 6)
+        gt = {**gt, "rect": small[nctx * 6:nctx * 10].contiguous()}
+        need_t = small[nctx * 10:] != 0
+        shift_t = torch.tensor(shift, device=dev)
+        pc, pv, pd = g.pair_ctx, g.pair_vid, g.pair_draw
+        Mp = Mdraw[:, pc].to(units.dtype)
+        pix = ((Mp[..., :2] @ units[:, pv][..., None])[..., 0] + Mp[..., 2]) * R + shift_t[pc].to(units.dtype)
+        vpos_ok = (inp.dyn_flags & DF_VPOS_CHANGED) != 0
+        ok_v = vpos_ok[:, pd] & need_t[pc][None]
+        nx = pix[..., 0] / CW * 2 - 1
+        ny = pix[..., 1] / CH * 2 - 1
+        pos = torch.stack([nx.float(), ny.float(), g.pair_z[None].expand(B, -1), torch.ones_like(nx, dtype=torch.float32)], -1)
+        pos = torch.where(ok_v[..., None], pos, gt["off"]).contiguous()
+        pix = pix.float().contiguous()
+        HW = CH * CW
+        prod = torch.ones((B, HW), device=dev)
+        nb = max(1, int(FAST_MASK_BUDGET // (HW * 16)))  # 每次剥离的帧数（rast 是 16 字节 / 像素）
+        for f0 in range(0, B, nb):
+            f1 = min(B, f0 + nb)
+            posc = pos[f0:f1]
+            nl = 0
+            with dr.DepthPeeler(self.glctx, posc, g.pair_tri, (CH, CW), grad_db=False) as peeler:
+                while True:
+                    rast, _ = peeler.rasterize_next_layer()
+                    if not _KR.mask_layer(rast, prod[f0:f1], pix[f0:f1], posc, gt, {**at, "bias": float(self.atlas.lod_bias)}, CW, g.any_culling):
+                        break
+                    nl += 1
+            self.last_mask_layers = max(self.last_mask_layers, nl)
+        return prod, table
+
+    def _render_fast(self, inp: LayerInput, W: int, H: int, aa: bool, quantize: bool, aa_layers: int | None) -> torch.Tensor:
+        g = self.geom
+        gt, at = self._fast_tensors()
+        P = inp.positions
+        B = P.shape[0]
+        V = g.V
+        HW = H * W
+        need_grad = torch.is_grad_enabled() and any(t.requires_grad for t in (P, inp.to_screen, inp.opacities, inp.multiply, inp.screen))
+        if not need_grad:
+            # 不求导：按显存预算分帧（每帧要存全部剥离层的三角形号，约 L × HW × 4 字节）
+            nb = max(1, int(FAST_TIDP_BUDGET // (HW * 4 * 32)))
+            if B > nb:
+                outs = []
+                for f0 in range(0, B, nb):
+                    sl = slice(f0, f0 + nb)
+                    outs.append(self._render_fast(LayerInput(P[sl], inp.opacities[sl], inp.multiply[sl], inp.screen[sl], inp.render_orders[sl],
+                                                             inp.dyn_flags[sl], inp.to_screen[sl]), W, H, False, quantize, None))
+                return torch.cat(outs, 0)
+        aa = aa and need_grad
+        dev = P.device
+        ts = inp.to_screen.to(P.dtype)
+        S = (ts[:, None, :, :2] @ P[..., None])[..., 0] + ts[:, None, :, 2]  # [B, V, 2] 合成像素
+        units = g.to_units(P)
+        draw_on = ((inp.dyn_flags & DF_VISIBLE) != 0) & (inp.opacities > 0)
+        n = g.n
+        slot = 2.0 / (n + 2)
+        zd = 1.0 - (inp.render_orders.float() + 1.0) * slot
+        z = zd[:, g.vtx_draw] + slot * 0.8 * g.vtx_hash[None]
+        Sd = S.detach()
+        clip = torch.stack([Sd[..., 0] / W * 2 - 1, Sd[..., 1] / H * 2 - 1, z, torch.ones_like(z)], -1).float()
+        on_v = draw_on[:, g.vtx_draw]
+        clip = torch.where(on_v[..., None], clip, gt["off"]).contiguous()
+
+        st = _FastState()
+        st.gt, st.at = gt, {**at, "bias": float(self.atlas.lod_bias)}
+        st.W, st.H, st.HW, st.V, st.n, st.NP = W, H, HW, V, n, B * HW
+        st.S, st.P, st.U = Sd.contiguous(), P.detach().contiguous(), units.detach().contiguous()
+        st.op, st.mul, st.scr = (x.detach().float().contiguous() for x in (inp.opacities, inp.multiply, inp.screen))
+        st.cull = bool(g.any_culling)
+        any_masked = bool((draw_on & (g.draw_ctx[None] >= 0)).any())
+        st.has_mask = any_masked
+        if any_masked:
+            with torch.no_grad():
+                Mdraw = self._clip_matrices_fast(units)
+                mflat, mtab = self._render_masks_fast(inp, units.detach(), Mdraw, draw_on)
+            st.mflat, st.mtab = mflat.contiguous(), mtab.reshape(-1).contiguous()
+            st.Md = Mdraw.float().reshape(B, -1, 6).contiguous()
+            st.nctx, st.R, st.MHW = Mdraw.shape[1], float(g.mask_size), mflat.shape[1]
+        else:
+            st.mflat = st.mtab = st.Md = st.S
+            st.nctx, st.R, st.MHW = 0, 1.0, 1
+        # 深度剥离：只记下每层每像素的三角形号（int32），着色与合成在一个核里做
+        planes = []
+        with dr.DepthPeeler(self.glctx, clip, g.tri, (H, W), grad_db=False) as peeler:
+            while True:
+                rast, _ = peeler.rasterize_next_layer()
+                t, nonempty = _KR.tid_plane(rast)
+                if not nonempty:
+                    break
+                planes.append(t)
+        self.last_layers = len(planes)
+        st.L = len(planes)
+        st.tidp = torch.stack(planes) if planes else torch.zeros((0, B * HW), dtype=torch.int32, device=dev)
+        del planes
+        if not need_grad:
+            return _KR.composite_forward(st, quantize).reshape(B, H, W, 4)
+        st.clip, st.on_v, st.glctx, st.tri, st.topo = clip, on_v, self.glctx, g.tri, g.topo
+        st.quantize, st.aa = quantize, aa
+        st.LA = (st.L if aa_layers is None else min(st.L, int(aa_layers))) if aa else 0
+        return _FastRender.apply(S, units, inp.opacities, inp.multiply, inp.screen, st)
+
+
+class _FastState:
+    """快速路径一次 render 的全部数据（几何常量、本批的顶点 / 颜色、mask 缓冲、剥离层的三角形号）。"""
+
+
+class _FastRender(torch.autograd.Function):
+    """快速路径的前向（Triton 合成核）与反向（逐块：第一遍记录 D_below，边缘梯度项，第二遍从前往后反传）。"""
+
+    @staticmethod
+    def forward(ctx, S, U, op, mul, scr, st):
+        ctx.st = st
+        B = S.shape[0]
+        return _KR.composite_forward(st, st.quantize).reshape(B, st.H, st.W, 4)
+
+    @staticmethod
+    def backward(ctx, G):
+        st = ctx.st
+        if st is None:
+            raise RuntimeError("render(fast=True) 的反向只能跑一次（保存的剥离层数据在反向后即释放）；需要 retain_graph 时请用 fast=False")
+        ctx.st = None  # 反向之后立即释放（否则只要输出张量还在，三角形号、mask 缓冲等就一直占着显存）
+        ng = ctx.needs_input_grad
+        B, H, W, HW = st.S.shape[0], st.H, st.W, st.HW
+        need_s, need_u, need_op, need_col = ng[0], ng[1] and st.has_mask, ng[2], ng[3] or ng[4]
+        dev = st.S.device
+        gS = torch.zeros_like(st.S) if need_s else None
+        gU = torch.zeros_like(st.U) if need_u else None
+        gop = torch.zeros_like(st.op) if need_op else None
+        gmul = torch.zeros_like(st.mul) if need_col else None
+        gscr = torch.zeros_like(st.scr) if need_col else None
+        G = G.detach().float().contiguous().reshape(-1, 4)
+        L, LA = st.L, st.LA
+        if L == 0:
+            return gS, gU, gop, (gmul if ng[3] else None), (gscr if ng[4] else None), None
+        per_frame = HW * 16 * (L + 2 * LA + 7 * min(LA, FAST_AA_GROUP))
+        nb = max(1, int(FAST_BWD_BUDGET // per_frame))
+        for f0 in range(0, B, nb):
+            f1 = min(B, f0 + nb)
+            p_lo, p_hi = f0 * HW, f1 * HW
+            Db, X, A = _KR.composite_save(st, st.quantize, p_lo, p_hi, LA)
+            dX = None
+            if LA:
+                dX = _aa_backward(st, G[p_lo:p_hi], Db, X, A, f0, f1, gS)
+                del X, A
+            _KR.composite_backward(st, G, p_lo, p_hi, Db, dX, LA, (gS, gU, gop, gmul, gscr), (need_s, need_u, need_op, need_col))
+            del Db, dX
+        return gS, gU, gop, (gmul if ng[3] else None), (gscr if ng[4] else None), None
+
+
+def _aa_backward(st, Gc, Db, X, A, f0, f1, gS):
+    """边缘梯度直通项的反向（原实现：extra = T_above ⊙ (Δ − Δ_α ⊙ D_below)，Δ = antialias(X) − 其 detach，只在 antialias 改动过的像素上）。
+    返回 ∂L/∂X [LA, n, 4]（加到 B_k 上），并把对裁剪坐标的梯度换算后加进 gS。按 FAST_AA_GROUP 层一组处理，rast 在这里重新剥离。"""
+    LA = X.shape[0]
+    nb = f1 - f0
+    H, W = st.H, st.W
+    need_pos = gS is not None
+    dX = torch.empty_like(X)
+    T = torch.ones_like(A[0])  # 上方各层的透射率（不含本层），从前往后连乘，与原实现的 T_full 同序
+    clip = st.clip[f0:f1]
+    dpos = torch.zeros_like(clip) if need_pos else None
+    with dr.DepthPeeler(st.glctx, clip, st.tri, (H, W), grad_db=False) as peeler:
+        for k0 in range(0, LA, FAST_AA_GROUP):
+            k1 = min(LA, k0 + FAST_AA_GROUP)
+            ng = k1 - k0
+            rast = torch.stack([peeler.rasterize_next_layer()[0] for _ in range(ng)]).reshape(ng * nb, H, W, 4)
+            Te = []
+            for k in range(k0, k1):
+                Te.append(T)
+                T = T * A[k]
+            Gt = Gc[None] * torch.stack(Te)
+            del Te
+            Ga = Gt[..., 3] - (Gt * Db[k0:k1]).sum(-1)
+            Gaa = torch.cat([Gt[..., :3], Ga[..., None]], -1).reshape(ng * nb, H, W, 4)
+            del Gt, Ga
+            Xi = X[k0:k1].reshape(ng * nb, H, W, 4)
+            pos = clip[None].expand(ng, -1, -1, -1).reshape(ng * nb, -1, 4).contiguous()
+            with torch.no_grad():
+                E = (dr.antialias(Xi, rast, pos, st.tri, topology_hash=st.topo) != Xi).any(-1, keepdim=True)
+            Gaa = torch.where(E, Gaa, 0.0)
+            del E
+            with torch.enable_grad():
+                Xr = Xi.detach().requires_grad_(True)
+                pr = pos.requires_grad_(need_pos)
+                Xa = dr.antialias(Xr, rast, pr, st.tri, topology_hash=st.topo)
+                grads = torch.autograd.grad(Xa, [Xr, pr] if need_pos else [Xr], Gaa)
+            dX[k0:k1] = grads[0].reshape(ng, -1, 4)
+            if need_pos:
+                dpos += grads[1].reshape(ng, nb, -1, 4).sum(0)
+            del rast, Gaa, Xa, grads, pos, Xi
+    if need_pos:
+        on = st.on_v[f0:f1]
+        gx = torch.where(on, dpos[..., 0] / W * 2, 0.0)
+        gy = torch.where(on, dpos[..., 1] / H * 2, 0.0)
+        gS[f0:f1] += torch.stack([gx, gy], -1)
+    return dX
 
 
 def load_rasterizer(dump, model_id: str, device="cuda", assets_root: Path | None = None) -> Rasterizer:

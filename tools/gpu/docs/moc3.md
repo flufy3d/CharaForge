@@ -45,6 +45,8 @@ out.vertex_updated # [B, D] bool，同动态标志 csmVertexPositionsDidChange�
 - 给 A3 光栅化：`LayerInput.from_arrays(out.verts, out.opacity, out.multiply, out.screen, out.render_order, out.visible, to_screen, out.vertex_updated)`，口径一致。
 - 显存：前向不保存逐点中间量（warp / rotation 变换是自定义 autograd Function，反向时分块重算）。每个样本约 4MB（float32 前向）/ 7MB（前向 + 反向）。
   样本之间互相独立，批太大时可以分块前向 + 反向、累加梯度，结果完全相同。
+- 提速（A7）：warp / rotation 变换缺省走 Triton 融合核（`deform.USE_TRITON`，前向逐位相同）；`model.graphed(B, grad)` 或 `model.auto_graph = True`
+  用 CUDA graph 重放整个前向 + 反向（B=64 前向 + 反向约 50 ms）。见 [perf.md](perf.md)。下面第 4 节的速度表是改动前的数字。
 - 调试：`model.debug = {}` 之后前向会把每层变形器的世界状态（网格、仿射项、旋转参数、属性表）记进 `model.debug['levels']`。
 - 摘要：`tools/.venv/bin/python -I tools/gpu/l2d/moc3.py <moc3> -o out.json [--full]`；本模型的摘要在 `.data/gpu/moc3_summary.json`（`--full` 版含 keyform 明细）。
 

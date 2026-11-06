@@ -24,6 +24,18 @@ import math
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+
+# A7：求导时每个滤镜 / 输出 pass 用 torch.utils.checkpoint（只保存输入，反向时重算）。前向、梯度都不变，
+# 省掉滤镜的中间量（640×360 下 color + resample + blur 每帧约 45 MB）。缺省关闭，也可按调用传 checkpoint_filters。
+CHECKPOINT = False
+CHECKPOINT_FRAMES = 4  # 分帧检查点：反向重算时每次展开的帧数
+
+
+def _ck(on, fn, *args):
+    if on and torch.is_grad_enabled():
+        return checkpoint(fn, *args, use_reentrant=False)
+    return fn(*args)
 
 
 # ---------------------------------------------------------------------------
@@ -207,17 +219,19 @@ def color(img: torch.Tensor, brightness=0.0, contrast=1.0, saturation=1.0, multi
     return _q(out, quantize)
 
 
-def apply_filters(img: torch.Tensor, filters: list[dict], quantize=True) -> torch.Tensor:
+def apply_filters(img: torch.Tensor, filters: list[dict], quantize=True, checkpoint_filters: bool | None = None) -> torch.Tensor:
+    ck = CHECKPOINT if checkpoint_filters is None else checkpoint_filters
     for f in filters:
         t = f["type"]
         if t == "blur":
-            img = blur(img, f["sigma"], quantize)
+            img = _ck(ck, blur, img, f["sigma"], quantize)
         elif t == "motionBlur":
-            img = motion_blur(img, f["angle"], f["length"], quantize)
+            img = _ck(ck, motion_blur, img, f["angle"], f["length"], quantize)
         elif t == "resample":
-            img = resample(img, f["factor"], f.get("method", "bilinear"), quantize)
+            img = _ck(ck, resample, img, f["factor"], f.get("method", "bilinear"), quantize)
         elif t == "color":
-            img = color(img, f.get("brightness", 0), f.get("contrast", 1), f.get("saturation", 1), f.get("multiply", (1, 1, 1)), f.get("offset", (0, 0, 0)), quantize)
+            img = _ck(ck, color, img, f.get("brightness", 0), f.get("contrast", 1), f.get("saturation", 1), f.get("multiply", (1, 1, 1)),
+                      f.get("offset", (0, 0, 0)), quantize)
         else:
             raise ValueError(f"未知滤镜 {t}")
     return img
@@ -284,15 +298,38 @@ def parse_color(c) -> tuple[float, float, float, float]:
     raise ValueError(f"不支持的颜色：{c}")
 
 
-def composite(layers: list[tuple[torch.Tensor, dict]], H: int, W: int, background=None, quantize=True, B: int | None = None) -> torch.Tensor:
+def _per_frame(d) -> bool:
+    """draw 参数里是否有逐帧（多于一个元素）的张量。"""
+    if torch.is_tensor(d):
+        return d.numel() > 1
+    if isinstance(d, dict):
+        return any(_per_frame(v) for v in d.values())
+    if isinstance(d, (list, tuple)):
+        return any(_per_frame(v) for v in d)
+    return False
+
+
+def _layer_pass(comp, buf, draw, quantize):
+    src = apply_filters(_q(buf, quantize), draw.get("filters", []), quantize, False)
+    return output_layer(comp, src, draw, quantize)
+
+
+def composite(layers: list[tuple[torch.Tensor, dict]], H: int, W: int, background=None, quantize=True, B: int | None = None,
+              checkpoint_filters: bool | None = None) -> torch.Tensor:
     """layers：[(图层缓冲 [B,H,W,4], draw 参数)]，按从下到上的顺序；draw 含 filters / clip / opacity / blendMode。
-    返回合成缓冲 [B,H,W,4]。"""
+    返回合成缓冲 [B,H,W,4]。checkpoint_filters：见模块变量 CHECKPOINT（None = 用它）。"""
+    ck = CHECKPOINT if checkpoint_filters is None else checkpoint_filters
     if B is None:
         B = layers[0][0].shape[0] if layers else 1
     ref = layers[0][0] if layers else torch.zeros(1)
     bg = torch.tensor(parse_color(background), device=ref.device, dtype=torch.float32)
     comp = _q(bg.reshape(1, 1, 1, 4).expand(B, H, W, 4).clone(), quantize)
     for buf, draw in layers:
-        src = apply_filters(_q(buf, quantize), draw.get("filters", []), quantize)
-        comp = output_layer(comp, src, draw, quantize)
+        if ck and torch.is_grad_enabled() and B > CHECKPOINT_FRAMES and not _per_frame(draw):
+            # 分帧检查点：反向重算时一次只展开 CHECKPOINT_FRAMES 帧的滤镜中间量（各帧互不相关）。
+            # 有逐帧参数时不分：blur 半径、motionBlur 采样数取整批的最大值，分开算会改变结果
+            comp = torch.cat([_ck(True, _layer_pass, comp[i:i + CHECKPOINT_FRAMES], buf[i:i + CHECKPOINT_FRAMES], draw, quantize)
+                              for i in range(0, B, CHECKPOINT_FRAMES)], 0)
+        else:
+            comp = _ck(ck, _layer_pass, comp, buf, draw, quantize)
     return comp

@@ -77,6 +77,8 @@
 
 ## 接手须知
 
+- GPU 前向（变形 / 光栅化 / 合成）的提速和用法（Triton 融合核、CUDA graph、快速光栅化路径）见 `tools/gpu/docs/perf.md`。
+
 - 长任务一律用 `systemd-run --user ... -p MemoryMax=11G` 启动。机器只有 14GB；`/tmp` 是内存盘，当前被 `/tmp/opencode` 占用约 3.6GB。
 - 拟合产物在 `.data/fit/`。批量驱动是 `tools/fit/scripts/batch.sh`，支持断点续跑。
 - 质检报告：`tools/qa/report.py`；闪烁检测：`tools/fit/scripts/flicker.py`。
