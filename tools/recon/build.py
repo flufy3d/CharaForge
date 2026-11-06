@@ -21,7 +21,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
-from common import ANNOT, DATA, H, SHOTS_JSON, THUMBS, VIDEO_URI, W, load_json  # noqa: E402
+from common import (ANNOT, DATA, H, SHOTS_JSON, THUMBS, VIDEO_URI, W, anchor_head_eyes, head_from_eyes,  # noqa: E402
+                    head_from_mid, load_json)
 from sheet import grid, save  # noqa: E402
 
 TRACK_CACHE = DATA / "track_cache.json"
@@ -184,6 +185,35 @@ def refine_sample(t: dict, pair_search: bool = True) -> dict:
                 t["eyes"] = new
                 t["_eyesRefined"] = True
     return t
+def unify_heads(track):
+    """输出前统一 head 框（2026-11-06 用户决定）：全片同一个几何比例，由眼睛锚点推出（common.head_from_eyes）。
+    规则（按顺序）：
+      1. bbox 为 null（不可见）→ head 保持 null；
+      2. 有 eyes 的采样 → head = head_from_eyes(eyes)，倾角取两眼连线（rotation 只用来判断是否倒转 >90°）；
+      3. 没有 eyes、但 head 是锚点阶段按旧比例由“画面外/被挡住的眼睛估计”推出的（VH3 / BODY3 及其插值，宽高比 2.78:3）
+         → 反推 (两眼中点, 眼距) 后按统一比例重算，倾角取 0（这些估计本来就没有倾角）；
+      4. 没有 eyes、head 原样等于相邻有 eyes 采样的旧 head（转场延续实例 diff-vs-ref / hold 沿用上一帧）→ 沿用该采样的新 head；
+      5. 其余（背影、翻牌压扁、全屏扭曲等只有人工 head 框的采样）→ 保留人工框。"""
+    old = [list(t["head"]) if t.get("head") else None for t in track]
+    for t in track:
+        if t.get("bbox", 0) is None or not t.get("head") and not t.get("eyes"):
+            continue
+        if t.get("eyes"):
+            t["head"] = head_from_eyes(t["eyes"], t.get("rotation"))
+        elif t.get("head"):
+            me = anchor_head_eyes(t["head"])
+            if me:
+                t["head"] = head_from_mid(me[0], me[1])
+    for k, t in enumerate(track):
+        if t.get("eyes") or not old[k] or t.get("bbox", 0) is None or anchor_head_eyes(old[k]):
+            continue
+        for j in (k - 1, k + 1, k - 2, k + 2):
+            if 0 <= j < len(track) and track[j].get("eyes") and old[j] and \
+                    max(abs(a - b) for a, b in zip(old[j], old[k])) < 0.5:
+                t["head"] = list(track[j]["head"])
+                break
+
+
 INST_KEYS = ("id", "continues", "role", "z", "variant", "switchEvents", "motionHints", "clip", "flipX", "colorGrade",
              "notes")
 
@@ -381,6 +411,7 @@ def build(no_track=False, only=None, thumbs=True):
                     t.pop("eyes", None)
                 if t.get("eyes") and t["eyes"][0][0] > t["eyes"][1][0]:
                     t["eyes"] = [t["eyes"][1], t["eyes"][0]]
+            unify_heads(track)
             o["track"] = [{k: (r1(v) if k in ("bbox", "head", "eyes", "rotation", "opacity", "blurSigma") else (round(v, 2) if k == "confidence" else v)) for k, v in s.items()} for s in track]
             out["instances"].append(o)
         out["exclusions"] = sh["exclusions"]

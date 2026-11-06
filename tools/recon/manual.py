@@ -19,7 +19,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from common import ANNOT  # noqa: E402
+from common import ANCHOR_HEAD_EYE_Y, ANCHOR_HEAD_KH, ANCHOR_HEAD_KW, ANNOT  # noqa: E402
 
 SCALE = 0.75
 ORIG = [(0, 0), (964, 0), (0, 544), (964, 544)]
@@ -161,6 +161,13 @@ def BORDER(s, e):
     top = [(f, [0, 0, 1280, max(1, _CURTAIN[f][0])]) for f in fs]   # 没有窗帘的帧给 1px（schema 要求宽高为正）
     bot = [(f, [0, min(719, _CURTAIN[f][1]), 1280, max(1, 720 - _CURTAIN[f][1])]) for f in fs]
     return [EX("frame", s, e, top), EX("frame", s, e, bot)]
+
+
+def _curtain_band(s, e):
+    """[s, e) 内每 2 帧（含末帧 e-1）的窗帘内边缘 (帧, 上沿 y, 下沿 y)，来自 curtain.json；没有窗帘的一侧记 0 / 720。"""
+    BORDER(s, s + 1)   # 载入 _CURTAIN
+    fs = list(range(s, e, 2)) + ([e - 1] if (e - 1 - s) % 2 else [])
+    return [(f, _CURTAIN[f][0], _CURTAIN[f][1]) for f in fs]
 
 
 def FX(kind, s, e, note=""):
@@ -1255,8 +1262,10 @@ CLIPS = {
                       (600, [0, 80, 420, 310], 6)],
     ("s06", "pipR"): [(519, [940, 380, 220, 160], 4), (521, [940, 350, 250, 210], 4), (525, [870, 320, 410, 300], 6),
                       (540, [810, 270, 470, 350], 6), (600, [820, 290, 460, 310], 6), (651, [830, 280, 450, 330], 6)],
+    # B3（2026-11-06 用户决定，做法同 s25）：1041~1046 窗口展开期间按窗口裁切（窗口外是上一镜头）；
+    # 1047 起不再按窗口裁切（1047~1075 裙摆伸出窗框上沿，原视频里是露出来的），只按窗帘边框裁切（curtain.json 逐 2 帧）
     ("s13", "main"): [(1041, [430, 416, 390, 220], 20), (1043, [280, 250, 680, 410], 25), (1045, [190, 140, 860, 520], 25),
-                      (1047, [130, 66, 980, 594], 25), (1050, [120, 61, 1033, 574], 25)],
+                      (1046, [160, 103, 920, 557], 25)] + [(f, [0, t, 1280, b - t], 0) for f, t, b in _curtain_band(1047, 1157)],
     # B4：2446 起角色并不被圆角窗口裁切（2447 衣领、2457 耳朵/发箍、2482 左下发梢都伸出窗框），只被上下“窗帘”边框遮住；
     #     2442~2445 窗口展开期间仍按窗口裁切（窗口外是上一镜头），2446 起改为窗帘边框裁切（S25_BAND）
     ("s25", "main"): [(2442, [140, 0, 980, 300], 30), (2443, [140, 0, 980, 300], 30), (2444, [140, 0, 980, 450], 30),
@@ -1387,9 +1396,11 @@ import math as _m
 
 
 def _head_from(mid, d):
-    """与拟合器约定一致的 head 框：两眼在框高 55%、水平 32%/68% 处（tools/fit plans.ts 用 head 估眼睛时的反算）。"""
-    w, h = 2.78 * d, 3.0 * d
-    return [round(mid[0] - 0.5 * w, 1), round(mid[1] - 0.55 * h, 1), round(w, 1), round(h, 1)]
+    """锚点阶段的 head 框（只作跟踪区域/细化检查的初值）：两眼在框高 55%、水平 32%/68% 处。
+    shots.json 输出的 head 由 build.py unify_heads 按 common.HEAD_* 统一比例重算（这里的框会被反推回 (mid, d)），
+    所以不要改这个比例（改了会让全部跟踪缓存失效，且 build 的反推依赖它）。"""
+    w, h = ANCHOR_HEAD_KW * d, ANCHOR_HEAD_KH * d
+    return [round(mid[0] - 0.5 * w, 1), round(mid[1] - ANCHOR_HEAD_EYE_Y * h, 1), round(w, 1), round(h, 1)]
 
 
 def VE3(frame, eyes, conf, state="open", **kw):
