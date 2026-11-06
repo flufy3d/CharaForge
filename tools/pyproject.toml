@@ -13,3 +13,18 @@ dependencies = [
 
 [tool.uv]
 package = false
+no-build-isolation-package = ["nvdiffrast"]
+
+# 路线 A（可微分 GPU 前向模型）：uv sync --project tools --group gpu
+# 需要 CUDA 13.0 工具链（CUDA_HOME=/usr/local/cuda-13.0）；nvdiffrast 安装时编译，依赖已装好的 torch。
+[dependency-groups]
+gpu = ["torch==2.14.1", "nvdiffrast", "ninja>=1.11", "setuptools>=70", "wheel"]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast", tag = "v0.4.0" }

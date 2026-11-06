@@ -8,7 +8,7 @@
  *   --frames <spec>   帧列表：'0-60'（含两端）、'0,10,20'、'100'；可混用 '0-10,50'。缺省全片
  *   --out <dir>       输出目录，文件名 frame_000000.png
  *   --scale <s>       输出缩放（缺省 1）
- *   --msaa <n>        覆盖 MSAA 采样数（缺省 4）
+ *   --msaa <n>        覆盖 MSAA 采样数（缺省 4；WSL d3d12 缺省 0，见 harness-node.ts）
  * 帧按升序渲染（顺序播放路径）；输出 PNG 只取决于像素（见 png.ts），两次运行逐位一致。
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';

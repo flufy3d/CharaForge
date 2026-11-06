@@ -198,7 +198,12 @@ test('Worker 路径与同步路径逐位相同（顺序 + seek + 覆盖）', asy
   }
 });
 
-test('composition.antialias：false 时不做 MSAA，等价于 MSAA=0 的渲染', async () => {
+test('composition.antialias：false 时不做 MSAA，等价于 MSAA=0 的渲染', async (t) => {
+  if (h.info.msaa === 0) {
+    // harness 本身已是 MSAA=0（如 WSL d3d12 缺省），antialias=false 与开 MSAA 的渲染必然相同，「应不同」无从验证
+    t.skip('harness msaa=0：无法对比开 MSAA 的渲染（WSL d3d12 后端缺省关闭 MSAA，见 harness-node.ts）');
+    return;
+  }
   const noAA = structuredClone(richScene) as typeof richScene & { composition: Record<string, unknown> };
   noAA.composition.antialias = false;
   await h.page.evaluate((s) => window.__charaforge.loadScene(s), noAA);

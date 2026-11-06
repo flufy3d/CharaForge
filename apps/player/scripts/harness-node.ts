@@ -11,6 +11,14 @@
  *   - CHARAFORGE_GPU=egl：--use-angle=gl-egl + __EGL_VENDOR_LIBRARY_FILENAMES 指向 NVIDIA 的 glvnd 描述文件
  *     （否则 EGL 默认选 Mesa / Intel 核显）。此后端需配合 CHARAFORGE_MSAA=0 才能逐位确定。
  *   - --ignore-gpu-blocklist
+ *   - WSL2（RTX 5080 Laptop / Windows 驱动 615.71 / Mesa d3d12，2026-11 实测，记录见 docs/runtime-eval.md）：
+ *     WSL 里没有 NVIDIA 的 Vulkan / EGL ICD，GPU 只能经 Mesa 的 d3d12 Gallium 驱动（/usr/lib/wsl/lib/libd3d12.so）走 D3D12。
+ *     缺省 vulkan 和 --use-angle=gl 都落到 llvmpipe / SwiftShader；gl-egl + GALLIUM_DRIVER=d3d12
+ *     + MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA 得到 "ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce RTX 5080 Laptop GPU),
+ *     OpenGL ES 3.1)"（不设 adapter 名会选中 Intel 核显）。此后端 MSAA=4 时确定性测试 10/13 失败（不确定），
+ *     MSAA=0 时只剩第 8 项（它要求开着 MSAA 才成立，msaa=0 时跳过）。
+ *     所以检测到 WSL（有 libd3d12.so 且没有 NVIDIA Vulkan ICD）时，未显式设置的项缺省为
+ *     CHARAFORGE_GPU=egl、GALLIUM_DRIVER=d3d12、MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA、MSAA 0；显式设置的环境变量优先。
  * 启动后检查 WebGL renderer 字符串，不含 CHARAFORGE_EXPECT_GPU（缺省 "NVIDIA"）就报错退出，防止悄悄落到 SwiftShader。
  */
 import { existsSync } from 'node:fs';
@@ -26,9 +34,24 @@ export const REPO = resolve(PLAYER_DIR, '..', '..');
 
 const NVIDIA_EGL = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json';
 const NVIDIA_ICD = '/usr/share/vulkan/icd.d/nvidia_icd.json';
+const WSL_D3D12 = '/usr/lib/wsl/lib/libd3d12.so';
+
+/** WSL2 且只能经 Mesa d3d12 用 GPU（没有 NVIDIA 的 Vulkan ICD）。原生 Linux 恒为 false。 */
+export const WSL_D3D12_ONLY =
+  existsSync(WSL_D3D12) && !existsSync(NVIDIA_ICD) && !existsSync('/etc/vulkan/icd.d/nvidia_icd.json');
+
+function gpuMode(): string {
+  return process.env.CHARAFORGE_GPU ?? (WSL_D3D12_ONLY ? 'egl' : 'vulkan');
+}
+
+/** harness 的 MSAA 缺省：CHARAFORGE_MSAA 优先；WSL d3d12 走 egl 时为 0；否则 undefined（用 harness.ts 的缺省 4）。 */
+export function defaultMsaa(): number | undefined {
+  if (process.env.CHARAFORGE_MSAA !== undefined) return Number(process.env.CHARAFORGE_MSAA);
+  return WSL_D3D12_ONLY && gpuMode() === 'egl' ? 0 : undefined;
+}
 
 export function gpuLaunchConfig(): { args: string[]; env: Record<string, string> } {
-  const mode = process.env.CHARAFORGE_GPU ?? 'vulkan';
+  const mode = gpuMode();
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== 'DISPLAY' && k !== 'WAYLAND_DISPLAY') env[k] = v;
   const args = ['--ignore-gpu-blocklist', '--enable-gpu-rasterization', '--disable-gpu-sandbox'];
@@ -38,6 +61,10 @@ export function gpuLaunchConfig(): { args: string[]; env: Record<string, string>
   } else if (mode === 'egl') {
     args.push('--use-angle=gl-egl');
     if (existsSync(NVIDIA_EGL)) env.__EGL_VENDOR_LIBRARY_FILENAMES = NVIDIA_EGL;
+    if (WSL_D3D12_ONLY) {
+      env.GALLIUM_DRIVER ??= 'd3d12';
+      env.MESA_D3D12_DEFAULT_ADAPTER_NAME ??= 'NVIDIA';
+    }
   } else if (mode !== 'default') {
     throw new Error(`未知 CHARAFORGE_GPU=${mode}（egl | vulkan | default）`);
   }
@@ -81,7 +108,7 @@ export async function openHarness(opts: { msaa?: number; workers?: number; expec
     if ((m.type() === 'error' || m.type() === 'warning') && !m.text().includes('GPU stall due to ReadPixels')) process.stderr.write(`[page ${m.type()}] ${m.text()}\n`);
   });
   page.on('pageerror', (e) => process.stderr.write(`[page error] ${e.message}\n`));
-  const msaa = opts.msaa ?? (process.env.CHARAFORGE_MSAA !== undefined ? Number(process.env.CHARAFORGE_MSAA) : undefined);
+  const msaa = opts.msaa ?? defaultMsaa();
   const qs = new URLSearchParams();
   if (msaa !== undefined) qs.set('msaa', String(msaa));
   if (opts.workers) qs.set('workers', String(opts.workers));

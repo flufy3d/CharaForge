@@ -98,6 +98,13 @@ apps/player/
   + `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json`（否则 EGL 选 Mesa/Intel 核显）
   → `ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 2060/PCIe/SSE2, OpenGL ES 3.2)`
 - 不加参数时是 SwiftShader（且在本机同样因 X 问题挂起）。
+- **WSL2 机器**（RTX 5080 Laptop，Windows 驱动 615.71，Ubuntu on WSL2，2026-11 实测）：WSL 里没有 NVIDIA 的 Vulkan / EGL ICD，
+  GPU 只能经 Mesa 的 d3d12 Gallium 驱动（`/usr/lib/wsl/lib/libd3d12.so`）走 Windows D3D12。缺省 vulkan 与 `--use-angle=gl`
+  都落到 llvmpipe / SwiftShader；`--use-angle=gl-egl` + `GALLIUM_DRIVER=d3d12` + `MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`
+  → `ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce RTX 5080 Laptop GPU), OpenGL ES 3.1)`（不设 adapter 名会选中 Intel 核显）。
+  `harness-node.ts` 检测到 WSL（有 `libd3d12.so` 且没有 NVIDIA Vulkan ICD）时，未显式设置的项自动缺省为
+  `CHARAFORGE_GPU=egl`、`GALLIUM_DRIVER=d3d12`、`MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`、**MSAA 0**（`pnpm render`、测试、
+  拟合器的 `Pool` 都用这个缺省）；显式设置的环境变量 / `--msaa` 优先。原生 Linux 行为不变。
 - `harness-node.ts` 启动后检查 renderer 字符串，不含 `NVIDIA`（`CHARAFORGE_EXPECT_GPU` 可改）就报错，不会悄悄落到软件渲染。
 
 ### 确定性发现
@@ -105,6 +112,9 @@ apps/player/
 - **ANGLE/GL-EGL 后端的 MSAA 不确定**：同一输入连续两次绘制到 4×MSAA 缓冲再 resolve，约 50 个边缘像素有 ±1 差异。
   关掉 MSAA 后完全确定；**ANGLE/Vulkan 后端开 MSAA 也逐位确定**。因此缺省用 Vulkan + MSAA 4；
   用 EGL 时请设 `CHARAFORGE_MSAA=0`（harness URL 参数 `?msaa=0`）。
+- WSL 的 ANGLE/GL-EGL + Mesa d3d12 同样：MSAA 4 时确定性测试 10/13 失败，MSAA 0 时 12 通过、第 8 项跳过
+  （它验证「antialias=false 与开 MSAA 不同」，harness 本身 msaa=0 时无从验证）。所以 WSL 缺省 MSAA 0。
+  s24 实测 MSAA 0 对指标无影响：普通帧 50 帧 SSIM@360 均值 0.7650、最低 0.7108、50/50 ≥ 0.6，与原机器（Vulkan、MSAA 4，均值约 0.765、50/50）一致。
 - 其余部分（物理、motion、合成 pass、读回）在两个后端上都逐位确定。
 - 跨机器 / 跨驱动不保证逐位一致（GPU 光栅化与驱动有关）；确定性承诺是「同一机器、同一后端」。
 
@@ -131,6 +141,8 @@ ok 13 - resample 滤镜：bilinear / bicubic、factor ≥ 1 不处理、动画�
 ```
 
 （`CHARAFORGE_GPU=egl CHARAFORGE_MSAA=0` 下前 6 项同样通过。）
+WSL 机器不设任何环境变量：`# [gpu] ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce RTX 5080 Laptop GPU), OpenGL ES 3.1)  (msaa 0)`，
+12 通过、第 8 项 `# SKIP`，连跑两遍结果相同（约 34 s/遍）。
 所有性能优化完成后，`pnpm render` 的输出与优化前的输出 `diff -r` 无差异。
 `pnpm render --scene packages/scene/examples/minimal.scene.json --frames 0-60 --out .data/render/a` 与 `.../b` 两次输出 `diff -r` 无差异
 （PNG 由 `png.ts` 用固定参数编码，文件字节只取决于像素）。

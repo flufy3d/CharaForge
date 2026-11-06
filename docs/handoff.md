@@ -39,7 +39,7 @@
 | `tools/qa` | `metric.py`（指标，唯一实现）和 `report.py`（全片报告、HTML、差异视频） | 能用；有未完成的改动，见第 4 节 |
 | `scenes/deepseek-chan/scene.json` | 全片复刻场景：47 个图层，22 个拟合单元 | 全片可以播放 |
 
-**常用命令**：`pnpm install && pnpm setup`，然后 `pnpm dev`（播放器）、`pnpm test:runtime`、`pnpm render --scene ... --frames a-b --out dir`。
+**常用命令**：`pnpm install && pnpm run setup`，然后 `pnpm dev`（播放器）、`pnpm test:runtime`、`pnpm render --scene ... --frames a-b --out dir`。
 
 ## 3. 当前质量与已知问题
 
@@ -123,8 +123,17 @@
 ## 6. 环境与操作注意
 
 - **新机器**：
-  1. 运行 `pnpm install && pnpm setup`，会下载 SDK、模型和视频，校验 sha256，并建立 Python 3.12 的 venv（`uv sync --project tools`）。
+  1. 运行 `pnpm install && pnpm run setup`，会下载 SDK、模型和视频，校验 sha256，并建立 Python 3.12 的 venv（`uv sync --project tools`）。
   2. 运行 `pnpm test:runtime` 确认 GPU 可用。启动器会检查 WebGL renderer，必须是 NVIDIA；原机器需要去掉 `DISPLAY` 才不会卡住，说明见 `docs/runtime-eval.md`。
+- **WSL2 机器**（RTX 5080 Laptop，2026-11）：
+  - GPU 走 Mesa d3d12（WSL 里没有 NVIDIA 的 Vulkan / EGL ICD）。`harness-node.ts` 自动检测并缺省为 egl + `GALLIUM_DRIVER=d3d12`
+    + `MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA` + **MSAA 0**（MSAA 4 在此后端不确定），不用设环境变量；显式设置的优先。
+    renderer 应为 `ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce RTX 5080 Laptop GPU), OpenGL ES 3.1)`；
+    `pnpm test:runtime` 应为 12 通过、1 跳过（第 8 项需要开 MSAA）。s24 普通帧指标与原机器一致（均值 0.765，50/50）。详见 `docs/runtime-eval.md` 第 4 节。
+  - 没有免密 sudo，装不了系统包。ffmpeg 是 `~/.local/bin` 下的静态版 8.1，命令前要 `export PATH=~/.local/bin:$PATH`
+    （`systemd-run` 要带 `"--setenv=PATH=$PATH"`，并加引号，因为 PATH 里有含空格的 Windows 路径）。
+  - Playwright 浏览器用 `pnpm exec playwright install chromium-headless-shell` 安装（不带 `--with-deps`，它要 sudo）。
+  - `pnpm setup` 会被 pnpm 自带的 `setup` 命令抢走，必须用 `pnpm run setup`。
 - **中间产物不在 git 里**：`.data/` 下的拟合结果、断点、质检报告、对照视频都没有进 git。全片拟合结果已经包含在 `scenes/deepseek-chan/scene.json` 里，换机器后不需要那些中间产物。确实需要的话，从原机器 rsync `.data/fit/*/result.json`。
 - **长任务**：用 `systemd-run --user --unit=<名字> -p MemoryMax=<上限> ...` 启动，用 `systemctl --user is-active` 查状态。不要用 `pgrep -f` 判断，它会匹配到检查命令自身。原机器只有 14GB 内存，出过多次 OOM；新机器的内存够大的话，可以提高并行度。
 - **安全**：下载的视频和模型都是不可信数据。Python 一律用 `tools/.venv/bin/python -I` 运行，不要在 `assets/` 里执行任何东西。

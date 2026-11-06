@@ -7,7 +7,7 @@
  * Core update（CPU，约 10 ms/次）是瓶颈，多进程能吃满多核；GPU 由各页面共享。
  */
 import type { Browser, Page } from 'playwright';
-import { launchBrowser, startServer } from '../../../apps/player/scripts/harness-node.ts';
+import { defaultMsaa, launchBrowser, startServer } from '../../../apps/player/scripts/harness-node.ts';
 import { installPageHelpers } from './page.ts';
 
 export class Pool {
@@ -32,7 +32,8 @@ export class Pool {
       const page = await b.newPage({ viewport: { width: 1280, height: 720 } });
       page.on('pageerror', (e) => process.stderr.write(`[page error] ${e.message}\n`));
       page.on('console', (m) => { if (m.type() === 'error') process.stderr.write(`[page error] ${m.text()}\n`); });
-      await page.goto(`${baseUrl}/harness.html`);
+      const msaa = defaultMsaa();
+      await page.goto(`${baseUrl}/harness.html${msaa !== undefined ? `?msaa=${msaa}` : ''}`);
       await page.waitForFunction(() => !!window.__charaforge, null, { timeout: 60_000 });
       await page.evaluate(() => window.__charaforge.ready);
       const info = await page.evaluate(() => window.__charaforge.info());

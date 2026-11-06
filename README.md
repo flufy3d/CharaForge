@@ -24,7 +24,7 @@
 
 ```bash
 pnpm install
-pnpm setup          # 下载 Cubism SDK、模型与参考视频（校验 sha256），建立 Python 环境
+pnpm run setup      # 下载 Cubism SDK、模型与参考视频（校验 sha256），建立 Python 环境
 ```
 
 管线约定见 [docs/pipeline.md](docs/pipeline.md)。
