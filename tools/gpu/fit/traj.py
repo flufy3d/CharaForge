@@ -1,10 +1,11 @@
-"""整段轨迹的参数化与可微分前向（一个模型图层）。
+"""整段轨迹的参数化与可微分前向（一个模型图层；多图层由 optimize.Fitter 按 z 序合成）。
 
 未知量（全部是叶张量，按组给 Adam 学习率）：
   inputs [Nn, Din]   面捕输入，每个新画面帧（节点）一个值，节点之间线性插值（区间外保持端点）——同 traj2.inputSeries；
   tf     [Nk, 4]     图层变换关键帧 (x, y, ln scale, rotation°)，关键帧之间线性插值；anchor 固定为参考姿态两眼虹膜中点；
-  post   [Nn, Q]     postPhysics add 偏移（姿态输出 6 个 + 次级物理按发束分组 18 组，每组一个自由度），节点间线性插值；
-  consts             LeanInput、呼吸周期/相位、blur σ、颜色滤镜（brightness / contrast / saturation / multiply）；resample 因子离散搜索。
+  post   [Nn, Q]     postPhysics add 偏移（姿态输出 6 个 + 物理写入的全部参数，各一个自由度），节点间线性插值；
+  consts             LeanInput（规划没固定时）、呼吸周期/相位、blur σ、景深倍率 dofK、颜色滤镜（规划要求时）；resample 因子离散搜索。
+规划给定、不拟合的逐帧量：开关斜坡（切换帧另做离散估计）、翻牌 scaleX、clip、不透明度、景深强度曲线。
 前向（规范 a～g，与导出的图层逐项同语义）：
   inputs →（插值）逐帧输入 → VTS 映射 + 平滑（vts.py）→ 逐帧 prePhysics set（夹到范围、float32）
   → 预热 warmup 帧（输入取帧 in）→ A2 物理（dt = 1/60，整段 BPTT）→ postPhysics add（夹取）
@@ -17,7 +18,9 @@ import math
 import numpy as np
 import torch
 
-from .plan import Plan, switch_value
+from l2d import composite as C
+
+from .plan import LayerPlan, switch_value
 from .render import raster_layer, compose_one
 from .vts import INPUT_DIMS, Vts
 
@@ -73,7 +76,7 @@ def second_diff(x: torch.Tensor, t: list[int]) -> torch.Tensor:
 
 
 class Traj:
-    def __init__(self, rig, plan: Plan, vts: Vts, smooth_c: float = 0.15, fit_inputs: list[str] | None = None, device="cuda"):
+    def __init__(self, rig, plan: LayerPlan, vts: Vts, smooth_c: float = 0.15, fit_inputs: list[str] | None = None, device="cuda"):
         self.rig, self.plan, self.vts, self.c = rig, plan, vts, smooth_c
         self.dev = torch.device(device)
         self.frames = plan.frames
@@ -109,8 +112,11 @@ class Traj:
                 gid.append(j)
         self.post_pid = torch.tensor(pid, device=self.dev)
         self.post_gid = torch.tensor(gid, device=self.dev)
+        # 前倾：规划固定（小实例为 0）时不拟合
+        self.lean_free = "lean" not in plan.fixed
         self.consts = {
-            "lean": torch.tensor(0.0, **dd).requires_grad_(True),
+            "lean": torch.tensor(float(plan.fixed.get("lean", 0.0)), **dd).requires_grad_(True),
+            "dofK": torch.tensor(1.0, **dd).requires_grad_(True),
             "breathPeriod": torch.tensor(3.5, **dd).requires_grad_(True),
             "breathPhase": torch.tensor(0.0, **dd).requires_grad_(True),
             "blur": torch.tensor(1.0, **dd).requires_grad_(True),
@@ -120,7 +126,8 @@ class Traj:
             "multiply": torch.ones(3, **dd).requires_grad_(True),
         }
         self.resample = 1.0
-        self.clothes2 = float(plan.constants.get("Clothes2", 0.0))
+        self.clothes2 = float(plan.fixed.get("clothes2", plan.constants.get("Clothes2", 0.0)))
+        self.has_dof = any(v is not None for v in plan.dof)
         # 锚点：显示帧 f 的画面 = 帧 g 的求值
         self.anchor_frames = [plan.hold(f) for f, _, _ in plan.anchors]
         self.anchor_xy = torch.tensor(np.stack([e for _, e, _ in plan.anchors]), **dd) if plan.anchors else None
@@ -155,10 +162,12 @@ class Traj:
         add([self.z_tf], "tf")
         add([self.z_in], "inputs")
         add([self.z_post], "post")
-        add([self.consts["lean"]], "lean")
+        if self.lean_free:
+            add([self.consts["lean"]], "lean")
         add([self.consts["breathPeriod"], self.consts["breathPhase"]], "breath")
-        add([self.consts["blur"]], "blur")
-        add([self.consts[k] for k in ("brightness", "contrast", "saturation", "multiply")], "color")
+        add([self.consts["blur"]] + ([self.consts["dofK"]] if self.has_dof else []), "blur")
+        if self.plan.color_filter:
+            add([self.consts[k] for k in ("brightness", "contrast", "saturation", "multiply")], "color")
         return g
 
     # ------------------------------------------------------------------ 前向
@@ -230,32 +239,55 @@ class Traj:
         M = interp_matrix(self.keys, gs).to(self.dev, torch.float64)
         return M @ self.tf
 
-    def to_screen(self, tf: torch.Tensor, s: float = 1.0) -> torch.Tensor:
-        """[N, 4] → [N, 2, 3] 画布像素 → 合成像素（规范第 2 条；× 分辨率比例 s）。"""
+    def to_screen(self, tf: torch.Tensor, s: float = 1.0, gs: list[int] | None = None) -> torch.Tensor:
+        """[N, 4] → [N, 2, 3] 画布像素 → 合成像素（规范第 2 条：R·diag(scale·scaleX, scale)；× 分辨率比例 s）。
+        gs 给出时按规划的翻牌曲线取 scaleX。"""
         x, y, ls, rot = tf.unbind(1)
         sc = torch.exp(ls)
         r = rot * (math.pi / 180.0)
         c, sn = torch.cos(r) * sc, torch.sin(r) * sc
-        a, b, cc, d = c, sn, -sn, c
+        sx = torch.ones_like(sc)
+        if gs is not None and self.plan.scale_x is not None:
+            sx = torch.tensor([self.plan.at("scale_x", g) for g in gs], device=sc.device, dtype=sc.dtype)
+        a, b, cc, d = c * sx, sn * sx, -sn, c
         e = x - (a * self.anchorX + cc * self.anchorY)
         f = y - (b * self.anchorX + d * self.anchorY)
         m = torch.stack([torch.stack([a, cc, e], -1), torch.stack([b, d, f], -1)], -2)
         return m * s
 
-    def draw(self, s: float, resample: float | None = None) -> dict:
-        """draw 参数（滤镜顺序同导出：color → resample → blur），屏幕像素量按 s 缩放。"""
+    def sigma_at(self, g: int) -> torch.Tensor:
+        """帧 g 的 blur σ（720p 像素）：景深 / 模糊段内 dofK × 强度，段外常量 blur（同 traj2 dofAt）。"""
         k = self.consts
-        fl = [{"type": "color", "brightness": k["brightness"], "contrast": k["contrast"], "saturation": k["saturation"],
-               "multiply": k["multiply"], "offset": (0.0, 0.0, 0.0)},
-              # resample 因子是相对合成分辨率的：降分辨率渲染时等效因子 = f / s（≥ 1 即不处理）
-              {"type": "resample", "factor": min(1.0, (self.resample if resample is None else resample) / s), "method": "bilinear"},
-              {"type": "blur", "sigma": k["blur"].clamp_min(0.0) * s}]
-        return {"filters": fl, "clip": None, "opacity": 1.0, "blendMode": "normal"}
+        v = self.plan.at("dof", g)
+        return (k["dofK"] * v if v is not None else k["blur"]).clamp_min(0.0)
 
-    def render(self, params: torch.Tensor, ts: torch.Tensor, s: float, W: int, H: int, aa=True, resample=None, aa_layers=None):
-        buf, out = raster_layer(self.rig, params, ts.float(), W, H, aa=aa, quantize=False, aa_layers=aa_layers)
-        img = compose_one(buf, self.draw(s, resample), quantize=False)
-        return img, out
+    def filters_at(self, g: int, s: float, resample: float | None = None) -> list[dict]:
+        """滤镜（顺序同导出：color → resample → blur），屏幕像素量按 s 缩放。"""
+        k = self.consts
+        fl = []
+        if self.plan.color_filter:
+            fl.append({"type": "color", "brightness": k["brightness"], "contrast": k["contrast"], "saturation": k["saturation"],
+                       "multiply": k["multiply"], "offset": (0.0, 0.0, 0.0)})
+        # resample 因子是相对合成分辨率的：降分辨率渲染时等效因子 = f / s（≥ 1 即不处理）
+        fl.append({"type": "resample", "factor": min(1.0, (self.resample if resample is None else resample) / s), "method": "bilinear"})
+        fl.append({"type": "blur", "sigma": self.sigma_at(g) * s})
+        return fl
+
+    def out_at(self, g: int, s: float) -> dict:
+        """输出 pass 的参数：clip（屏幕像素 × s）、不透明度、混合方式。"""
+        c = self.plan.clip_at(g)
+        if c is not None:
+            c = {kk: (v * s if kk != "feather" else max(1.0, v) * s) for kk, v in c.items()}
+        op = self.plan.at("opacity", g)
+        return {"clip": c, "opacity": 1.0 if op is None else float(op), "blendMode": "normal"}
+
+    def layer_src(self, params: torch.Tensor, ts: torch.Tensor, gs: list[int], s: float, W: int, H: int, aa=False, resample=None, quantize=True):
+        """图层缓冲 → 逐帧滤镜（σ 可能逐帧不同）。返回 (滤镜之后的缓冲 [B, H, W, 4], A1 输出)。
+        quantize（缺省开，同 runtime 的 RGBA8）：A3 的光栅化在真实帧上不是逐位确定的（同一输入两次渲染约 1e-4 的差异、上千个像素），
+        取 8 位之后只剩个位数像素不同，光流目标与 SSIM 基本可复现。"""
+        buf, out = raster_layer(self.rig, params, ts.float(), W, H, aa=aa, quantize=quantize)
+        src = torch.cat([C.apply_filters(buf[i:i + 1], self.filters_at(g, s, resample), quantize=quantize) for i, g in enumerate(gs)])
+        return src, out
 
     # ------------------------------------------------------------------ 正则
     def reg_terms(self) -> dict[str, torch.Tensor]:
@@ -282,8 +314,9 @@ class Traj:
             self.z_post.copy_(torch.maximum(torch.minimum(self.post, self.post_scale), -self.post_scale) / self.post_unit)
             k = self.consts
             k["lean"].clamp_(-30, 0)
+            k["dofK"].clamp_(0.3, 2.5)
             k["breathPeriod"].clamp_(2, 6)
-            k["blur"].clamp_(0, 3)
+            k["blur"].clamp_(0, 2)  # 上限 2px@720：几何没对齐时 SSIM 偏爱模糊，再大会把表情抹掉（目测帧看不清）
             k["brightness"].clamp_(-0.3, 0.3)
             k["contrast"].clamp_(0.6, 1.4)
             k["saturation"].clamp_(0.5, 1.5)
@@ -294,5 +327,41 @@ class Traj:
         P = self.final_params(after, gs)
         out = self.rig.deform(P)
         c = self.rig.iris_centers(out.verts).double()  # 画布像素
-        M = self.to_screen(self.tf_at(gs))
+        M = self.to_screen(self.tf_at(gs), 1.0, gs)
         return torch.einsum("nij,nkj->nki", M[:, :, :2], c) + M[:, None, :, 2]
+
+    # ------------------------------------------------------------------ 快照（多假设）
+    def leaves(self) -> list[torch.Tensor]:
+        return [self.z_in, self.z_tf, self.z_post, *self.consts.values()]
+
+    def snapshot(self) -> dict:
+        return {"leaves": [x.detach().clone() for x in self.leaves()], "resample": self.resample,
+                "switches": [dict(sw) for sw in self.plan.switches]}
+
+    def restore(self, snap: dict) -> None:
+        with torch.no_grad():
+            for x, v in zip(self.leaves(), snap["leaves"]):
+                x.copy_(v)
+        self.resample = snap["resample"]
+        for sw, v in zip(self.plan.switches, snap["switches"]):
+            sw.update(v)
+
+
+def physics_batch(trajs: list["Traj"], bptt: int = 24) -> list[torch.Tensor]:
+    """多个图层的物理一起推进（批量 B = 图层数；A2 的 rollout 对 B 是批量的，耗时与单图层几乎相同）。
+    每个图层的序列从它自己的 in − warmup 开始（索引对齐到各自的起点），短的在末尾用最后一行补齐。
+    前向逐帧与 runtime 相同；梯度截断同 Traj.physics（预热 no_grad、正式段每 bptt 帧 detach）。返回各图层 [WARMUP + Tf, P]。"""
+    ph = trajs[0].rig.phys
+    pres = [t.pre_params().double() for t in trajs]
+    T = max(p.shape[0] for p in pres)
+    seq = torch.stack([torch.cat([p, p[-1:].expand(T - p.shape[0], -1)], 0) if p.shape[0] < T else p for p in pres], 1)  # [T, B, P]
+    with torch.no_grad():
+        st, warm = ph.rollout(seq[:1].expand(WARMUP, -1, -1).contiguous())
+    st = st.detach()
+    outs = [warm]
+    for a in range(0, T, bptt):
+        st, o = ph.rollout(seq[a:a + bptt], state=st)
+        outs.append(o)
+        st = st.detach()
+    out = torch.cat(outs, 0).float()
+    return [out[:WARMUP + p.shape[0], b] for b, p in enumerate(pres)]

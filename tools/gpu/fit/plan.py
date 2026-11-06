@@ -1,18 +1,22 @@
-"""镜头规划（只读 shots.json，冷启动）：图层区间、新画面节点（cadence）、变换关键帧、frameHold、锚点、排除区、帧类别、参考帧。
+"""拟合单元与图层规划（冷启动：只读 shots.json 与 tools/fit 的规划代码）。
 
-规则与 tools/fit/src/plans.ts（planAuto）、traj2.ts 一致的部分：
-  - in = 轨迹里第一个有 bbox 的采样，out = 最后一个 bbox 之后第一个 bbox = null 的采样（没有则镜头末）；
-  - 新画面：先做参考帧重复检测（shotsutil.ts detectNewFrames 的移植），再由 shots.json 的 cadence 段覆盖（段内只有对齐帧是新画面），
-    frameHold 由节点间隔生成（finalize_nodes；make_plan 里先给只看 cadence 的初版）；
-  - 变换关键帧：每 24 帧，zoom / pan / scale 镜头每 12 帧，最后一帧补一个；
-  - 锚点：eyes 且 confidence ≥ 0.4；
-  - 常量：variant 原样写成常量参数轨；switchEvents 写成斜坡（余弦淡入，同 traj2.buildLayer）。
-不支持（遇到时报错，见 fit.md「推广到全片」）：多实例、clip、景深 blur 段、cardFlip、opacity 轨。
+规划本身由 tools/gpu/scripts/a5_plan.ts 调用 tools/fit/src/plans.ts 的 fitUnits + planAuto 生成（同一份代码，语义与 fit4 完全一致）：
+  - 拟合单元：continues 连起来的镜头合成一个单元，同一条 continues 链 = 一个图层（物理不重置）；
+  - 图层区间、z、variant 常量、switchEvents 斜坡（from = 切换前累计值、fade、±8 帧窗口）、前倾 / 体型的固定值、颜色滤镜开关；
+  - 逐帧量按 traj2.ts buildLayer 的规则采样好：景深 / 模糊段的 σ（dofK × 强度）、翻牌 scaleX、clip（圆形开窗 / 画中画圆角矩形）、不透明度。
+这里补上：
+  - 新画面节点与 frameHold：参考帧重复检测（shotsutil.ts detectNewFrames 的移植）+ shots.json 的 cadence 覆盖（traj2 的优先级），
+    frameHold 段由节点间隔生成（shotsutil.ts holdSegments）；
+  - 变换关键帧：每 24 帧，单元里有 zoom / pan / scale 效果时每 12 帧，止于最后一个节点；
+  - 锚点：eyes 且 confidence ≥ 0.4；全部 eyes 采样（含 planAuto 由 head 框估的 confidence 0）用于变换初值；
+  - 帧类别（普通 / 目测 / 特效）与排除区按 metric.py（以帧所在的镜头为准）。
 """
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,21 +33,25 @@ ANCHOR_CONF = 0.4
 
 
 @dataclass
-class Plan:
-    shot: dict
-    inst: dict
+class LayerPlan:
     id: str
     fin: int
     fout: int
-    nodes: list[int]                 # 新画面帧（升序，含 fin）
-    keys: list[int]                  # 变换关键帧
-    holds: list[dict]                # frameHold 段 {start, end, every}
-    constants: dict[str, float]
+    z: float
+    constants: dict
     switches: list[dict]
-    anchors: list[tuple[int, np.ndarray, float]]  # (帧, [[x,y],[x,y]] 720p 像素, confidence)
-    eye_init: list[tuple[int, np.ndarray]]        # 全部 eyes 采样（初值用，含低置信度）
-    cls: dict[int, str] = field(default_factory=dict)   # 帧 → normal / visual / effect
-    color_filter: bool = True
+    fixed: dict
+    color_filter: bool
+    dof: list                       # 逐帧：景深 / 模糊段内的强度（σ = dofK × 它），段外 None
+    scale_x: list | None            # 逐帧翻牌 scaleX
+    clip: dict | None               # 逐帧 clip（x, y, width, height, radius 各一列；feather 常量）
+    opacity: list | None            # 逐帧不透明度
+    track: list
+    nodes: list[int] = field(default_factory=list)
+    keys: list[int] = field(default_factory=list)
+    holds: list[dict] = field(default_factory=list)
+    anchors: list = field(default_factory=list)    # (帧, [[x,y],[x,y]], confidence)
+    eye_init: list = field(default_factory=list)   # (帧, [[x,y],[x,y]], confidence)
 
     def hold(self, f: int) -> int:
         for h in self.holds:
@@ -51,127 +59,137 @@ class Plan:
                 return h["start"] + (f - h["start"]) // h["every"] * h["every"]
         return f
 
+    def active(self, f: int) -> bool:
+        return self.fin <= f < self.fout
+
     @property
     def frames(self) -> list[int]:
         return list(range(self.fin, self.fout))
 
+    def at(self, name: str, g: int):
+        """逐帧量在帧 g 的值（区间外取端点）。"""
+        a = getattr(self, name)
+        if a is None:
+            return None
+        i = min(max(g - self.fin, 0), self.fout - self.fin - 1)
+        return a[i]
 
-def load_shot(sid: str) -> tuple[dict, dict]:
-    s = json.loads(SHOTS.read_text(encoding="utf-8"))
-    shot = next(x for x in s["shots"] if x["id"] == sid)
-    return shot, s
-
-
-def make_plan(sid: str) -> Plan:
-    shot, allshots = load_shot(sid)
-    insts = [i for i in shot["instances"] if any(t.get("bbox") for t in i["track"])]
-    if len(insts) != 1:
-        raise NotImplementedError(f"{sid}: {len(insts)} 个可见实例（A5 打样只支持单实例）")
-    I = insts[0]
-    kinds = {e["kind"] for e in shot["effects"]}
-    for k in ("cardFlip", "depthOfField", "circleWindow"):
-        if k in kinds:
-            raise NotImplementedError(f"{sid}: 效果 {k} 未支持")
-    if I.get("clip"):
-        raise NotImplementedError(f"{sid}: clip 未支持")
-    if any(isinstance(t.get("opacity"), (int, float)) and t["opacity"] < 0.99 for t in I["track"]):
-        raise NotImplementedError(f"{sid}: opacity 轨未支持")
-    if any((t.get("blurSigma") or 0) >= 1.5 for t in I["track"]):
-        raise NotImplementedError(f"{sid}: 模糊段未支持")
-    seen = [t for t in I["track"] if t.get("bbox")]
-    last = seen[-1]["frame"]
-    after = next((t for t in I["track"] if t["frame"] > last and "bbox" in t and t["bbox"] is None), None)
-    fin = seen[0]["frame"]
-    fout = min(shot["end"], after["frame"] if after else shot["end"])
-    # 新画面节点：cadence 段内对齐的帧；段外每帧
-    is_new = {f: True for f in range(fin, fout)}
-    holds = []
-    for c in allshots.get("cadence") or []:
-        a, b, ev = max(c["start"], fin), min(c["end"], fout), c["every"]
-        if b <= a:
-            continue
-        first = a + (-(a - c["start"])) % ev  # 段内第一个对齐帧（之前的帧按新画面处理）
-        for f in range(first, b):
-            is_new[f] = (f - c["start"]) % ev == 0
-        if b - first >= 2:
-            holds.append({"start": first, "end": b, "every": ev})
-    is_new[fin] = True
-    nodes = sorted(f for f, v in is_new.items() if v)
-    zoom = bool(kinds & {"zoom", "pan", "scale"})
-    every = 12 if zoom else 24
-    keys = list(range(fin, fout - 1, every)) + [fout - 1]
-    anchors, eye_init = [], []
-    for t in I["track"]:
-        if t.get("eyes") and fin <= t["frame"] < fout:
-            e = np.asarray(t["eyes"], np.float64)
-            e = e[np.argsort(e[:, 0])]  # 画面左、右
-            eye_init.append((t["frame"], e))
-            if (t.get("confidence") or 0) >= ANCHOR_CONF:
-                anchors.append((t["frame"], e, float(t["confidence"])))
-    # 开关：variant 常量 + switchEvents 斜坡（from = 切换前累计值）
-    cur = dict(I.get("variant") or {})
-    switches = []
-    for e in sorted(I.get("switchEvents") or [], key=lambda e: e["frame"]):
-        switches.append({"param": e["param"], "from": cur.get(e["param"], 0), "to": e["value"], "est": e["frame"], "fade": e.get("fade", 0) or 0})
-        cur[e["param"]] = e["value"]
-    p = Plan(shot=shot, inst=I, id=I["id"], fin=fin, fout=fout, nodes=nodes, keys=keys, holds=holds,
-             constants=dict(I.get("variant") or {}), switches=switches, anchors=anchors, eye_init=eye_init)
-    p.cls = {f: metric.classify(shot, f)[0] for f in range(fin, fout)}
-    return p
+    def clip_at(self, g: int) -> dict | None:
+        if self.clip is None:
+            return None
+        i = min(max(g - self.fin, 0), self.fout - self.fin - 1)
+        return {k: (self.clip[k][i] if isinstance(self.clip[k], list) else self.clip[k]) for k in ("x", "y", "width", "height", "radius", "feather")}
 
 
-def detect_new_frames(plan: Plan, full: np.ndarray) -> dict[int, float]:
-    """参考帧重复检测（tools/fit/src/shotsutil.ts detectNewFrames 的移植，判据相同）：实例头部框（缺省 bbox）中间区域、
-    隔 2 像素采样的 RGB 平均绝对差 d(f)；d < 0.35 或 d < 0.6 × min(d(f−1), d(f+1)) 判为重复；孤立的单帧「新」（前后两帧都新、
-    隔一帧都不新）也判为重复。返回 d。结果写回 plan.nodes / plan.holds（见 finalize_nodes）。"""
-    a, b = plan.fin, plan.fout
-    d = {}
-    for f in range(a + 1, b):
-        cur, prev = full[f - a].astype(np.int32), full[f - a - 1].astype(np.int32)
-        box = metric._interp_skip_null(plan.inst["track"], f, "head") or metric._interp_skip_null(plan.inst["track"], f, "bbox")
-        x0, y0, x1, y1 = 0, 62, 1280, 652
-        if box:
-            x, y, w, h = box
-            x0, x1 = max(0, round(x + w * 0.2)), min(1280, round(x + w * 0.8))
-            y0, y1 = max(62, round(y + h * 0.25)), min(652, round(y + h * 0.9))
-        d[f] = float(np.abs(cur[y0:y1:2, x0:x1:2] - prev[y0:y1:2, x0:x1:2]).mean()) if y1 > y0 and x1 > x0 else 0.0
-    return d
+@dataclass
+class UnitPlan:
+    unit: str
+    shot_ids: list[str]
+    start: int
+    end: int
+    effects: list[dict]
+    layers: list[LayerPlan]
+    skipped: list
+    issues: list
+    shots: dict = field(default_factory=dict)       # 镜头 ID → shots.json 的镜头
+    cls: dict = field(default_factory=dict)         # 帧 → 类别
+
+    def shot_of(self, f: int) -> dict:
+        for sid in self.shot_ids:
+            s = self.shots[sid]
+            if s["start"] <= f < s["end"]:
+                return s
+        raise KeyError(f)
+
+    @property
+    def frames(self) -> list[int]:
+        return list(range(self.start, self.end))
 
 
-def finalize_nodes(plan: Plan, full: np.ndarray) -> dict:
-    """新画面节点与 frameHold：先按画面重复检测，再用 shots.json 的 cadence 段覆盖（段内只有对齐帧是新画面）——
-    与 traj2.ts 相同的优先级；frameHold 段由节点间隔生成（shotsutil.ts holdSegments）。"""
-    a, b = plan.fin, plan.fout
-    d = detect_new_frames(plan, full)
-    is_new = {a: True}
-    for f in range(a + 1, b):
-        nb = min(d.get(f - 1, np.inf), d.get(f + 1, np.inf))
-        is_new[f] = not (d[f] < 0.35 or d[f] < 0.6 * nb)
-    for f in range(a + 2, b - 2):
-        if is_new[f] and not is_new[f - 2] and not is_new[f + 2] and is_new[f - 1] and is_new[f + 1]:
-            is_new[f] = False
-    _, allshots = load_shot(plan.shot["id"])
-    nc = 0
-    for c in allshots.get("cadence") or []:
-        for f in range(max(c["start"], a + 1), min(c["end"], b)):
-            is_new[f] = (f - c["start"]) % c["every"] == 0
-            nc += 1
-    news = sorted(f for f, v in is_new.items() if v)
-    segs = []
-    for i, g in enumerate(news):
-        k = (news[i + 1] if i + 1 < len(news) else b) - g
-        if k < 2:
-            continue
-        if segs and segs[-1]["end"] == g and segs[-1]["every"] == k:
-            segs[-1]["end"] = g + k
-        else:
-            segs.append({"start": g, "end": g + k, "every": k})
-    plan.nodes, plan.holds = news, segs
-    # 变换关键帧止于最后一个节点（之后的显示帧都保持在它上面；再往后的关键帧没有任何数据约束）
-    every = plan.keys[1] - plan.keys[0] if len(plan.keys) > 1 else 12
-    last = news[-1]
-    plan.keys = list(range(a, last, every)) + [last]
-    return {"d": d, "cadenceFrames": nc}
+def load_shots() -> dict:
+    return json.loads(SHOTS.read_text(encoding="utf-8"))
+
+
+def make_unit(sid: str) -> UnitPlan:
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "plan.json"
+        subprocess.run(["node", "--experimental-strip-types", "--disable-warning=ExperimentalWarning",
+                        str(REPO / "tools/gpu/scripts/a5_plan.ts"), sid, str(out)], check=True, cwd=REPO, capture_output=True)
+        q = json.loads(out.read_text())
+    allshots = load_shots()
+    shots = {s["id"]: s for s in allshots["shots"] if s["id"] in q["shots"]}
+    zoom = any(e["kind"] in ("zoom", "pan", "scale") for e in q["effects"])
+    layers = []
+    for L in q["layers"]:
+        lp = LayerPlan(id=L["id"], fin=L["in"], fout=L["out"], z=L["z"], constants=L["constants"], switches=L["switches"],
+                       fixed=L["fixed"], color_filter=L["colorFilter"], dof=L["dof"], scale_x=L["scaleX"], clip=L["clip"],
+                       opacity=L["opacity"], track=L["track"])
+        for t in lp.track:
+            if t.get("eyes") and lp.fin <= t["frame"] < lp.fout:
+                e = np.asarray(t["eyes"], np.float64)
+                e = e[np.argsort(e[:, 0])]  # 画面左、右
+                c = float(t.get("confidence") or 0)
+                lp.eye_init.append((t["frame"], e, c))
+                if c >= ANCHOR_CONF:
+                    lp.anchors.append((t["frame"], e, c))
+        lp.keys = list(range(lp.fin, lp.fout - 1, 12 if zoom else 24)) + [lp.fout - 1]
+        layers.append(lp)
+    u = UnitPlan(unit=q["unit"], shot_ids=q["shots"], start=q["start"], end=q["end"], effects=q["effects"], layers=layers,
+                 skipped=q["skipped"], issues=q["issues"], shots=shots)
+    u.cls = {f: metric.classify(u.shot_of(f), f)[0] for f in u.frames}
+    return u
+
+
+def _interp_box(track: list, f: int):
+    return metric._interp_skip_null(track, f, "head") or metric._interp_skip_null(track, f, "bbox")
+
+
+def finalize_nodes(u: UnitPlan, refs: "Refs") -> None:
+    """每个图层：参考帧重复检测（shotsutil.ts detectNewFrames：实例头框中间区域隔 2 像素采样的 RGB 平均绝对差 d，
+    d < 0.35 或 d < 0.6 × min(相邻 d) 判重复；孤立单帧「新」判重复）→ cadence 段覆盖 → frameHold 段（holdSegments）→ 关键帧止于最后一个节点。"""
+    cad = load_shots().get("cadence") or []
+    for lp in u.layers:
+        a, b = lp.fin, lp.fout
+        d = {}
+        for f in range(a + 1, b):
+            cur, prev = refs.frame(f).astype(np.int32), refs.frame(f - 1).astype(np.int32)
+            box = _interp_box(lp.track, f)
+            x0, y0, x1, y1 = 0, 62, 1280, 652
+            if box:
+                x, y, w, h = box
+                x0, x1 = max(0, round(x + w * 0.2)), min(1280, round(x + w * 0.8))
+                y0, y1 = max(62, round(y + h * 0.25)), min(652, round(y + h * 0.9))
+            d[f] = float(np.abs(cur[y0:y1:2, x0:x1:2] - prev[y0:y1:2, x0:x1:2]).mean()) if y1 > y0 and x1 > x0 else 0.0
+        is_new = {a: True}
+        for f in range(a + 1, b):
+            nb = min(d.get(f - 1, np.inf), d.get(f + 1, np.inf))
+            is_new[f] = not (d[f] < 0.35 or d[f] < 0.6 * nb)
+        for f in range(a + 2, b - 2):
+            if is_new[f] and not is_new[f - 2] and not is_new[f + 2] and is_new[f - 1] and is_new[f + 1]:
+                is_new[f] = False
+        # 补充（A5）：连续两帧以上的保持（如 s21 2092～2094）里，后面几帧之间只有压缩噪声，d 不比相邻帧小多少，
+        # 上面的判据会把它们都当成新画面，渲染随插值连续变化而原视频静止 → 闪烁尖峰。再加一条：
+        # d 小于 ±3 帧内最大 d 的 0.2 倍，且绝对值 < 2.5（全片新画面的 d 一般 > 8），判为重复。
+        for f in range(a + 1, b):
+            loc = max(d.get(g, 0.0) for g in range(f - 3, f + 4))
+            if is_new[f] and d[f] < 2.5 and d[f] < 0.2 * loc:
+                is_new[f] = False
+        for c in cad:
+            for f in range(max(c["start"], a + 1), min(c["end"], b)):
+                is_new[f] = (f - c["start"]) % c["every"] == 0
+        news = sorted(f for f, v in is_new.items() if v)
+        segs = []
+        for i, g in enumerate(news):
+            k = (news[i + 1] if i + 1 < len(news) else b) - g
+            if k < 2:
+                continue
+            if segs and segs[-1]["end"] == g and segs[-1]["every"] == k:
+                segs[-1]["end"] = g + k
+            else:
+                segs.append({"start": g, "end": g + k, "every": k})
+        every = lp.keys[1] - lp.keys[0] if len(lp.keys) > 1 else 24
+        lp.nodes, lp.holds = news, segs
+        lp.keys = list(range(a, news[-1], every)) + [news[-1]]
 
 
 def switch_value(sw: dict, g: int) -> float:
@@ -185,23 +203,36 @@ def switch_value(sw: dict, g: int) -> float:
 
 
 class Refs:
-    """参考帧与排除区（按 metric.py 口径解码），按需降采样到拟合分辨率。"""
+    """参考帧（metric.py 口径解码，uint8 常驻内存）与排除区；按需降采样到拟合分辨率（只取请求的帧）。"""
 
-    def __init__(self, plan: Plan):
-        self.plan = plan
-        self.full = metric.decode_ref(plan.fin, plan.fout)  # [N, 720, 1280, 3] uint8
-        self.excl = np.stack([metric.exclusion_mask(plan.shot, f) for f in plan.frames])  # [N, 720, 1280] bool
-        self._cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+    def __init__(self, u: UnitPlan):
+        self.u = u
+        self.full = metric.decode_ref(u.start, u.end)  # [N, 720, 1280, 3] uint8
+        self._excl: dict[int, np.ndarray] = {}
+        self._cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
 
-    def at(self, W: int, H: int) -> tuple[np.ndarray, np.ndarray]:
-        """(参考 RGB float32 0..255 [N, H, W, 3], 有效区权重 [N, H, W]：1 − 排除区覆盖率)。"""
-        k = (W, H)
-        if k not in self._cache:
-            if (W, H) == (1280, 720):
-                r = self.full.astype(np.float32)
-                e = 1.0 - self.excl.astype(np.float32)
-            else:
-                r = np.stack([cv2.resize(x.astype(np.float64), (W, H), interpolation=cv2.INTER_AREA) for x in self.full]).astype(np.float32)
-                e = np.stack([cv2.resize(1.0 - x.astype(np.float64), (W, H), interpolation=cv2.INTER_AREA) for x in self.excl]).astype(np.float32)
-            self._cache[k] = (r, e)
-        return self._cache[k]
+    def frame(self, f: int) -> np.ndarray:
+        return self.full[f - self.u.start]
+
+    def excl(self, f: int) -> np.ndarray:
+        if f not in self._excl:
+            self._excl[f] = metric.exclusion_mask(self.u.shot_of(f), f)
+        return self._excl[f]
+
+    def at(self, W: int, H: int, frames: list[int]) -> tuple[np.ndarray, np.ndarray]:
+        """(参考 RGB float32 0..255 [N, H, W, 3], 有效区权重 [N, H, W]：1 − 排除区覆盖率)。按 (W, H, 帧) 缓存。"""
+        rs, es = [], []
+        for f in frames:
+            k = (W, H, f)
+            if k not in self._cache:
+                if (W, H) == (1280, 720):  # 全分辨率不缓存（内存）
+                    rs.append(self.frame(f).astype(np.float32))
+                    es.append(1.0 - self.excl(f).astype(np.float32))
+                    continue
+                r = cv2.resize(self.frame(f).astype(np.float64), (W, H), interpolation=cv2.INTER_AREA).astype(np.float32)
+                e = cv2.resize(1.0 - self.excl(f).astype(np.float64), (W, H), interpolation=cv2.INTER_AREA).astype(np.float32)
+                self._cache[k] = (r, e)
+            r, e = self._cache[k]
+            rs.append(r)
+            es.append(e)
+        return np.stack(rs), np.stack(es)

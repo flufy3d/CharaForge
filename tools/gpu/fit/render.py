@@ -35,7 +35,9 @@ def scale_draw(d: dict, s: float) -> dict:
 def raster_layer(rig, params: torch.Tensor, ts: torch.Tensor, W: int, H: int, aa=True, quantize=True, aa_layers=None) -> tuple[torch.Tensor, object]:
     """[B, P] 最终参数、[B, 2, 3] to_screen → (图层缓冲 [B, H, W, 4] 预乘, A1 输出)。"""
     out = rig.deform(params)
-    inp = LayerInput.from_arrays(out.verts, out.opacity, out.multiply, out.screen, out.render_order, out.visible, ts, out.vertex_updated)
+    # A3 只收 float32（变形器可以是 float64，见 rig.Rig 的 deform_dtype）
+    f = lambda x: x.float()
+    inp = LayerInput.from_arrays(f(out.verts), f(out.opacity), f(out.multiply), f(out.screen), out.render_order, out.visible, ts, out.vertex_updated)
     buf = rig.raster.render(inp, W, H, aa=aa, quantize=quantize, aa_layers=aa_layers)
     return buf, out
 

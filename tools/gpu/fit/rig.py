@@ -89,10 +89,12 @@ def check_static(st: dict, dump_model: dict) -> list[str]:
 class Rig:
     """一个模型在 GPU 上的完整前向：参数 → 物理 → 变形 → 光栅化。"""
 
-    def __init__(self, device="cuda", phys_compile=False):
+    def __init__(self, device="cuda", phys_compile=False, deform_dtype=torch.float32):
         self.device = torch.device(device)
         self.moc = moc3.load(str(MODEL_DIR / "大肥鱼.moc3"))
-        self.l2d = L2D(self.moc, device=device, dtype=torch.float32)
+        # deform_dtype = float64：A1 的 float32 稀疏矩阵乘（warp 网格的 keyform 插值）不是逐次确定的（同一输入两次差约 0.0065 px），
+        # 拟合里这点噪声会经光流目标的阈值判断被放大，导致同一配置两次运行结果不同；float64 时噪声降到 1e-12 量级
+        self.l2d = L2D(self.moc, device=device, dtype=deform_dtype)
         self.param_ids = list(self.l2d.param_ids)
         self.P = len(self.param_ids)
         self.pindex = {k: i for i, k in enumerate(self.param_ids)}
@@ -125,9 +127,26 @@ class Rig:
             raise ValueError(f"repeat 参数 {self.param_ids[i]} 不在拟合范围")
         return v.clamp(float(np.float32(self.pmin[i])), float(np.float32(self.pmax[i])))
 
+    use_graph = False  # A7 的 CUDA graph（L2D.graphed）；批大小按 GRAPH_BUCKET 补齐成少数几种，图可以复用
+
+    GRAPH_BUCKET = 16
+
     def deform(self, params: torch.Tensor):
-        """[B, P] 物理之后的参数 → A1 输出。"""
-        return self.l2d(params.float())
+        """[B, P] 物理之后的参数 → A1 输出。use_graph 时把 B 补齐到 16 的倍数（重复最后一行）走 CUDA graph，再截回 B；
+        输出与普通 forward 逐位相同（A7 实测），被补的行不参与求导（截掉了）。"""
+        x = params.to(self.l2d.dtype)
+        B = x.shape[0]
+        if not self.use_graph or B == 0:
+            return self.l2d(x)
+        Bp = -(-B // self.GRAPH_BUCKET) * self.GRAPH_BUCKET
+        if Bp > B:
+            x = torch.cat([x, x[-1:].detach().expand(Bp - B, -1)], 0)
+        grad = torch.is_grad_enabled() and x.requires_grad
+        out = self.l2d.graphed(Bp, grad=grad, max_cached=10)(x)
+        if Bp == B:
+            return out
+        import dataclasses
+        return dataclasses.replace(out, **{f.name: getattr(out, f.name)[:B] for f in dataclasses.fields(out)})
 
     def _iris_offsets(self) -> torch.Tensor:
         """虹膜中心标定（只用模型本身）：参考姿态（缺省参数）下渲染两眼区域，取各虹膜网格附近「青色」像素（可见的虹膜；
