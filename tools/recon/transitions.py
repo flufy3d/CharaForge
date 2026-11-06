@@ -112,6 +112,14 @@ def rect_of(mask):
             round((ys.max() - ys.min() + 1) / S, 1)]
 
 
+# 眼睛可见性的人工覆盖（实例全局 ID, 帧）→ eyesVisible。
+# 圈圈眼（key3）的眼睛中心是白色，与白色剪影 / 覆盖帧同色，5x5 邻域判据会误判成“已覆盖”；
+# 角色在转场里还有 30fps 小幅移动，扩大邻域、只看可区分像素也不稳定（试过，结果仍为 False）。
+# 下列帧逐帧看图确认两眼清晰可见（review_b3/transitions_eyes_white.jpg），与 2026-10-31 版 transitions.json 的值一致。
+EYES_VISIBLE_OVERRIDE = {**{("s06.pipR", f): True for f in range(652, 661)},
+                         **{("s08.loading", f): True for f in range(776, 779)}}
+
+
 def main():
     doc = json.load(open(SHOTS_JSON, encoding="utf-8")) if os.path.exists(SHOTS_JSON) else {"shots": []}
     out = []
@@ -163,6 +171,7 @@ def main():
                     ev = bool(vis > 0.003) and all(
                         uncov[max(0, int(ey * S) - 2):int(ey * S) + 3, max(0, int(ex * S) - 2):int(ex * S) + 3].mean() > 0.6
                         for ex, ey in st["eyes"])
+                    ev = EYES_VISIBLE_OVERRIDE.get((g, f), ev)
                 rec["instances"][g].append({
                     "frame": f, "visibleFrac": round(float(vis), 3), "headFrac": hf, "eyesVisible": ev,
                     "visible": rect_of(m) if vis > 0.003 else None,

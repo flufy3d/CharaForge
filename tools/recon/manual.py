@@ -1380,6 +1380,9 @@ def _continuation_instance(rec, gid, sid, prev_inst):
     return {"id": name, "continues": gid, "role": prev_inst["role"], "z": prev_inst["z"],
             "variant": _variant_at_end(prev_inst), "switchEvents": [], "motionHints": [],
             "anchors": track, "trackMode": "fixed", "flipX": prev_inst.get("flipX", False),
+            # B3（2026-11-06）：延续实例的 eyes 是转场前一帧的值，只做局部细化，不在 head 框内整体搜一对虹膜。
+            # head 改为按眼距统一推算后框变大，s37.main@3288 的整体搜索锁到了头发上的青色（眼距 351，偏 270px）。
+            "eyePairSearch": False,
             **({"colorGrade": prev_inst["colorGrade"]} if prev_inst.get("colorGrade") else {}),
             "notes": "转场期间旧画面的延续：bbox 为与转场前一帧（" + str(rec["ref"]) +
                      "）比对仍未被遮挡部分的外接框；head/eyes 沿用转场前一帧的值（角色在转场中只有小幅动作），"
