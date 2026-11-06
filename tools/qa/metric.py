@@ -27,8 +27,10 @@
      （head 在相邻采样间线性插值）；SSIM 照常统计、不卡门槛。优先级：特效帧 > 目测帧 > 普通帧。
      每帧另外输出 visibleInstances、maxHeadH、whyVisual（目测判定依据，与类别无关，特效帧上也给出）。
 
-输出 JSON 向后兼容：旧字段 fracGE0.85 / framesBelow0.85、fracGE0.7 / framesBelow0.7 保留，且按字面的 0.85 / 0.7 计算；
-按现行门槛计算的是通用字段 fracGEthr / framesBelowThr，门槛值见汇总里的 threshold360；normalPass 按现行门槛判定。
+门槛是参数：--threshold（缺省 THRESHOLD_360 = 0.6）。按它计算的是通用字段 thr / framesGEthr / fracGEthr / framesBelowThr
+（门槛值也写在汇总的 threshold360 里），以及每帧的 passThr（只有有效普通帧为 true/false，其余为 null）、verdict（判定文字）、
+汇总的 normalPass。旧字段保留且按字面数值计算：fracGE0.85 / framesBelow0.85 按 0.85，fracGE0.7 / framesBelow0.7 按 0.7。
+score 同时输出闪烁指标（tools/qa/flicker.py）：每帧 flicker* 字段、每镜头 flicker、全片 flickerOverall。
 
 参考帧用 ffmpeg 解码，颜色转换参数与 tools/fit/src/refvideo.ts 逐字一致。
 --video / --video-offset 可换成别的参考视频（上限实验的合成参考）：视频第 0 帧对应场景帧 offset。
@@ -72,6 +74,23 @@ def decode_ref(a: int, b: int, video: Path = VIDEO, offset: int = 0) -> np.ndarr
     if n != b - a:
         raise RuntimeError(f"解码帧数 {n} ≠ {b - a}")
     return fr.reshape(n, H, W, 3)
+
+
+def ref_stream(a: int, b: int):
+    """流式解码参考帧 [a, b)（不整段载入内存），颜色转换与 decode_ref 相同（同一个 ffmpeg_vf）。"""
+    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", str(VIDEO), "-vf", ffmpeg_vf(a, b),
+           "-fps_mode", "passthrough", "-f", "rawvideo", "-"]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    n = W * H * 3
+    try:
+        for f in range(a, b):
+            buf = p.stdout.read(n)
+            if len(buf) != n:
+                raise RuntimeError(f"参考帧 {f} 解码失败（视频提前结束）")
+            yield np.frombuffer(buf, np.uint8).reshape(H, W, 3)
+    finally:
+        p.stdout.close()
+        p.wait()
 
 
 def load_shots() -> dict:
@@ -233,7 +252,20 @@ def classify(shot: dict, f: int) -> tuple[str, list[str]]:
     return "normal", []
 
 
-def frame_metric(rgb: np.ndarray, alpha: np.ndarray, ref: np.ndarray, shot: dict, f: int, want_maps=False):
+def judge(cls: str, s360: float | None, thr: float = THRESHOLD_360) -> tuple[bool | None, str]:
+    """逐帧判定：返回 (passThr, verdict)。只有有效的普通帧卡门槛；目测帧、特效帧、无角色帧 passThr = None。"""
+    if s360 is None:
+        return None, "无角色（遮罩<1%），不计"
+    if cls == "effect":
+        return None, "特效帧，不卡门槛（肉眼对比）"
+    if cls == "visual":
+        return None, "目测帧，不卡门槛（并排/叠加对比）"
+    ok = s360 >= thr
+    return ok, f"普通帧 SSIM@360 {s360:.3f} {'≥' if ok else '<'} {thr:g}"
+
+
+def frame_metric(rgb: np.ndarray, alpha: np.ndarray, ref: np.ndarray, shot: dict, f: int, want_maps=False,
+                 thr: float = THRESHOLD_360):
     refd = ref.astype(np.float64)
     comp = rgb * alpha[..., None] + refd * (1.0 - alpha[..., None])
     excl = exclusion_mask(shot, f)
@@ -249,6 +281,7 @@ def frame_metric(rgb: np.ndarray, alpha: np.ndarray, ref: np.ndarray, shot: dict
     out["coverage"] = (float((mask & bb).sum()) / denom) if denom > 0 else None
     if area < MIN_MASK:
         out["ssim360"] = out["ssim720"] = None
+        out["passThr"], out["verdict"] = judge(cls, None, thr)
         return (out, comp, None, mask) if want_maps else out
     # 主指标 SSIM@360
     c360 = cv2.resize(comp, (640, 360), interpolation=cv2.INTER_AREA)
@@ -259,6 +292,7 @@ def frame_metric(rgb: np.ndarray, alpha: np.ndarray, ref: np.ndarray, shot: dict
     # 辅助指标 SSIM@720
     s720 = ssim_map(comp, refd)
     out["ssim720"] = float(s720[mask].mean())
+    out["passThr"], out["verdict"] = judge(cls, out["ssim360"], thr)
     if want_maps:
         # 热力图用 SSIM@360 的图（最近邻放大回全分辨率）
         return out, comp, cv2.resize(s360, (W, H), interpolation=cv2.INTER_NEAREST), mask
@@ -273,7 +307,7 @@ def shot_frames(shot: dict, args) -> range:
     return range(a, b)
 
 
-def _stats(rows: list[dict], key: str) -> dict:
+def _stats(rows: list[dict], key: str, thr: float = THRESHOLD_360) -> dict:
     vals = np.array([r[key] for r in rows if r[key] is not None], dtype=np.float64)
     if vals.size == 0:
         return {"valid": 0}
@@ -292,22 +326,27 @@ def _stats(rows: list[dict], key: str) -> dict:
         out["framesBelow0.85"] = [int(r["frame"]) for r in valid if r[key] < LEGACY_THRESHOLD_360]
         out["fracGE0.7"] = float((vals >= LEGACY_THRESHOLD_07).mean())
         out["framesBelow0.7"] = [int(r["frame"]) for r in valid if r[key] < LEGACY_THRESHOLD_07]
-        out["fracGEthr"] = float((vals >= THRESHOLD_360).mean())
-        out["framesBelowThr"] = [int(r["frame"]) for r in valid if r[key] < THRESHOLD_360]
+        # 按门槛 thr（缺省现行门槛）计算的通用字段：framesGEthr = fracGEthr × valid，framesGEthr + len(framesBelowThr) = valid
+        out["thr"] = thr
+        out["framesGEthr"] = int((vals >= thr).sum())
+        out["fracGEthr"] = float((vals >= thr).mean())
+        out["framesBelowThr"] = [int(r["frame"]) for r in valid if r[key] < thr]
     return out
 
 
-def summarize(rows: list[dict]) -> dict:
+def summarize(rows: list[dict], thr: float = THRESHOLD_360) -> dict:
+    """镜头/全片汇总。thr 为普通帧门槛（缺省 THRESHOLD_360）。顶层 ssim360 / ssim720 是三类合计，只作参考；
+    门槛只对 normal 有意义（visual、effect 里的 fracGEthr 等只是同一门槛下的分布参考）。"""
     out: dict = {"frames": len(rows)}
     for key in ("ssim360", "ssim720"):
-        out[key] = _stats(rows, key)
-    # 普通帧 / 目测帧 / 特效帧分开统计（门槛只对普通帧：SSIM@360 ≥ THRESHOLD_360）
-    out["threshold360"] = THRESHOLD_360
+        out[key] = _stats(rows, key, thr)
+    # 普通帧 / 目测帧 / 特效帧分开统计（门槛只对普通帧：SSIM@360 ≥ thr）
+    out["threshold360"] = thr
     for cls in CLASSES:
         sub = [r for r in rows if r["class"] == cls]
-        out[cls] = {"frames": len(sub), "ssim360": _stats(sub, "ssim360"), "ssim720": _stats(sub, "ssim720")}
+        out[cls] = {"frames": len(sub), "ssim360": _stats(sub, "ssim360", thr), "ssim720": _stats(sub, "ssim720", thr)}
     nv = out["normal"]["ssim360"]
-    out["normalPass"] = bool(nv.get("valid", 0) > 0 and nv["min"] >= THRESHOLD_360)
+    out["normalPass"] = bool(nv.get("valid", 0) > 0 and nv["min"] >= thr)
     cov = np.array([r["coverage"] for r in rows if r["ssim360"] is not None and r["coverage"] is not None])
     out["coverageMean"] = float(cov.mean()) if cov.size else None
     out["coverageMin"] = float(cov.min()) if cov.size else None
@@ -320,28 +359,48 @@ def render_path(args, f: int) -> Path:
 
 
 def cmd_score(args) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))  # -I 模式不会把脚本目录加进 sys.path
+    import flicker  # noqa: PLC0415  （闪烁检测唯一实现，同目录）
+
     shots = {s["id"]: s for s in load_shots()["shots"]}
-    report = {"definition": "docs/pipeline.md#验收指标的定义", "renders": str(args.renders), "shots": {}}
-    all_vals = []
+    thr = args.threshold
+    report = {"definition": "docs/pipeline.md#验收指标的定义", "renders": str(args.renders), "threshold360": thr,
+              "shots": {}}
+    all_rows = []
     for sid in args.shots.split(","):
         shot = shots[sid]
         fr = shot_frames(shot, args)
         ref = decode_ref(fr.start, fr.stop, Path(args.video), args.video_offset)
         rows = []
+        ftrack = flicker.FlickerTracker()  # 每个镜头重新开始：切点不判定
         for f in fr:
             p = render_path(args, f)
             if not p.exists():
                 raise FileNotFoundError(p)
             rgb, alpha = load_render(p)
-            rows.append(frame_metric(rgb, alpha, ref[f - fr.start], shot, f))
-        summ = summarize(rows)
-        report["shots"][sid] = {"summary": summ, "perFrame": rows}
-        all_vals += [(r["ssim360"], r["ssim720"]) for r in rows if r["ssim360"] is not None]
+            row = frame_metric(rgb, alpha, ref[f - fr.start], shot, f, thr=thr)
+            row.update(ftrack.update(rgb, alpha, ref[f - fr.start]) or flicker.EMPTY)
+            rows.append(row)
+        summ = summarize(rows, thr)
+        fl = flicker.summarize(rows)
+        report["shots"][sid] = {"summary": summ, "flicker": fl, "perFrame": rows}
+        all_rows += rows
         print(f"{sid}: {json.dumps(summ, ensure_ascii=False)}")
-    if all_vals:
-        a = np.array(all_vals)
-        report["overall"] = {"valid": len(all_vals), "ssim360": float(a[:, 0].mean()), "ssim720": float(a[:, 1].mean())}
-        print(f"overall: {json.dumps(report['overall'])}")
+        print(f"{sid} 闪烁: 判定 {fl['samples']} 帧，尖峰 {fl['spikes']} {fl['spikeFrames']}，"
+              f"原视频重复帧但我们在变 {fl['refDupMoving']}")
+    valid = [r for r in all_rows if r["ssim360"] is not None]
+    if valid:
+        # 旧字段 valid / ssim360 / ssim720（所有有效帧的均值，不分类别）保留；summary 与镜头 summary 同结构（分三类）
+        o = summarize(all_rows, thr)
+        report["overall"] = {"valid": len(valid), "ssim360": float(np.mean([r["ssim360"] for r in valid])),
+                             "ssim720": float(np.mean([r["ssim720"] for r in valid])), "summary": o}
+        report["flickerOverall"] = flicker.summarize(all_rows)
+        parts = []
+        for c in CLASSES:
+            s = o[c]["ssim360"]
+            parts.append(f"{c} {o[c]['frames']} 帧 有效 {s.get('valid', 0)}"
+                         + (f" 均值 {s['mean']:.3f} ≥{thr:g} {s['framesGEthr']}" if s.get("valid") else ""))
+        print("overall: " + " | ".join(parts) + f" | normalPass {o['normalPass']} | 闪烁尖峰 {report['flickerOverall']['spikes']}")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -406,7 +465,7 @@ def cmd_review(args) -> None:
         rows = []
         for f in fr:
             rgb, alpha = load_render(render_path(args, f))
-            info, comp, smap, mask = frame_metric(rgb, alpha, ref[f - fr.start], shot, f, want_maps=True)
+            info, comp, smap, mask = frame_metric(rgb, alpha, ref[f - fr.start], shot, f, want_maps=True, thr=args.threshold)
             rows.append(info)
             enc.stdin.write(quad(ref[f - fr.start], comp, smap, mask, exclusion_mask(shot, f), info).tobytes())
         enc.stdin.close()
@@ -438,6 +497,8 @@ def main(argv=None) -> None:
         p.add_argument("--out", help="score：报告 JSON 路径；review：输出目录")
         p.add_argument("--video", default=str(VIDEO), help="参考视频（缺省为原 PV）")
         p.add_argument("--video-offset", type=int, default=0, help="参考视频第 0 帧对应的场景帧号")
+        p.add_argument("--threshold", type=float, default=THRESHOLD_360,
+                       help=f"普通帧门槛（缺省 {THRESHOLD_360:g}，即现行门槛）：决定 framesGEthr / fracGEthr / framesBelowThr / passThr / normalPass")
     args = ap.parse_args(argv)
     if args.cmd == "score":
         cmd_score(args)

@@ -42,10 +42,16 @@ THR = metric.THRESHOLD_360
 TL = f"{THR:g}"  # 门槛的显示文字，如 0.6（不写死数字）
 CLS_ZH = {"normal": "普通", "visual": "目测", "effect": "特效"}
 LAYOUTS = ("sbs", "sbs-comp", "overlay", "heat", "quad")
-NEUTRAL_GRAY = 128  # sbs 布局里渲染的底色（中性灰，不透出原视频里的角色）
+NEUTRAL_GRAY = 128  # sbs 布局里纯渲染的底色（中性灰，不透出原视频里的角色）
+BACKGROUNDS = ("gray", "checker")
+THIRD_PANELS = ("diff", "heat")
 FONT_PATHS = ["/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
               "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-              "/usr/share/fonts/truetype/arphic/uming.ttc"]
+              "/usr/share/fonts/truetype/arphic/uming.ttc",
+              "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+              "/mnt/c/Windows/Fonts/msyh.ttc",    # WSL：借用 Windows 的中文字体（只读）
+              "/mnt/c/Windows/Fonts/simhei.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]  # 最后兜底：无中文字形，但字号正确
 
 
 def log(*a) -> None:
@@ -91,21 +97,7 @@ def spans(shots: list[dict]) -> list[list[dict]]:
     return out
 
 
-def ref_stream(a: int, b: int):
-    """流式解码参考帧 [a, b)，颜色转换与 metric.decode_ref 完全相同（同一个 ffmpeg_vf）。"""
-    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", str(metric.VIDEO), "-vf", metric.ffmpeg_vf(a, b),
-           "-fps_mode", "passthrough", "-f", "rawvideo", "-"]
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    n = W * H * 3
-    try:
-        for f in range(a, b):
-            buf = p.stdout.read(n)
-            if len(buf) != n:
-                raise RuntimeError(f"参考帧 {f} 解码失败（视频提前结束）")
-            yield np.frombuffer(buf, np.uint8).reshape(H, W, 3)
-    finally:
-        p.stdout.close()
-        p.wait()
+ref_stream = metric.ref_stream  # 流式解码参考帧（颜色转换与 metric.decode_ref 相同）
 
 
 def run_render(scene_path: Path, frames: list[int], renders: Path) -> None:
@@ -129,7 +121,7 @@ def font(size: int):
                 _FONT_CACHE[size] = ImageFont.truetype(p, size)
                 break
         else:
-            _FONT_CACHE[size] = ImageFont.load_default()
+            _FONT_CACHE[size] = ImageFont.load_default(size)
     return _FONT_CACHE[size]
 
 
@@ -169,18 +161,57 @@ def heat_overlay(ref: np.ndarray, smap, mask, excl) -> np.ndarray:
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def compose(layout: str, ref: np.ndarray, fr: dict) -> np.ndarray:
-    """按布局拼一帧差异视频。fr：{'info', 'comp', 'rgb', 'alpha', 'smap', 'mask', 'excl'}（未拟合时只有 info）。"""
-    fitted = "comp" in fr
-    if layout in ("sbs", "sbs-comp"):
-        if not fitted:
-            right = (ref * 0.35).astype(np.uint8)
-        elif layout == "sbs":
-            # 只显示我们的渲染：按 alpha 合成到中性灰底上（不合成到原视频，避免透出原视频角色像重影）
-            a = fr["alpha"][..., None]
-            right = np.clip(fr["rgb"] * a + NEUTRAL_GRAY * (1 - a), 0, 255).astype(np.uint8)
+_BG_CACHE: dict[str, np.ndarray] = {}
+
+
+def background(kind: str) -> np.ndarray:
+    """纯渲染的底：gray = 中性灰 128；checker = 16px 棋盘格（96/160）。"""
+    if kind not in _BG_CACHE:
+        if kind == "checker":
+            yy, xx = np.mgrid[0:H, 0:W]
+            g = np.where(((yy // 16) + (xx // 16)) % 2 == 0, 96.0, 160.0)
+            _BG_CACHE[kind] = g[..., None].repeat(3, -1)
         else:
-            right = np.clip(fr["comp"], 0, 255).astype(np.uint8)  # 合成到原视频背景（指标所用的 C_f）
+            _BG_CACHE[kind] = np.full((H, W, 3), float(NEUTRAL_GRAY))
+    return _BG_CACHE[kind]
+
+
+def pure_render(rgb: np.ndarray, alpha: np.ndarray, bg: str = "gray") -> np.ndarray:
+    """只画我们的渲染：按 alpha 合成到中性底上（不合成到原视频，避免没盖住处透出原视频角色造成假重影）。
+    这只是可视化；指标仍按定义合成到参考帧上算（metric.frame_metric 的 C_f）。"""
+    a = alpha[..., None]
+    return np.clip(rgb * a + background(bg) * (1 - a), 0, 255).astype(np.uint8)
+
+
+def compose(layout: str, ref: np.ndarray, fr: dict, bg: str = "gray", third: str = "diff") -> np.ndarray:
+    """按布局拼一帧差异视频。fr：{'comp', 'rgb', 'alpha', 'smap', 'mask', 'excl'}（未拟合时为空）。"""
+    fitted = "comp" in fr
+    if layout == "sbs":
+        # 三栏：原视频 | 我们的纯渲染（中性底）| 差异图（|C_f − R_f|，即指标所比较的两张图之差）或 SSIM 热力图
+        dim = (ref * 0.35).astype(np.uint8)
+        if fitted:
+            mid = pure_render(fr["rgb"], fr["alpha"], bg)
+            if third == "heat":
+                rt = metric.heat(fr["smap"], fr["mask"])
+                rt[fr["excl"]] = (rt[fr["excl"]] * 0.4 + np.array([60, 60, 160]) * 0.6).astype(np.uint8)
+            else:
+                rt = diff_img(fr["comp"], ref)
+        else:
+            mid, rt = dim, dim.copy()
+        img = np.ascontiguousarray(np.concatenate([ref, mid, rt], 1))
+        names = ("原视频", "我们的渲染（纯，" + ("棋盘底" if bg == "checker" else "灰底") + "）",
+                 "差异 |合成−原|×3" if third == "diff" else "SSIM@360 热力图")
+        for i, t in enumerate(names):
+            burn(img, [t], x=W * i + 8, y=H - 46, size=24)
+        if not fitted:
+            for i in (1, 2):
+                sub = img[:, W * i:W * (i + 1)]
+                center_text(sub, "未拟合")
+                img[:, W * i:W * (i + 1)] = sub
+        return img
+    if layout == "sbs-comp":
+        # 旧并排：右边是合成到原视频上的 C_f（没盖住处会透出原角色，只用于核对指标输入）
+        right = np.clip(fr["comp"], 0, 255).astype(np.uint8) if fitted else (ref * 0.35).astype(np.uint8)
         img = np.concatenate([ref, right], 1)
         if not fitted:
             sub = img[:, W:]
@@ -221,20 +252,23 @@ def frame_label(info: dict) -> list[str]:
     s, s7 = info.get("ssim360"), info.get("ssim720")
     if s is None:
         return [head, "SSIM 无（遮罩 <1%）"]
-    mark = "" if info["class"] != "normal" else ("  ✓" if s >= THR else f"  ✗<{TL}")
+    # 不用 ✓/✗：部分中文字体（如微软雅黑）没有这两个字形
+    mark = "  （不卡门槛）" if info["class"] != "normal" else (f"  ≥{TL} 达标" if s >= THR else f"  <{TL} 不达标")
     lines = [head, f"SSIM@360={s:.3f}  @720={s7:.3f}{mark}"]
     if info.get("flickerSpike"):
         lines.append(f"闪烁尖峰 Δ={info['flicker']:.1f}（原视频 {info['flickerRef']:.1f}）")
+    elif info.get("flickerRefDup"):
+        lines.append(f"原视频重复帧但我们在变 Δ={info['flicker']:.1f}")
     return lines
 
 
-def triptych(ref: np.ndarray, comp: np.ndarray, info: dict) -> bytes:
-    """最差帧缩略图：原视频 | 渲染（合成到原视频背景）| 差异图，每格 640×360，JPEG。"""
-    ps = [ref, np.clip(comp, 0, 255).astype(np.uint8), diff_img(comp, ref)]
+def triptych(ref: np.ndarray, rgb: np.ndarray, alpha: np.ndarray, comp: np.ndarray, info: dict, bg: str = "gray") -> bytes:
+    """最差帧缩略图：原视频 | 纯渲染（中性底，不合成到原视频）| 差异图（|C_f − R_f|），每格 640×360，JPEG。"""
+    ps = [ref, pure_render(rgb, alpha, bg), diff_img(comp, ref)]
     ps = [cv2.resize(p, (640, 360), interpolation=cv2.INTER_AREA) for p in ps]
     img = np.ascontiguousarray(np.concatenate(ps, 1))
     burn(img, [f"f={info['frame']} [{CLS_ZH[info['class']]}] SSIM@360={info['ssim360']:.3f}"], size=18)
-    for i, t in enumerate(("原视频", "渲染", "差异")):
+    for i, t in enumerate(("原视频", "纯渲染", "差异")):
         burn(img, [t], x=640 * i + 520, y=320, size=18)
     bio = io.BytesIO()
     Image.fromarray(img).save(bio, "JPEG", quality=85)
@@ -263,7 +297,7 @@ def class_row(summ: dict, cls: str) -> dict:
     c = summ[cls]
     s = c["ssim360"]
     return {"frames": c["frames"], "valid": s.get("valid", 0), "mean": s.get("mean"), "min": s.get("min"),
-            "p5": s.get("p5"), "fracGEthr": s.get("fracGEthr"),
+            "p5": s.get("p5"), "fracGEthr": s.get("fracGEthr"), "geThr": s.get("framesGEthr", 0) if s.get("valid") else 0,
             "belowThr": len(s.get("framesBelowThr", [])) if s.get("valid") else 0,
             "worstFrame": s.get("worstFrame")}
 
@@ -379,7 +413,14 @@ def svg_curve(sid: str, a: int, b: int, rows: list[dict]) -> str:
     return "".join(g)
 
 
+def set_threshold(thr: float) -> None:
+    """报告里所有门槛相关的显示和判定都用这一个值（缺省 metric.THRESHOLD_360）。"""
+    global THR, TL
+    THR, TL = float(thr), f"{float(thr):g}"
+
+
 def write_html(out: Path, rep: dict, video_name: str | None) -> None:
+    set_threshold(rep.get("threshold360", metric.THRESHOLD_360))
     shots = rep["shots"]
     ov = rep["overall"]
     fitted = [s for s, v in shots.items() if v["fitted"]]
@@ -400,17 +441,21 @@ def write_html(out: Path, rep: dict, video_name: str | None) -> None:
         r = class_row(ov, cls)
         tiles.append((f"{CLS_ZH[cls]}帧 SSIM@360 均值（{r['valid']} 帧）", fmt(r["mean"])))
     r = class_row(ov, "normal")
+    tiles.append((f"普通帧 ≥{TL} 帧数", f"{r['geThr']} / {r['valid']}"))
     tiles.append((f"普通帧 <{TL} 帧数", str(r["belowThr"])))
+    tiles.append(("闪烁尖峰帧", str((rep.get("flickerOverall") or {}).get("spikes", 0))))
     h += [f'<div class="tile"><div class="k">{E(k)}</div><div class="v">{E(v)}</div></div>' for k, v in tiles]
     h.append("</div>")
-    h.append(f'<div class="scroll"><table><tr><th>类别</th><th>帧数</th><th>有效帧</th><th>均值</th><th>最小</th><th>5% 分位</th><th>≥{TL}</th><th>&lt;{TL} 帧数</th><th>最差帧</th></tr>')
+    h.append(f'<div class="scroll"><table><tr><th>类别</th><th>帧数</th><th>有效帧</th><th>均值</th><th>最小</th><th>5% 分位</th>'
+             f'<th>≥{TL} 帧数</th><th>≥{TL} 比例</th><th>&lt;{TL} 帧数</th><th>最差帧</th></tr>')
     for cls in metric.CLASSES:
         r = class_row(ov, cls)
         h.append(f'<tr><td><span class="dot" style="background:var(--{cls})"></span>{CLS_ZH[cls]}帧</td><td>{r["frames"]}</td><td>{r["valid"]}</td>'
-                 f'<td>{fmt(r["mean"])}</td><td>{fmt(r["min"])}</td><td>{fmt(r["p5"])}</td><td>{pct(r["fracGEthr"])}</td>'
+                 f'<td>{fmt(r["mean"])}</td><td>{fmt(r["min"])}</td><td>{fmt(r["p5"])}</td><td>{r["geThr"]}</td><td>{pct(r["fracGEthr"])}</td>'
                  f'<td>{r["belowThr"]}</td><td>{r["worstFrame"] if r["worstFrame"] is not None else "—"}</td></tr>')
     h.append("</table></div>")
-    h.append(f'<p class="sub">普通帧门槛：逐帧 SSIM@360 ≥ {TL}；目测帧（≥2 个可见实例，或最大头高 &lt;200px）与特效帧照常统计、不卡门槛，'
+    h.append(f'<p class="sub">普通帧门槛：逐帧 SSIM@360 ≥ {TL}（本报告用的门槛，见 report.json 的 threshold360）；'
+             f'目测帧（≥2 个可见实例，或最大头高 &lt;200px）与特效帧照常统计、不卡门槛，它们的 ≥{TL} 列只作分布参考，'
              '以并排、叠加对比为准。判定优先级：特效 &gt; 目测 &gt; 普通。统计只含已拟合镜头。</p>')
     # 排行
     h.append("<h2>最差镜头排行</h2><div class='cols'>")
@@ -431,19 +476,20 @@ def write_html(out: Path, rep: dict, video_name: str | None) -> None:
     # 闪烁
     fo = rep.get("flickerOverall") or {}
     frk = sorted([(sid, v["flicker"]) for sid, v in shots.items() if v.get("flicker") and v["flicker"]["samples"]],
-                 key=lambda t: (-t[1]["spikes"], -t[1]["staticMoving"]))
-    h.append(f'<h2>闪烁（时间稳定性）</h2><p class="sub">320×180 灰度上，取相邻两帧都在渲染遮罩内的区域，比较我们与原视频的帧间平均变化 Δ；'
-             f'我们的 Δ &gt; 3×max(原视频 Δ, 1) 且 &gt; 4 记为尖峰，切点跳过。「原视频静止我们在动」= 原视频 Δ&lt;0.3 且我们的 Δ&gt;2（参考）。'
-             f'全片：判定 {fo.get("samples", 0)} 帧，尖峰 {fo.get("spikes", 0)} 帧，静止在动 {fo.get("staticMoving", 0)} 帧；'
-             f'帧间变化中位数 我们 {fmt(fo.get("medianOurs"), 2)} / 原视频 {fmt(fo.get("medianRef"), 2)}。</p>')
-    h.append('<div class="scroll"><table><tr><th>#</th><th>镜头</th><th>判定帧</th><th>尖峰帧</th><th>静止在动</th><th>Δ 中位（我们）</th>'
+                 key=lambda t: (-t[1]["spikes"], -t[1]["refDupMoving"]))
+    h.append(f'<h2>闪烁（时间稳定性）</h2><p class="sub">320×180 灰度上，取相邻两帧渲染 alpha 都 &gt;0.5 的区域，比较我们与原视频的帧间平均变化 Δ；'
+             f'我们的 Δ &gt; 3×max(原视频 Δ, 1) 且 &gt; 4 记为尖峰；镜头切点（每镜头第一帧）不判定。'
+             f'「原视频重复帧」= 原视频 Δ&lt;0.3 且我们的 Δ&gt;2（原视频不变、我们在变），单独统计（同时满足尖峰条件的也计入尖峰）。'
+             f'全片：判定 {fo.get("samples", 0)} 帧，尖峰 {fo.get("spikes", 0)} 帧，原视频重复帧但我们在变 {fo.get("refDupMoving", 0)} 帧'
+             f'（其中也是尖峰 {fo.get("refDupSpikes", 0)}）；帧间变化中位数 我们 {fmt(fo.get("medianOurs"), 2)} / 原视频 {fmt(fo.get("medianRef"), 2)}。</p>')
+    h.append('<div class="scroll"><table><tr><th>#</th><th>镜头</th><th>判定帧</th><th>尖峰帧</th><th>原视频重复帧在变</th><th>Δ 中位（我们）</th>'
              '<th>Δ 中位（原视频）</th><th>尖峰帧号（前 12）</th></tr>')
-    for i, (sid, fl) in enumerate([t for t in frk if t[1]["spikes"] or t[1]["staticMoving"]], 1):
+    for i, (sid, fl) in enumerate([t for t in frk if t[1]["spikes"] or t[1]["refDupMoving"]], 1):
         fr12 = ", ".join(str(x) for x in fl["spikeFrames"][:12]) + (" …" if fl["spikes"] > 12 else "")
         h.append(f'<tr><td>{i}</td><td><a href="#{sid}">{sid}</a></td><td>{fl["samples"]}</td><td>{fl["spikes"]}</td>'
-                 f'<td>{fl["staticMoving"]}</td><td>{fmt(fl["medianOurs"], 2)}</td><td>{fmt(fl["medianRef"], 2)}</td>'
+                 f'<td>{fl["refDupMoving"]}</td><td>{fmt(fl["medianOurs"], 2)}</td><td>{fmt(fl["medianRef"], 2)}</td>'
                  f'<td style="text-align:left">{fr12 or "—"}</td></tr>')
-    if not any(t[1]["spikes"] or t[1]["staticMoving"] for t in frk):
+    if not any(t[1]["spikes"] or t[1]["refDupMoving"] for t in frk):
         h.append('<tr><td colspan="8" class="sub">（无尖峰）</td></tr>')
     h.append("</table></div>")
     # 逐镜头表
@@ -503,7 +549,12 @@ def main(argv=None) -> None:
     ap.add_argument("--render", action="store_true", help="先用 pnpm render 渲染已拟合镜头的全部帧到 --renders")
     ap.add_argument("--out", default=str(OUT), help="输出目录（缺省 .data/qa/report）")
     ap.add_argument("--layout", default="sbs", choices=LAYOUTS,
-                    help="差异视频布局：sbs 并排 2560×720（右边只画渲染，中性灰底）| sbs-comp 并排（右边渲染合成到原视频）| overlay 50%% 叠加 | heat SSIM 热力图 | quad 四宫格")
+                    help="差异视频布局：sbs 三栏 3840×720（原视频 | 纯渲染 | 差异或热力图）| sbs-comp 并排（右边渲染合成到原视频，会透出原角色）"
+                         "| overlay 50%% 叠加 | heat SSIM 热力图 | quad 四宫格")
+    ap.add_argument("--bg", default="gray", choices=BACKGROUNDS, help="sbs 中栏和缩略图里纯渲染的底：gray 中性灰（缺省）| checker 棋盘格")
+    ap.add_argument("--third", default="diff", choices=THIRD_PANELS, help="sbs 第三栏：diff 差异图（缺省）| heat SSIM@360 热力图")
+    ap.add_argument("--threshold", type=float, default=metric.THRESHOLD_360,
+                    help=f"普通帧门槛（缺省 {metric.THRESHOLD_360:g}，即现行门槛）")
     ap.add_argument("--no-video", action="store_true", help="不生成差异视频")
     ap.add_argument("--worst", type=int, default=2, help="每镜头每类保留的最差帧缩略图数")
     ap.add_argument("--crf", type=int, default=20)
@@ -516,6 +567,7 @@ def main(argv=None) -> None:
         write_html(out, json.loads((out / "report.json").read_text(encoding="utf-8")), vids[0].name if vids else None)
         return
 
+    set_threshold(args.threshold)
     out = Path(args.out)
     (out / "thumbs").mkdir(parents=True, exist_ok=True)
     renders = Path(args.renders) if args.renders else out / "renders"
@@ -547,7 +599,7 @@ def main(argv=None) -> None:
     enc = None
     if not args.no_video:
         video_name = f"diff_{args.layout}.mp4"
-        size = (2 * W, H) if args.layout in ("sbs", "sbs-comp") else (W, H)
+        size = {"sbs": (3 * W, H), "sbs-comp": (2 * W, H)}.get(args.layout, (W, H))
         enc = open_encoder(out / video_name, size, segs, args.crf, args.preset)
 
     # 旧缩略图清掉，避免 HTML 之外残留过期文件
@@ -577,21 +629,22 @@ def main(argv=None) -> None:
                     else:
                         # 没有任何图层覆盖的帧：渲染器在这里输出全透明，直接按空渲染算（遮罩 <1% → 无角色，不计有效帧）
                         rgb, alpha = np.zeros((H, W, 3)), np.zeros((H, W))
-                    info, comp, smap, mask = metric.frame_metric(rgb, alpha, ref, shot, f, want_maps=True)
+                    info, comp, smap, mask = metric.frame_metric(rgb, alpha, ref, shot, f, want_maps=True, thr=THR)
                     fr = {"comp": comp, "rgb": rgb, "alpha": alpha, "smap": smap, "mask": mask,
                           "excl": metric.exclusion_mask(shot, f)}
                 else:
                     cls, why = metric.classify(shot, f)
                     vwhy, nvis, max_h = metric.visual_reasons(shot, f)
                     info = {"frame": f, "class": cls, "why": why, "maskArea": None, "visibleInstances": nvis,
-                            "maxHeadH": max_h, "whyVisual": vwhy, "coverage": None, "ssim360": None, "ssim720": None}
+                            "maxHeadH": max_h, "whyVisual": vwhy, "coverage": None, "ssim360": None, "ssim720": None,
+                            "passThr": None, "verdict": "未拟合"}
                     fr = {}
                 info["shot"], info["fitted"] = sid, fitted
                 fl = ftrack.update(fr["rgb"], fr["alpha"], ref) if fitted else None
-                info.update(fl or {"flicker": None, "flickerRef": None, "flickerSpike": None, "flickerStatic": None})
+                info.update(fl or flicker.EMPTY)
                 rows.append(info)
                 if enc is not None:
-                    img = compose(args.layout, ref, fr)
+                    img = compose(args.layout, ref, fr, args.bg, args.third)
                     burn(img, frame_label(info), size=26 if args.layout.startswith("sbs") else 22)
                     enc.stdin.write(img.tobytes())
                 if fitted and info["ssim360"] is not None and args.worst > 0:
@@ -599,7 +652,7 @@ def main(argv=None) -> None:
                     key = (-info["ssim360"], counter)
                     counter += 1
                     if len(hp) < args.worst or key > hp[0][0]:
-                        item = (key, info, triptych(ref, comp, info))
+                        item = (key, info, triptych(ref, rgb, alpha, comp, info, args.bg))
                         if len(hp) < args.worst:
                             heapq.heappush(hp, item)
                         else:
@@ -616,7 +669,7 @@ def main(argv=None) -> None:
                     thumbs.append({"file": name, "frame": info["frame"], "class": cls, "ssim360": info["ssim360"],
                                    "why": info["why"]})
             classes = {c: sum(1 for r in rows if r["class"] == c) for c in metric.CLASSES}
-            summ = metric.summarize(rows) if fitted else None
+            summ = metric.summarize(rows, THR) if fitted else None
             shots_out[sid] = {"start": shot["start"], "end": shot["end"], "fitted": fitted, "classFrames": classes,
                               "flicker": flicker.summarize(rows) if fitted else None,
                               "layerFrames": [list(r) for r in frame_ranges(covered[sid])],
@@ -635,7 +688,7 @@ def main(argv=None) -> None:
             raise RuntimeError("ffmpeg 编码失败")
         log(f"差异视频 → {out / video_name}")
 
-    overall = metric.summarize(all_rows) if all_rows else metric.summarize([])
+    overall = metric.summarize(all_rows, THR)
     rep = {"definition": "docs/pipeline.md#验收指标的定义", "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
            "scene": str(scene_path), "renders": str(renders), "threshold360": THR, "overall": overall,
            "flickerOverall": flicker.summarize(all_rows), "shots": shots_out}
@@ -643,14 +696,14 @@ def main(argv=None) -> None:
 
     # CSV
     cols = ["frame", "shot", "fitted", "class", "why", "ssim360", "ssim720", "coverage", "maskArea",
-            "visibleInstances", "maxHeadH", "whyVisual", "flicker", "flickerRef", "flickerSpike"]
+            "visibleInstances", "maxHeadH", "whyVisual", "passThr", "verdict", "flicker", "flickerRef", "flickerSpike", "flickerRefDup"]
     with open(out / "frames.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(cols)
         for v in shots_out.values():
             for r in v["perFrame"]:
                 w.writerow([int(r["fitted"]) if c == "fitted" else
-                            ("" if r[c] is None else int(r[c])) if c == "flickerSpike" else
+                            ("" if r[c] is None else int(r[c])) if c in ("flickerSpike", "flickerRefDup", "passThr") else
                             ";".join(r[c]) if c in ("why", "whyVisual") else
                             (f"{r[c]:.5f}" if isinstance(r[c], float) else ("" if r[c] is None else r[c]))
                             for c in cols])
@@ -658,19 +711,20 @@ def main(argv=None) -> None:
         w = csv.writer(fh)
         head = ["shot", "start", "end", "fitted", "status"]
         for c in metric.CLASSES:
-            head += [f"{c}_frames", f"{c}_valid", f"{c}_mean", f"{c}_min", f"{c}_p5", f"{c}_fracGE{TL}", f"{c}_below{TL}"]
-        w.writerow(head + ["coverageMean", "flickerSamples", "flickerSpikes", "flickerStaticMoving"])
+            head += [f"{c}_frames", f"{c}_valid", f"{c}_mean", f"{c}_min", f"{c}_p5", f"{c}_GE{TL}", f"{c}_fracGE{TL}", f"{c}_below{TL}"]
+        w.writerow(head + ["coverageMean", "flickerSamples", "flickerSpikes", "flickerRefDupMoving", "flickerSpikeFrames"])
         for sid, v in shots_out.items():
             row = [sid, v["start"], v["end"], int(v["fitted"]), v["status"]]
             for c in metric.CLASSES:
                 if v["fitted"]:
                     r = class_row(v["summary"], c)
-                    row += [r["frames"], r["valid"]] + ["" if r[k] is None else f"{r[k]:.5f}" for k in ("mean", "min", "p5", "fracGEthr")] + [r["belowThr"]]
+                    row += [r["frames"], r["valid"]] + ["" if r[k] is None else f"{r[k]:.5f}" for k in ("mean", "min", "p5")] + [r["geThr"]] + ["" if r["fracGEthr"] is None else f"{r['fracGEthr']:.5f}", r["belowThr"]]
                 else:
-                    row += [v["classFrames"][c]] + [""] * 6
+                    row += [v["classFrames"][c]] + [""] * 7
             cov = v["summary"].get("coverageMean") if v["fitted"] else None
             fl = v.get("flicker") or {}
-            w.writerow(row + ["" if cov is None else f"{cov:.5f}", fl.get("samples", ""), fl.get("spikes", ""), fl.get("staticMoving", "")])
+            w.writerow(row + ["" if cov is None else f"{cov:.5f}", fl.get("samples", ""), fl.get("spikes", ""), fl.get("refDupMoving", ""),
+                                 " ".join(str(x) for x in fl.get("spikeFrames", []))])
     (out / "report.json").write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
     write_html(out, rep, video_name)
     log(f"报告 → {out / 'index.html'}（{time.time() - t0:.0f}s）")
