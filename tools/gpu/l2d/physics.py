@@ -77,6 +77,48 @@ def atan2(y: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     return _SafeAtan2.apply(y, x)
 
 
+class _Index:
+    """列下标 idx（常量）及其逆表，供确定性的 gather 使用（A8）。
+
+    x[:, idx] 的原生反向是「按 idx 散射累加」：torch.compile 生成的是 float64 原子加，下标有重复时求和顺序随线程调度变，
+    梯度低位逐次不同。这里预先建好逆表 inv[j, d] = 第 d 个满足 idx[k] = j 的 k（不足的填 n，指向补的零列），
+    反向按固定顺序逐项相加，结果逐次相同。ignore 中的源列不回传梯度（只用于丢弃的填充列）。"""
+
+    def __init__(self, idx: Sequence[int], n_src: int, device, ignore=()):
+        idx = [int(i) for i in idx]
+        pos = [[] for _ in range(n_src)]
+        for k, j in enumerate(idx):
+            if j not in ignore:
+                pos[j].append(k)
+        D = max([1] + [len(p) for p in pos])
+        n = len(idx)
+        self.idx = torch.tensor(idx, device=device, dtype=torch.long)
+        self.inv = torch.tensor([[p[d] if d < len(p) else n for d in range(D)] for p in pos], device=device,
+                                dtype=torch.long).reshape(n_src, D)
+        self.n_src = n_src
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return _Gather.apply(x, self.idx, self.inv)
+
+
+class _Gather(torch.autograd.Function):
+    """y = x[:, idx]；反向 gx[:, j] = Σ_d gy[:, inv[j, d]]（固定顺序，确定性）。"""
+
+    @staticmethod
+    def forward(ctx, x, idx, inv):
+        ctx.save_for_backward(inv)
+        return x[:, idx]
+
+    @staticmethod
+    def backward(ctx, g):
+        inv, = ctx.saved_tensors
+        gz = torch.cat([g, g.new_zeros(g.shape[0], 1)], 1)
+        acc = gz[:, inv[:, 0]]
+        for d in range(1, inv.shape[1]):
+            acc = acc + gz[:, inv[:, d]]
+        return acc, None, None
+
+
 def direction_to_radian(fx, fy, tx, ty):
     """CubismMath.directionToRadian(from, to)：atan2(to) − atan2(from)，折回 [−π, π]。"""
     ret = atan2(ty, tx) - atan2(fy, fx)
@@ -147,6 +189,12 @@ class _Level:
     out_sign: torch.Tensor   # [NOv] ±1
     rnd_items: list          # [(全局输出下标, 本组输出下标, q_dest, scale, min, max, weight)]，由 _build 合成每层的写入轮次
     out_vertex_ok: bool
+    # 确定性 gather（A8）：C[:, in_q]、c[:, in_slot]（填充列不回传）、粒子 [i]、[i−1]、[父]
+    g_in: '_Index' = None
+    g_slot: '_Index' = None
+    g_o1: '_Index' = None
+    g_o0: '_Index' = None
+    g_o2: '_Index' = None
 
 
 class PhysicsRig:
@@ -175,6 +223,14 @@ class PhysicsRig:
         self._pmax = [float(x) for x in pmax]
         self.fps = float(physics['Meta'].get('Fps', 0.0) or 0.0)
         self._build(physics)
+        # A8：CUDA graph 快速路径（graphed_rollout）。auto_graph = True 时 rollout() 自动改走 graphed_rollout（缺省关）。
+        self.auto_graph = False
+        # A8：Triton 融合核快速路径（fused_rollout）。auto_fused = True 时 rollout() 自动改走 fused_rollout（缺省关，优先于 auto_graph）。
+        self.auto_fused = False
+        self.graph_max_instances = 64   # 所有键合计最多保留的图实例数（每个实例一份私有显存池）
+        self._graphs: dict = {}         # key → [_PhysGraph, ...]（按最近使用排序）
+        self.graph_stats = dict(captures=0, replays=0, fallbacks=0)
+        self._fused_plan = None
 
     # ------------------------------------------------------------ 构建
 
@@ -262,7 +318,8 @@ class PhysicsRig:
             rounds = []
             for r in range(max([x[0] for x in tagged], default=-1) + 1):
                 its = [x[1:] for x in tagged if x[0] == r]
-                rounds.append(self._round_tensors([x[1] for x in its], [x[2] for x in its], [(None, None, None, *x[3:]) for x in its]))
+                rounds.append(self._round_tensors([x[1] for x in its], [x[2] for x in its], [(None, None, None, *x[3:]) for x in its],
+                                                  off, self.Q))
             self.stages.append((gids, rounds))
 
         # interpolate：所有目标参数存在的输出（全局顺序），按「同一参数之前出现的次数」分轮
@@ -280,12 +337,15 @@ class PhysicsRig:
         self.output_params = sorted({x[2] for x in ip})          # 物理写入的参数（全局索引）
         self.input_params = sorted({idx[i['Source']['Id']] for s in settings for i in s['Input'] if i['Source']['Id'] in idx})
         self.output_param_index = self._t(self.output_params, torch.long)
+        self._g_q = _Index(q_glob, self.P, self.device)
+        self._g_outp = _Index(self.output_params, self.P, self.device)
         # interpolate 在「物理输出参数」的紧凑空间里写，最后一次性写回 [B, P]
         o_of = {p: k for k, p in enumerate(self.output_params)}
         self.interp_rounds = []
         for r in range(max([x[0] for x in ip], default=-1) + 1):
             items = [x for x in ip if x[0] == r]
-            self.interp_rounds.append(self._round_tensors([x[1] for x in items], [o_of[x[2]] for x in items], items))
+            self.interp_rounds.append(self._round_tensors([x[1] for x in items], [o_of[x[2]] for x in items], items,
+                                                          self.NO, len(self.output_params)))
         self.has_const = any(bool((lv.in_const != 0).any()) for lv in self.levels)
         ok = [lv.out_gidx for lv in self.levels if lv.out_vertex_ok]
         self._out_gidx_all = torch.cat(ok) if ok else None
@@ -299,9 +359,10 @@ class PhysicsRig:
         # getOutputScaleTranslationX/Y 返回 output.translationScale.x/y：Framework 从不赋值，恒为 0
         return float(o['Scale']) if o['Type'] == 'Angle' else 0.0
 
-    def _round_tensors(self, src, dst, items):
+    def _round_tensors(self, src, dst, items, n_src, n_dst):
         return dict(
             src=self._t(src, torch.long), dst=self._t(dst, torch.long),
+            g_src=_Index(src, n_src, self.device), g_dst=_Index(dst, n_dst, self.device),
             scale=self._t([x[3] for x in items]), vmin=self._t([x[4] for x in items]), vmax=self._t([x[5] for x in items]),
             w=self._t([x[6] for x in items]), full=self._t([x[6] >= 1.0 for x in items], torch.bool),
         )
@@ -391,7 +452,13 @@ class PhysicsRig:
                 rnd_items.append((gbase[k] + j, loc, q_of[p], self._scale(o), self._pmin[p], self._pmax[p],
                                   o['Weight'] / MAXIMUM_WEIGHT))
         t = self._t
+        d = self.device
+        g_out = {}
+        if o_g:
+            g_out = dict(g_o1=_Index(o_flat, R * L, d), g_o0=_Index([i - 1 for i in o_flat], R * L, d),
+                         g_o2=_Index([i - 2 if p else i - 1 for i, p in zip(o_flat, o_par)], R * L, d))
         return _Level(
+            g_in=_Index(in_q, self.Q, d), g_slot=_Index(slot_flat, NI + 1, d, ignore=(NI,)), **g_out,
             rigs=rigs, L=L, K=K,
             in_q=t(in_q, torch.long), in_slot=t(slot_flat, torch.long), in_type=t(typ),
             n_min=t([c['min'] for c in in_c] + [0.0]), n_max=t([c['max'] for c in in_c] + [0.0]),
@@ -435,17 +502,7 @@ class PhysicsRig:
         if not (dt > 0.0):
             return state, params
         io = params.dtype
-        # 时间调度（只依赖 dt 与 remain，整批相同，用 Python double 算，与 JS 逐位一致）
-        remain = state.remain + dt
-        if remain > MAX_DELTA_TIME:
-            remain = 0.0
-        phys_dt = 1.0 / self.fps if self.fps > 0.0 else dt
-        ws = []
-        while remain >= phys_dt:
-            ws.append(phys_dt / remain)   # inputWeight
-            remain -= phys_dt
-        alpha = remain / phys_dt
-        resolved = state.resolved or len(ws) > 0
+        ws, alpha, remain, resolved, phys_dt = self._advance(state.remain, state.resolved, dt)
         wt, at = self._sched(ws, alpha)
         fn = self._frame_c or self._frame
         res = fn(params.to(self.dtype), state.in_cache, state.cur, state.prev,
@@ -458,8 +515,29 @@ class PhysicsRig:
     def compile(self, **kw) -> 'PhysicsRig':
         """用 torch.compile 编译单帧函数（前向与反向都融合成少量 kernel）。kw 传给 torch.compile。"""
         kw.setdefault('dynamic', False)
+        # 每种 (B, 是否求导, in_cache 是否为 None, 子步数, resolved) 各编译一份；dynamo 缺省最多 8 份，超出后静默退回 eager
+        # （慢约 20 倍，数值也变成 eager 的）。拟合器常同时用 B = 1 和 B = 图层数，很容易超，这里放宽（A8）。
+        import torch._dynamo.config as dcfg
+        for name in ('recompile_limit', 'cache_size_limit'):
+            if hasattr(dcfg, name) and getattr(dcfg, name) < 64:
+                setattr(dcfg, name, 64)
         self._frame_c = torch.compile(self._frame, **kw)
         return self
+
+    def _advance(self, remain: float, resolved: bool, dt: float):
+        """一帧的时间调度（只依赖 dt 与 remain，整批相同，用 Python double 算，与 JS 逐位一致）。
+        返回 (各子步的 inputWeight, α, 新 remain, 新 resolved, physicsDeltaTime)。"""
+        remain = remain + dt
+        if remain > MAX_DELTA_TIME:
+            remain = 0.0
+        phys_dt = 1.0 / self.fps if self.fps > 0.0 else dt
+        ws = []
+        while remain >= phys_dt:
+            ws.append(phys_dt / remain)   # inputWeight
+            remain -= phys_dt
+        alpha = remain / phys_dt
+        resolved = resolved or len(ws) > 0
+        return ws, alpha, remain, resolved, phys_dt
 
     def _sched(self, ws, alpha):
         key = (tuple(ws), alpha)
@@ -473,7 +551,7 @@ class PhysicsRig:
     def _frame(self, params, in_cache, cur, prev, px, py, vx, vy, gx, gy, wt, at, n_sub: int, resolved: bool, phys_dt: float):
         """evaluate() 的一帧（纯函数）：n_sub 个子步 + interpolate。wt：[max(n_sub,1)] 各子步的 inputWeight；at：α。"""
         params = self._r(params)
-        pq = params[:, self.q_index]
+        pq = self._g_q(params)
         if in_cache is None:
             in_cache = pq   # _parameterInputCaches 为 null：用当前参数初始化
         delays = self._delays_fixed or [self._delays(lv, phys_dt) for lv in self.levels]
@@ -503,7 +581,7 @@ class PhysicsRig:
         """CubismPhysics.stabilization(model)：用当前参数把各条链置于静止平衡态。返回 (新状态, 写入物理输出后的参数)。"""
         io = params.dtype
         params = self._r(params.to(self.dtype))
-        pq = params[:, self.q_index]
+        pq = self._g_q(params)
         C = pq
         px, py, vx, vy, gx, gy = map(list, (state.px, state.py, state.vx, state.vy, state.gx, state.gy))
         vals = []
@@ -527,11 +605,16 @@ class PhysicsRig:
         """逐帧推进整段序列。params_seq：[T, B, P]。返回 (最终状态, [T, B, P] 物理之后的参数)。可整段反向传播（BPTT）。
 
         checkpoint：逐帧做激活检查点（反向时重算该帧前向），显存只剩每帧的状态，代价约多一次前向。
+        auto_fused / auto_graph（缺省都关）为 True 且 checkpoint=False 时改走 fused_rollout / graphed_rollout（A8，同语义）。
         """
         T, B, _ = params_seq.shape
         st = state if state is not None else self.initial_state(B)
         if stabilize_first:
             st, _ = self.stabilize(st, params_seq[0])
+        if self.auto_fused and not checkpoint:
+            return self.fused_rollout(params_seq, st, dt)
+        if self.auto_graph and not checkpoint:
+            return self.graphed_rollout(params_seq, st, dt)
         outs = []
         for t in range(T):
             if checkpoint and torch.is_grad_enabled():
@@ -563,6 +646,136 @@ class PhysicsRig:
                           meta['remain'], meta['resolved'])
         return s2, o
 
+    # ------------------------------------------------------------ 可选快速路径：CUDA graph（A8）
+
+    def graphed_rollout(self, params_seq: torch.Tensor, state: PhysicsState | None = None, dt: float = 1.0 / 60.0):
+        """与 rollout(params_seq, state, dt) 同语义、结果逐位相同，但把整段 T 帧的前向（求导时连同反向）捕获成 CUDA graph 重放。
+
+        - 逐帧调用的仍是 _frame（compile() 之后是编译版），只是 T 帧的全部内核一次发射：没有逐帧的 Python / dynamo 开销，
+          前向与反向都没有 CPU 同步。所以前向结果与同一 rig 的 rollout 逐位相同（compile 与否各自对应）；
+          梯度也逐位相同（gather 的反向是确定性的，见 _Index），同一输入跑两次逐位相同。
+        - 图按 (T, B, 每帧的子步调度, 哪些输入求导) 缓存；第一次遇到某个键要预热 + 捕获（T=24 约 0.5～1 秒，
+          另外未编译过的子步数还要先编译），之后每次调用只有约 60 次内核发射。
+        - 求导时，每个图实例的中间量在它自己的静态显存里：同一个键上一次前向的反向还没跑，又做前向（例如拟合器把 13 个
+          24 帧窗口都前向完再一起反向），会自动再捕获一个实例，最多 graph_max_instances 个（所有键合计）；
+          超出且没有空闲实例时退回普通 rollout（结果相同，只是慢）。同一段的反向只能跑一次之后、该实例被下一次前向复用前
+          再跑（retain_graph 后在复用之后再反向会报错，不会给出错误的梯度）。
+        - state 为 None 时用 initial_state(B)；state.in_cache 为 None（第一帧）时在图外用第一帧参数初始化，与 _frame 相同。
+        - 输出与新状态都是新张量（从图的静态缓冲复制出来），可以放心保留；输出 dtype 同 params_seq。
+        - 非 CUDA 设备、dt ≤ 0、T = 0 时直接调用普通 rollout。
+        """
+        T, B, P = params_seq.shape
+        st = state if state is not None else self.initial_state(B)
+        if T == 0 or not (dt > 0.0) or self.device.type != 'cuda' or not params_seq.is_cuda:
+            return self._rollout_plain(params_seq, st, dt)
+        io = params_seq.dtype
+        x = params_seq.to(self.dtype)
+        sched, remain, resolved, phys_dt = self._schedule_T(st, T, dt)
+        ic = st.in_cache
+        if ic is None:
+            ic = self._g_q(self._r(x[0]))   # 与 _frame 里 in_cache 为 None 时相同
+        ins = [x, *st.px, *st.py, *st.vx, *st.vy, *st.gx, *st.gy, st.cur, st.prev, ic]
+        grad = torch.is_grad_enabled() and any(t.requires_grad for t in ins)
+        mask = tuple(t.requires_grad for t in ins) if grad else None
+        key = (T, B, x.dtype, tuple(sched), phys_dt, grad, mask, self._frame_c is not None)
+        g = self._graph_get(key, ins)
+        if g is None:
+            self.graph_stats['fallbacks'] += 1
+            return self._rollout_plain(params_seq, st, dt)
+        self.graph_stats['replays'] += 1
+        res = g.run(ins)
+        n = len(self.levels)
+        ts = res[1:]
+        st2 = PhysicsState(*(tuple(ts[i * n:(i + 1) * n]) for i in range(6)), ts[6 * n], ts[6 * n + 1], ts[6 * n + 2],
+                           remain, resolved)
+        return st2, res[0].to(io)
+
+    def _schedule_T(self, st: PhysicsState, T: int, dt: float):
+        """T 帧的调度：[(各子步 inputWeight, α, resolved)]、最终 remain / resolved、physicsDeltaTime。"""
+        remain, resolved = st.remain, st.resolved
+        sched = []
+        phys_dt = 1.0 / self.fps if self.fps > 0.0 else dt
+        for _ in range(T):
+            ws, alpha, remain, resolved, phys_dt = self._advance(remain, resolved, dt)
+            sched.append((tuple(ws), alpha, resolved))
+        return sched, remain, resolved, phys_dt
+
+    def fused_rollout(self, params_seq: torch.Tensor, state: PhysicsState | None = None, dt: float = 1.0 / 60.0):
+        """与 rollout(params_seq, state, dt) 同语义，用 Triton 融合核（l2d/_kernels_physics.py）：整段 T 帧前向一个核、
+        反向一个核，每个批元素一个 CTA，链内逐粒子顺序、链间并行。
+
+        - 前向与 eager（未 compile）的 rollout / step 逐位相同（同样的运算顺序、IEEE 除法 / 开方、同一套 sin / cos / atan2、
+          关闭 FMA 合并）。注意 compile() 之后的原路径因为 FMA 合并与 eager 本来就差 1e-16 级（混沌放大后见 physics.md §5），
+          所以 fused 与 compile 版不是逐位相同，与 eager 版逐位相同；
+        - 反向是手写伴随，与 autograd 的公式一致，只有浮点求和顺序不同（相对误差 1e-13 级，见 test_a8_fused.py）；
+          没有原子加，同一输入两次逐位相同；对输入参数与初始状态（若它们 requires_grad）都求导；
+        - 不依赖 compile()，没有编译 / 捕获的等待（Triton 核第一次调用时编译一次，约 10～20 秒，可被 Triton 缓存）；
+        - 只支持 CUDA、float64 rig、split_by_length=False；其他情况、dt ≤ 0、T = 0 时直接调用普通 rollout；
+        - state 为 None 时用 initial_state(B)；state.in_cache 为 None 时在核外用第一帧参数初始化（与 _frame 相同）。
+        显存：求导时每帧保存一份状态快照（B × 约 47 KB / 帧），反向核另需每个批元素约 120 KB 的工作区。
+        """
+        T, B, P = params_seq.shape
+        st = state if state is not None else self.initial_state(B)
+        if (T == 0 or not (dt > 0.0) or self.device.type != 'cuda' or not params_seq.is_cuda or self.dtype != torch.float64
+                or self.split_by_length):
+            return self._rollout_plain(params_seq, st, dt)
+        from . import _kernels_physics as K
+        if self._fused_plan is None:
+            self._fused_plan = K.Plan(self)
+        plan = self._fused_plan
+        io = params_seq.dtype
+        x = params_seq.to(self.dtype)
+        sched, remain, resolved, phys_dt = self._schedule_T(st, T, dt)
+        ic = st.in_cache
+        if ic is None:
+            ic = self._g_q(self._r(x[0]))   # 与 _frame 里 in_cache 为 None 时相同
+        S0 = plan.pack(st, ic)
+        out, S = K.FusedRollout.apply(plan, plan.schedule(sched), phys_dt, x, S0)
+        (px, py, vx, vy, gx, gy), cur, prev, ic2 = plan.unpack(S)
+        return PhysicsState(px, py, vx, vy, gx, gy, cur, prev, ic2, remain, resolved), out.to(io)
+
+    def _rollout_plain(self, params_seq, st, dt):
+        outs = []
+        for t in range(params_seq.shape[0]):
+            st, o = self.step(st, params_seq[t], dt)
+            outs.append(o)
+        return st, torch.stack(outs) if outs else params_seq.clone()
+
+    def graph_clear(self):
+        """丢掉所有缓存的图实例（释放它们的私有显存池；之后可 torch.cuda.empty_cache()）。"""
+        self._graphs.clear()
+
+    def _graph_get(self, key, ins):
+        lst = self._graphs.pop(key, None)
+        if lst is None:
+            lst = []
+        self._graphs[key] = lst   # 移到末尾（最近使用）
+        for g in lst:
+            if g.free():
+                return g
+        total = sum(len(v) for v in self._graphs.values())
+        while total >= self.graph_max_instances:
+            # 从最久未用的键里丢一个空闲实例
+            victim = None
+            for k, v in self._graphs.items():
+                for i, gg in enumerate(v):
+                    if gg.free():
+                        victim = (k, i)
+                        break
+                if victim:
+                    break
+            if victim is None:
+                return None
+            k, i = victim
+            self._graphs[k].pop(i)
+            if not self._graphs[k] and k != key:
+                del self._graphs[k]
+            total -= 1
+        g = _PhysGraph(self, key, ins, warmup=0 if lst else 2)
+        self.graph_stats['captures'] += 1
+        lst.append(g)
+        return g
+
     # ------------------------------------------------------------ 内部
 
     def _r(self, x):
@@ -575,7 +788,7 @@ class PhysicsRig:
         """各 setting 的 totalTranslation（已旋转）与 totalAngle。[B, R]。"""
         B = C.shape[0]
         R, K = len(lv.rigs), lv.K
-        v = C[:, lv.in_q]
+        v = lv.g_in(C)
         v = torch.cat([v, v.new_zeros(B, 1)], 1)
         # normalizeParameterValue
         v = torch.where(lv.n_max < v, lv.n_max, v)
@@ -591,7 +804,7 @@ class PhysicsRig:
         r0 = pv * r_mid + lv.m_norm
         res = torch.where(pv > 0, rp, torch.where(pv < 0, rn, r0))
         c = (res * lv.in_sw[:, 0]) * lv.in_sw[:, 1]          # isInverted ? result : −result，再 × weight
-        c = c[:, lv.in_slot].view(B, R, K, 1) * lv.in_type     # [B, R, K, 3]
+        c = lv.g_slot(c).view(B, R, K, 1) * lv.in_type     # [B, R, K, 3]
         tot = c[:, :, 0]
         for k in range(1, K):                                  # 与 Framework 相同的顺序逐个累加
             tot = tot + c[:, :, k]
@@ -680,14 +893,12 @@ class PhysicsRig:
             return npx.new_zeros(npx.shape[0], 0)
         B = npx.shape[0]
         fx, fy = npx.reshape(B, -1), npy.reshape(B, -1)
-        i = lv.out_flat
-        x1, y1 = fx[:, i], fy[:, i]
-        x0, y0 = fx[:, i - 1], fy[:, i - 1]
+        x1, y1 = lv.g_o1(fx), lv.g_o1(fy)
+        x0, y0 = lv.g_o0(fx), lv.g_o0(fy)
         tx, ty = x1 - x0, y1 - y0
-        im2 = torch.where(lv.out_parent, i - 2, i - 1)   # v < 2 时这一项不用（换成 −gravity）
         gx_, gy_ = -self.opt_gravity[0], -self.opt_gravity[1]
-        pxp = torch.where(lv.out_parent, x0 - fx[:, im2], torch.full_like(x0, gx_))
-        pyp = torch.where(lv.out_parent, y0 - fy[:, im2], torch.full_like(y0, gy_))
+        pxp = torch.where(lv.out_parent, x0 - lv.g_o2(fx), torch.full_like(x0, gx_))   # g_o2：v < 2 时这一项不用（换成 −gravity）
+        pyp = torch.where(lv.out_parent, y0 - lv.g_o2(fy), torch.full_like(y0, gy_))
         angle = direction_to_radian(pxp, pyp, tx, ty)
         t = lv.out_type
         val = torch.where(t == 0, tx, torch.where(t == 1, ty, angle))
@@ -696,9 +907,9 @@ class PhysicsRig:
     def _apply_rounds(self, rounds, target, vals):
         """updateOutputParameterValue：× scale、夹到目标参数范围、按 weight 与目标当前值混合，写回（float32）。"""
         for rd in rounds:
-            v = vals[:, rd['src']] * rd['scale']
+            v = rd['g_src'](vals) * rd['scale']
             v = torch.where(v < rd['vmin'], rd['vmin'], torch.where(v > rd['vmax'], rd['vmax'], v))
-            base = target[:, rd['dst']]
+            base = rd['g_dst'](target)
             v = torch.where(rd['full'], v, base * (1.0 - rd['w']) + v * rd['w'])
             target = target.index_copy(1, rd['dst'], self._r(v))
         return target
@@ -713,5 +924,130 @@ class PhysicsRig:
     def _interpolate(self, params, prev, cur, alpha):
         """interpolate(model, weight)：prev·(1−α) + cur·α 写入参数（在物理输出参数的紧凑空间里按轮写，最后写回）。"""
         vals = prev * (1.0 - alpha) + cur * alpha
-        tgt = self._apply_rounds(self.interp_rounds, params[:, self.output_param_index], vals)
+        tgt = self._apply_rounds(self.interp_rounds, self._g_outp(params), vals)
         return params.index_copy(1, self.output_param_index, tgt)
+
+
+# ---------------------------------------------------------------- CUDA graph 快速路径（A8）
+
+class _PhysGraph:
+    """graphed_rollout 的一个图实例：静态输入 → T 帧前向（求导时还有一张反向图）→ 静态输出。
+
+    输入 / 输出的排列：[params_seq, px×n, py×n, vx×n, vy×n, gx×n, gy×n, cur, prev, in_cache]（输出第 0 个是 [T, B, P] 的结果）。"""
+
+    def __init__(self, rig: PhysicsRig, key, ins, warmup: int = 2):
+        T, B, dtype, sched, phys_dt, grad, mask, _ = key
+        self.grad = grad
+        self.gen = 0            # 每次前向重放 +1（反向时核对，防止用被覆盖的中间量）
+        self.bwd_gen = -1       # 最近一次反向对应的 gen（一次前向只能反向一次）
+        self.busy = False       # 求导实例：前向之后、反向之前为 True
+        self._node = None       # 上一次前向的 autograd 节点（弱引用；节点没了说明这次前向的图已被丢弃）
+        # 调度张量（常量，图里按地址引用，这里持有引用）
+        self.sched_t = [rig._sched(list(ws), alpha) for ws, alpha, _ in sched]
+        n_frames = [(len(ws), resolved) for ws, _, resolved in sched]
+        fn = rig._frame_c or rig._frame
+        n = len(rig.levels)
+
+        def f(*a):
+            x, s = a[0], a[1:]
+            px, py, vx, vy, gx, gy = (list(s[i * n:(i + 1) * n]) for i in range(6))
+            cur, prev, ic = s[6 * n], s[6 * n + 1], s[6 * n + 2]
+            outs = []
+            for t, ((ns, resolved), (wt, at)) in enumerate(zip(n_frames, self.sched_t)):
+                o, ic, cur, prev, px, py, vx, vy, gx, gy = fn(x[t], ic, cur, prev, px, py, vx, vy, gx, gy, wt, at, ns, resolved, phys_dt)
+                outs.append(o)
+            res = [torch.stack(outs), *px, *py, *vx, *vy, *gx, *gy, cur, prev, ic]
+            # 没有子步的帧会把输入原样传出：与静态输入共用存储的输出要复制一份（否则重放时互相覆盖）
+            ptrs = {t.untyped_storage().data_ptr() for t in a}
+            return [r.clone() if r.untyped_storage().data_ptr() in ptrs else r for r in res]
+
+        self.s_in = [t.detach().clone() for t in ins]
+        if grad:
+            for t, m in zip(self.s_in, mask):
+                t.requires_grad_(m)
+        self.in_rg = [i for i, t in enumerate(self.s_in) if t.requires_grad]
+        ctx = torch.enable_grad() if grad else torch.no_grad()
+        cs = torch.cuda.current_stream()
+        if warmup:
+            s = torch.cuda.Stream()
+            s.wait_stream(cs)
+            with torch.cuda.stream(s), ctx:
+                for _ in range(warmup):
+                    o = f(*self.s_in)
+                    if grad:
+                        oo = [t for t in o if t.requires_grad]
+                        torch.autograd.grad(oo, [self.s_in[i] for i in self.in_rg], [torch.ones_like(t) for t in oo],
+                                            allow_unused=True)
+                    del o
+            cs.wait_stream(s)
+        self.pool = torch.cuda.graph_pool_handle()
+        self.fwd = torch.cuda.CUDAGraph()
+        with ctx, torch.cuda.graph(self.fwd, pool=self.pool):
+            self.s_out = f(*self.s_in)
+        self.out_rg = [i for i, t in enumerate(self.s_out) if t.requires_grad] if grad else []
+        if grad:
+            self.s_gout = [torch.zeros_like(self.s_out[i]) for i in self.out_rg]
+            self.bwd = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self.bwd, pool=self.pool):
+                # 与 make_graphed_callables 相同，不保留图：保存的中间量在捕获后归还给本实例的私有池，
+                # 前向重放时重新写入（编译版的反向还会就地复用这些缓冲，所以一次前向只能反向一次）
+                gi = torch.autograd.grad([self.s_out[i] for i in self.out_rg], [self.s_in[i] for i in self.in_rg],
+                                         self.s_gout, allow_unused=True)
+            self.s_gin = list(gi)
+
+    def free(self) -> bool:
+        if not self.busy:
+            return True
+        return self._node is not None and self._node() is None
+
+    def run(self, ins):
+        if not self.grad:
+            torch._foreach_copy_(self.s_in, [t.detach() for t in ins])
+            self.fwd.replay()
+            self.gen += 1
+            return _clone_all(self.s_out)
+        outs = _PhysGraphFn.apply(self, *ins)
+        node = next((o.grad_fn for o in outs if o.grad_fn is not None), None)
+        if node is not None:
+            import weakref
+            self._node = weakref.ref(node)
+            self.busy = True
+        return outs
+
+
+def _clone_all(ts):
+    out = [torch.empty_like(t) for t in ts]
+    torch._foreach_copy_(out, ts)
+    return out
+
+
+class _PhysGraphFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, g: _PhysGraph, *ins):
+        torch._foreach_copy_(g.s_in, list(ins))
+        g.fwd.replay()
+        g.gen += 1
+        ctx.g, ctx.gen = g, g.gen
+        outs = _clone_all(g.s_out)
+        nd = [o for i, o in enumerate(outs) if i not in g.out_rg]
+        if nd:
+            ctx.mark_non_differentiable(*nd)
+        return tuple(outs)
+
+    @staticmethod
+    def backward(ctx, *gouts):
+        g = ctx.g
+        if g.gen != ctx.gen or g.bwd_gen == ctx.gen:
+            raise RuntimeError('graphed_rollout：这一段的中间量已被覆盖（同一图实例又做了前向，或这一段已经反向过一次），'
+                               '不能再反向；需要 retain_graph 多次反向时请用 rollout')
+        g.bwd_gen = ctx.gen
+        src = [gouts[i] if gouts[i] is not None else torch.zeros_like(g.s_gout[k]) for k, i in enumerate(g.out_rg)]
+        torch._foreach_copy_(g.s_gout, src)
+        g.bwd.replay()
+        g.busy = False
+        grads = [None] * len(g.s_in)
+        live = [(i, t) for i, t in zip(g.in_rg, g.s_gin) if t is not None]
+        cl = _clone_all([t for _, t in live])
+        for (i, _), c in zip(live, cl):
+            grads[i] = c
+        return (None, *grads)

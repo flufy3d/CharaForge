@@ -18,6 +18,10 @@ st = rig.initial_state(B)             # = CubismPhysics.create() 之后（runtim
 st, out = rig.stabilize(st, params)   # layer.physics.stabilize = true 时（Cubism stabilization）
 st, out = rig.step(st, params, dt=1/60)   # 规范 e：params [B, P] 物理之前的参数 → out [B, P] 物理之后
 st, outs = rig.rollout(params_seq)    # [T, B, P] 逐帧推进；checkpoint=True 逐帧激活检查点
+# A8 的两条可选快速路径（与 rollout 同语义，见 §9）：
+st, outs = rig.fused_rollout(params_seq, st)     # Triton 融合核：整段前向一个核、反向一个核（推荐）
+st, outs = rig.graphed_rollout(params_seq, st)   # CUDA graph 重放整段（compile 版的逐帧函数）
+rig.auto_fused = True                 # 之后 rollout() 自动走 fused_rollout（auto_graph 同理）
 ```
 
 - `params` 是**全部**模型参数（P = 509，顺序即 Core 参数索引），也就是规范 a～d 之后、e 之前的值；
@@ -173,3 +177,68 @@ tools/.venv/bin/python -I tools/gpu/scripts/a2_bench.py --mode eager,compile,com
 - 截断 BPTT：任意时刻 `st = st.detach()`。
 - 梯度的局限见 §3 第 7 条：吸附阈值与 ±π 折回处的跳变没有梯度；参数被夹在范围端点时梯度为 0。
 - `step` 的 `dt` 改变时调度（每帧子步数）会变；compile 版本对每种子步数各编译一次。
+
+> **A8 更新**：拟合器改用 `fused_rollout`（或设 `rig.auto_fused = True`）即可，见 §9.4。
+
+## 9. 提速（A8）：fused_rollout 与 graphed_rollout
+
+两条可选的快速路径，都与 `rollout(params_seq, state, dt)` 同语义（返回 `(最终状态, [T, B, P])`，可反向，可以接在任意状态之后、
+任意时刻 `detach`），缺省行为不变。数字见 `perf.md`「物理（A8）」。
+
+### 9.1 `rig.fused_rollout(params_seq, state=None, dt=1/60)`（推荐）
+
+`l2d/_kernels_physics.py`：整段 T 帧的前向是**一个** Triton 核，反向也是**一个**核，每个批元素一个 CTA
+（setting 并行、链内逐粒子顺序，层与层之间 `__syncthreads`）。不需要 `compile()`，第一次调用时 Triton 编译约 10～20 秒（有磁盘缓存）。
+
+- **前向与 eager（未 compile）的 `rollout` / `step` 逐位相同**：同样的运算顺序，关闭 FMA 合并，IEEE 除法 / 开方，
+  「张量 / Python 标量」按 PyTorch 的做法乘倒数，float32 舍入在同样的位置。sin / cos / atan2 用 **PyTorch 所用 CUDA 版本的 libdevice**
+  （`/usr/local/cuda-<torch.version.cuda>/nvvm/libdevice`，找不到时依次试 `CUDA_HOME`、`/usr/local/cuda`）：Triton 自带的 libdevice
+  版本不同，atan2 有约 0.3% 的输入差 1 ulp，链是混沌的，会被放大。找不到 CUDA 的 libdevice 时退回 Triton 自带的（`_kernels_physics.LIBDEVICE` 为 None），
+  前向不再逐位相同（误差量级同 compile 版）。
+- compile 版本身与 eager 差 1e-16 级（FMA 合并，混沌放大后见 §5 的 compile 行），所以 **fused 与 compile 版不逐位相同，与 eager 版逐位相同**。
+- 反向是手写伴随：求导时前向顺带把反向要用的中间量记成「磁带」（每帧开始时的状态、每个子步后的粒子状态、各层开始时的 C、各层输出、
+  每个 setting 的旋转 / 重力 / 空气阻力中间量、每个粒子的单位向量 / 长度 / 吸附标志），反向核不重算前向。
+  公式与 eager autograd 的各个算子一致（atan2 在 (0,0)、normalize 长度 0 处梯度为 0，where / 夹取 / 吸附按所在分支，float32 舍入直通，
+  输入恰在中点取两侧斜率平均），只有求和顺序不同：与 eager autograd 的相对差 ≤ 3e-14（200 帧不截断也一样）。
+- **确定性**：所有累加按固定顺序（预先建好的逆表），没有原子加，同一输入两次逐位相同（前向与梯度）。
+- 对输入参数、以及对传入状态的每个分量（若 `requires_grad`）都求导，所以不截断的 BPTT、跨窗口的梯度都对。
+- 支持任意 dt（每帧 0～n 个子步）、`initial_state(resolved=False)`、`in_cache` 为 None 的全新状态、`emulate_f32=False`、float32 输入输出。
+  只支持 CUDA、float64 rig、`split_by_length=False`；其他情况（以及 dt ≤ 0、T = 0）直接走普通 `rollout`。
+- 显存：求导时快照 + 磁带每帧每个批元素约 150 KB（dt = 1/60），T=200、B=16 峰值约 0.5 GB；不求导时不记。
+
+### 9.2 `rig.graphed_rollout(params_seq, state=None, dt=1/60)`
+
+把整段 T 帧逐帧调用 `_frame`（`compile()` 之后是编译版）的全部内核捕获成一张 CUDA graph，求导时再捕获一张反向图，
+每次调用只有一次前向重放、一次反向重放（另有几次拷贝）。**与同一 rig 的 `rollout` 前向、梯度都逐位相同**（compile 与否各自对应）。
+
+- 图按 (T, B, 每帧的子步调度, 哪些输入求导, 是否编译) 缓存。每个图实例的中间量在自己的静态显存池里：同一个键上一次前向的反向还没跑
+  又做前向（拟合器把 13 个窗口都前向完再一起反向）时，自动再捕获一个实例；所有键合计最多 `rig.graph_max_instances`（缺省 64）个，
+  超出且没有空闲实例时退回普通 `rollout`（结果相同）。`rig.graph_clear()` 释放全部实例；`rig.graph_stats` 是捕获 / 重放 / 退回次数。
+- 一次前向只能反向一次（compile 版的反向会就地复用保存的缓冲）。需要 `retain_graph` 多次反向时用 `rollout`；误用会报错，不会给出错误梯度。
+- 第一次遇到某个键要预热 + 捕获（compile 版 T=24 约 0.3～1 秒）。未编译的 rig 也能用，但每帧上千个内核，图很大（主机内存大），不推荐。
+- 比 `fused_rollout` 慢（GPU 时间还是 compile 版的那些内核），优点是与 compile 版逐位相同。
+
+### 9.3 对原路径的改动（缺省行为不变）
+
+- gather（`x[:, idx]`）换成 `_Index` / `_Gather`：前向就是 `x[:, idx]`，反向按预先建好的逆表固定顺序求和。原来 compile 版的反向
+  在这里用 float64 原子加，下标重复时（同一参数被多个 setting 读、同一粒子被多个输出用）求和顺序随调度变，**梯度低位逐次不同**；
+  现在 eager / compile 的梯度都逐次相同。前向不变：a2_compare（eager / compile）11 个序列的误差与改动前逐项相同。
+- `compile()` 把 dynamo 的重编译上限放宽到 64。原来缺省 8 份：每种 (B, 是否求导, in_cache 是否为 None …) 各编一份，
+  用到 3 种 B 就会超，之后**静默退回 eager**（慢约 20 倍，数值也变成 eager 的）。改动前的基准里 B=16 就是这样（`perf.md`）。
+- `step` 的时间调度提成 `_advance`（同样的 Python double 运算）。
+
+### 9.4 给拟合器（A5）的接入说明
+
+只需在建好 rig 之后加一行（`fit/rig.py` 或 `a5_fit.py`，A8 没有改 `fit/`）：
+
+```python
+rig.phys.auto_fused = True      # Traj.physics / physics_batch 里的 ph.rollout(...) 全部自动走 fused_rollout
+# phys_compile 可以去掉：fused 不用 torch.compile（留着也无妨，fused 不走编译版）
+```
+
+- 预热（no_grad、90 帧）也走融合核，不记磁带。24 帧一窗、窗间 `st.detach()` 的写法不用改；全部窗口前向完再一起反向也没问题
+  （每段的磁带挂在各自的 autograd 节点上，互不覆盖）。
+- 前向结果与 eager 版逐位相同，与 compile 版差 1e-16 级再经混沌放大（§5：compile 行与 eager 行的差别），所以**换路径后的拟合结果
+  与之前的 compile 版不会逐位相同**，但同一路径跑两次逐位相同；`_canon_grads` 可以保留。
+- 想与之前的 compile 结果逐位一致时用 `rig.phys.auto_graph = True`（保留 `phys_compile=True`），速度约为 fused 的一半。
+- 物理现在几乎与 B 无关（B ≤ 60 时每个批元素一个 SM），多图层 / 多单元摞成一批是免费的。

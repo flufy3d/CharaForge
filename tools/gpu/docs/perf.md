@@ -205,3 +205,80 @@ $P tools/gpu/scripts/a7_gradcheck.py --json ~/cf-scratch/a7/gradcheck.json
 $P -m unittest discover -s tools/gpu/tests -p "test_a[13]_*.py"
 $P tools/gpu/scripts/a7_fast_run.py -- tools/gpu/tests/test_a3_raster.py
 ```
+
+# 物理提速（A8）
+
+写于 2026-11-06。对象：A2 物理（`l2d/physics.py`），新增 `l2d/_kernels_physics.py`。接口与缺省行为不变，新路径都是可选的
+（`rig.fused_rollout` / `rig.graphed_rollout`，或 `rig.auto_fused = True`）。接口与语义见 `physics.md` §9。
+
+## 结论
+
+拟合器口径（预热 90 帧 no_grad 后，T 帧按 24 帧一窗截断 BPTT，前向 + 反向，float64，loss = 随机权重 × 物理输出参数之和）。
+每格 7 次的中位数，两轮（改动前后在同一轮里接连测）。测量时另有拟合代理（A5）在用 GPU，括号里是 nvidia-smi 整卡占用；
+「改动前」是旧代码副本（`--l2d ~/cf-scratch/a8/orig`），compile 版，重编译上限同样放宽到 64（否则旧代码 B=16 会静默退回 eager）。
+
+| T | B | 改动前 compile | 改动后 compile | graphed | **fused** | fused 提速（对改动前） | 显存峰值 compile / graphed / fused |
+|---|---|---|---|---|---|---|---|
+| 24 | 1 | 86.3 / 66.5 ms | 46.6 / 69.0 | 18.2 / 24.4 | **9.2 / 14.1 ms** | **9.4× / 4.7×** | 3 / 1 / 4 MiB |
+| 24 | 4 | 87.9 / 71.9 | 55.8 / 62.9 | 16.2 / 17.6 | **9.9 / 11.1** | 8.9× / 6.5× | 8 / 2 / 16 MiB |
+| 24 | 16 | 73.3 / 67.3 | 63.4 / 66.2 | 17.5 / 18.0 | **10.4 / 11.2** | 7.0× / 6.0× | 29 / 9 / 66 MiB |
+| 200 | 1 | 522 / 641 | 569 / 572 | 159 / 161 | **73 / 72** | 7.1× / 8.9× | 28 / 5 / 35 MiB |
+| 200 | 4 | 524 / 583 | 515 / 483 | 140 / 139 | **72 / 73** | 7.3× / 8.0× | 68 / 20 / 132 MiB |
+| 200 | 16 | 533 / 622 | 555 / 495 | 143 / 142 | **76 / 75** | 7.0× / 8.3× | 227 / 77 / 522 MiB |
+
+GPU 整卡占用：第一轮 0～97%，第二轮 25～98%（A5 在跑）。较空闲时（同日早些时候）改动前 T=24、B=1 是 49.5 ms，按它算 fused 也有 **5.4×**。
+fused 的拆分（T=24、B=1）：前向 5.1 ms、反向 4.1 ms；T=200：前向 40 ms、反向 33 ms。显存是该次调用的峰值增量
+（fused 的大头是反向用的磁带，每帧每个批元素约 150 KB；graphed 另有每个图实例的私有池，见 reserved）。
+原始数据：`~/cf-scratch/a8/bench_{before,after}_{1,2}.json`、`~/cf-scratch/a8/logs/final.log`。
+
+## profile 结论（改动前，compile 版，T=24、B=1，`a8_bench.py profile`）
+
+- 每帧约 150 个 GPU 内核（前向约 50、反向约 100），24 帧 3468 次 `cuLaunchKernel`；每帧一次编译图调用加一次编译反向调用，
+  dynamo 守卫 + AOTAutograd 包装的 CPU 开销约 1～1.5 ms / 帧（墙钟 ~2 ms / 帧 中大部分）。整段没有 GPU→CPU 同步（只有计时用的同步）。
+- GPU 时间约 790 µs / 帧（前向 265、反向 520）。大头是每层一个的「粒子链」融合核（30～100 µs 一个，B=1 时只有几个线程在跑），
+  耗时几乎与 B 无关。
+- 反向里 gather 的转置用 float64 `atomic_add`：下标有重复，求和顺序随调度变，**梯度逐次不同**（已修，见 physics.md §9.3）。
+- dynamo 重编译上限 8：每种 (B, 是否求导, in_cache 是否为 None …) 各一份，用到第 3 种 B 就超，之后静默退回 eager（已放宽到 64）。
+
+所以只把每帧捕获成 CUDA graph（graphed）只能去掉 CPU 开销，剩下 GPU 时间，约 2.5～3.5×。fused 把整段写成两个核：
+
+- **本卡的 float64 是 1/64 速率**，实测（`~/cf-scratch/a8/t_lat*.py`，单个 warp）：每条 fp64 指令约 25 ns，与有无依赖无关
+  （两条独立链也是 2 倍时间）；IEEE 除法约 240 ns、开方 250 ns、sin 510 ns、atan2 1130 ns；一个 SM 上最多约 4 个 warp 并行不减速。
+  所以融合核的耗时 ≈ 单个线程里 fp64 指令条数 × 25 ns，与 B 无关（B ≤ 60 时每个批元素一个 SM）。
+- fused 前向约 210 µs / 帧（globaltimer 分段：4 层的粒子链 30 / 41 / 31 / 19 µs，输出 7 / 17 / 4 / 4 µs，其余 < 10 µs）。
+  每个粒子约 95 条 fp64 指令（其中 4 次除法、1 次开方），每层的 setting 级（8 次 sin / cos / atan2）约 12 µs。
+- 反向用前向记下的磁带，不重算前向，约 170 µs / 帧。
+
+## 还能做的（没做）
+
+- 前向：把速度更新（每粒子 2 次除法）和 `v·d`、`(f·d)·d` 移出链循环、改成按 (setting, 粒子) 并行的阶段，链内每粒子约 95 → 60 条指令；
+  setting 级的 sin / cos 对用 [R, 2] 摊到两倍的线程上。估计前向再快 20～30%（仍要逐位相同，运算本身不能改）。
+- B=1 时只用了一个 SM：把一层的 setting 分到几个 CTA、层间用全局栅栏，可再快约 2 倍，但实现与正确性风险都大。
+- 拟合器把多个单元摞成一批：物理几乎与 B 无关。
+
+## 复现
+
+```bash
+cd ~/CharaForge && export PATH=~/.local/bin:$PATH CUDA_HOME=/usr/local/cuda-13.0
+P="tools/.venv/bin/python -I"
+$P tools/gpu/scripts/a8_bench.py bench --mode compile,graphed,fused --T 24,200 --B 1,4,16      # 改动后
+$P tools/gpu/scripts/a8_bench.py bench --mode compile --l2d ~/cf-scratch/a8/orig                 # 改动前（旧 l2d 副本）
+$P tools/gpu/scripts/a8_bench.py profile --mode compile --T 24 --B 1
+# 正确性
+$P tools/gpu/scripts/a8_compare.py --path fused --dtype f64,f32io            # 11 个序列；与 eager 逐位比较（原路径差 0）
+$P tools/gpu/scripts/a8_compare.py --path graphed --dtype f64,f32io [--compile]
+$P tools/gpu/tests/test_a8_fused.py      # 与 eager 的前向 / 梯度 / 确定性 + test_a2_grad 29 项走 fused
+$P tools/gpu/tests/test_a8_graph.py [--compile]
+$P tools/gpu/scripts/a2_compare.py --dtype f64,f32io [--compile]; $P tools/gpu/tests/test_a2_grad.py
+```
+
+## 正确性（A8）
+
+- **a2_compare 口径对拍**（`a8_compare.py`，11 个序列，f64 与 f32io）：fused（24 帧一窗；以及 1 帧一窗）、graphed（eager / compile）
+  全部通过，最大误差与原路径逐项相同（f64：sweep 3.0e-8 最大，s30_full 9.3e-10，step 4.7e-10，其余 ≤ 4e-15 或 0；
+  compile 版 walk_dt50 1.5e-7、walk_dt144 1.2e-7，与改动前的 compile 相同）；与原路径（同一 rig 逐帧 step）的差：全部序列、全部帧 **0**，rig 输出差 0。
+- 原路径本身：`a2_compare.py`（eager / compile）11 个序列的数字与改动前逐项相同；`test_a2_physics.py` 3 项通过。
+- **梯度**：`test_a2_grad.py` 原路径 29/29、改走 fused 也 29/29（跨不可导点那 1 项照旧单列不计；各项相对误差与原路径相同到显示位数）。
+  fused 与 eager autograd 直接比较：对输入 ≤ 2.4e-15、对初始状态各分量 ≤ 2.6e-14（含 200 帧不截断、dt = 1/50、1/144、全新状态、
+  resolved=False、emulate_f32=False）。graphed 与同一 rig 的 rollout：梯度逐位相同（eager 与 compile 两种）。
+- **确定性**：fused、graphed、以及原路径（eager / compile）同一输入跑两次，前向与梯度都逐位相同。
