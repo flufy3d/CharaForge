@@ -25,6 +25,8 @@ from .render import raster_layer, compose_one
 from .vts import INPUT_DIMS, Vts
 
 WARMUP = 90
+SHAPE_SWITCHES = ("Clothes2",)  # 改变外形的开关（体型 / Q 版），见 Traj.sw_gain
+POSE_INPUTS = ("FaceAngleX", "FaceAngleY", "FaceAngleZ", "BodyX", "BodyY", "BodyZ")  # 小实例姿态先验（mag_pose）管的面捕输入
 POSE_OUT = ["ParamAngleX", "ParamAngleY", "ParamAngleZ", "ParamBodyAngleX", "ParamBodyAngleY", "ParamBodyAngleZ"]
 # 次级物理按发束分组（同 tools/fit/src/model.ts 的 HAIR_GROUPS）
 HAIR_GROUPS = [
@@ -76,6 +78,8 @@ def second_diff(x: torch.Tensor, t: list[int]) -> torch.Tensor:
 
 
 class Traj:
+    POSE_SD = 8.0  # 小实例姿态先验的尺度（面捕输入单位 / 姿态参数单位，都是「度」量级）
+
     def __init__(self, rig, plan: LayerPlan, vts: Vts, smooth_c: float = 0.15, fit_inputs: list[str] | None = None, device="cuda"):
         self.rig, self.plan, self.vts, self.c = rig, plan, vts, smooth_c
         self.dev = torch.device(device)
@@ -96,8 +100,17 @@ class Traj:
         # 叶张量在归一化坐标里（Adam 每组一个学习率）：物理量 = z × 单位
         self.in_unit = self.in_tau
         self.z_in = (neu / self.in_unit)[None].repeat(len(self.nodes), 1).clone().requires_grad_(True)
+        self.pose_cols = [i for i, k in enumerate(self.inputs_fit) if k in POSE_INPUTS]
+        # 变换先验（粗配准成功时由 register_small 设置）：中心 [Nk, 4]、单位 [4]、逐关键帧权重 [Nk]
+        self.tf_center, self.tf_sd, self.tf_w = None, None, None
         self.tf_unit = torch.tensor([1.0, 1.0, 0.01, 0.5], **dd)  # 像素、像素、ln scale、度
         self.z_tf = torch.zeros(len(self.keys), 4, **dd).requires_grad_(True)
+        # 体型开关（Clothes2 切到 Q 版等改变外形的开关）连带的尺度变化：每个这样的开关一个 ln s 增益，按该开关自己的斜坡加到变换上
+        # （tf_at）。原视频切 Q 版时往往同时放大角色（s38.side：Q 版的头与切换前的头差不多大，而模型的 Q 版头小一圈），
+        # 变换关键帧 24 帧一个、线性插值，跟不上切换的几帧；增益随开关一起平移，开关估计换候选时尺度变化跟着走。
+        self.sw_gain_idx = [i for i, sw in enumerate(plan.switches) if sw["param"] in SHAPE_SWITCHES and sw["to"] != sw["from"]]
+        self.z_swg = torch.zeros(len(self.sw_gain_idx), **dd).requires_grad_(True)
+        self._init_sw_gain()
         # postPhysics 偏移：姿态输出（每个参数一个自由度）+ 次级物理分组
         # 姿态输出 + 物理写入的全部参数，各一个自由度（同 fit4 逐帧精修的「全部可见参数 postPhysics add」，这里带时间正则联合求解）
         outs = [rig.param_ids[i] for i in rig.phys.output_params]
@@ -113,6 +126,7 @@ class Traj:
                 gid.append(j)
         self.post_pid = torch.tensor(pid, device=self.dev)
         self.post_gid = torch.tensor(gid, device=self.dev)
+        self.pose_post_cols = [j for j, (g, _) in enumerate(self.post_groups) if g in POSE_OUT]
         # 前倾：规划固定（小实例为 0）时不拟合
         self.lean_free = "lean" not in plan.fixed
         self.consts = {
@@ -132,6 +146,7 @@ class Traj:
         # 小实例的先验加权：眼距（shots 眼睛采样的中位数，720p）< 90px 时 small_k = (90 / 眼距)²，最多 16
         ed = float(np.median([np.hypot(*(e[1] - e[0])) for _, e, _ in plan.eye_init])) if plan.eye_init else 200.0
         self.small_k = float(min(16.0, max(1.0, (90.0 / max(ed, 1.0)) ** 2)))
+        self.tiny_k = max(0.0, self.small_k - 4.0)  # 姿态与变换先验（mag_pose、mag_tf）的权重，只对眼距 < 45px 的实例有分量
         # 锚点：显示帧 f 的画面 = 帧 g 的求值
         self.anchor_frames = [plan.hold(f) for f, _, _ in plan.anchors]
         self.anchor_xy = torch.tensor(np.stack([e for _, e, _ in plan.anchors]), **dd) if plan.anchors else None
@@ -155,6 +170,48 @@ class Traj:
     def post(self) -> torch.Tensor:
         return self.z_post * self.post_unit
 
+    def eye_dist(self, param: str, values: list[float]) -> list[float]:
+        """缺省参数下把 param 设成各值时的画布眼距（虹膜中心距离）。"""
+        r = self.rig
+        with torch.no_grad():
+            P = r.tdef[None].repeat(len(values), 1).clone()
+            P[:, r.idx(param)] = torch.tensor(values, device=self.dev, dtype=P.dtype)
+            ic = r.iris_centers(r.deform(P).verts).double()
+            return (ic[:, 1] - ic[:, 0]).norm(dim=-1).tolist()
+
+    def _init_sw_gain(self) -> None:
+        """体型开关尺度增益的初值：让画面上的眼距在切换前后连续（shots 的眼睛锚点在切换前后基本连续）
+        = ln(切换前 / 切换后 画布眼距)。本模型 Clothes2 0 → 1：眼距 339 → 299，初值 ln 1.13。之后由光流 / SSIM 阶段拟合。"""
+        with torch.no_grad():
+            for k, i in enumerate(self.sw_gain_idx):
+                sw = self.plan.switches[i]
+                d0, d1 = self.eye_dist(sw["param"], [float(sw["from"]), float(sw["to"])])
+                self.z_swg[k] = math.log(d0 / d1) / float(self.tf_unit[2])
+
+    def set_body(self, c2: float) -> None:
+        """换体型常量 Clothes2（粗配准的体型多假设用）：常量、以它为起点的 Clothes2 开关的 from、开关的尺度增益初值一起改。"""
+        old = self.clothes2
+        self.clothes2 = float(c2)
+        for sw in self.plan.switches:
+            if sw["param"] == "Clothes2" and abs(float(sw["from"]) - old) < 1e-6:
+                sw["from"] = float(c2)
+        self.sw_gain_idx = [i for i, sw in enumerate(self.plan.switches) if sw["param"] in SHAPE_SWITCHES and sw["to"] != sw["from"]]
+        with torch.no_grad():
+            self.z_swg = torch.zeros(len(self.sw_gain_idx), device=self.dev, dtype=torch.float64).requires_grad_(True)
+        self._init_sw_gain()
+
+    @property
+    def sw_gain(self) -> torch.Tensor:
+        return self.z_swg * self.tf_unit[2]
+
+    def shape_ramp(self, gs: list[int]) -> torch.Tensor:
+        """体型开关的斜坡（0 → 1，与 switch_value 同形）[len(gs), 开关数]。"""
+        rows = []
+        for i in self.sw_gain_idx:
+            sw = self.plan.switches[i]
+            rows.append([(switch_value(sw, g) - sw["from"]) / (sw["to"] - sw["from"]) for g in gs])
+        return torch.tensor(rows, device=self.dev, dtype=torch.float64).T.reshape(len(gs), len(self.sw_gain_idx))
+
     def set_tf(self, tf: torch.Tensor) -> None:
         with torch.no_grad():
             self.z_tf.copy_(tf / self.tf_unit)
@@ -163,7 +220,7 @@ class Traj:
     def param_groups(self, lr: dict) -> list[dict]:
         g = []
         add = lambda ps, key: g.append({"params": ps, "lr": lr[key], "name": key}) if lr.get(key, 0) > 0 else None
-        add([self.z_tf], "tf")
+        add([self.z_tf] + ([self.z_swg] if self.sw_gain_idx else []), "tf")
         add([self.z_in], "inputs")
         add([self.z_post], "post")
         if self.lean_free:
@@ -241,7 +298,11 @@ class Traj:
     def tf_at(self, gs: list[int]) -> torch.Tensor:
         """[len(gs), 4]（x, y, ln s, rot）。"""
         M = interp_matrix(self.keys, gs).to(self.dev, torch.float64)
-        return M @ self.tf
+        out = M @ self.tf
+        if self.sw_gain_idx:
+            z = torch.zeros(len(gs), device=self.dev, dtype=torch.float64)
+            out = out + torch.stack([z, z, self.shape_ramp(gs) @ self.sw_gain, z], 1)
+        return out
 
     def to_screen(self, tf: torch.Tensor, s: float = 1.0, gs: list[int] | None = None) -> torch.Tensor:
         """[N, 4] → [N, 2, 3] 画布像素 → 合成像素（规范第 2 条：R·diag(scale·scaleX, scale)；× 分辨率比例 s）。
@@ -312,6 +373,18 @@ class Traj:
             # 眼距几十像素的实例，光流 / SSIM 对表情、头部角度几乎没有约束，会漂到范围端点（s38.side 曾出现 ParamAngleY = 30，
             # 脸在头发里缩成一小块）。大实例 small_k = 1，这一项为 0。
             "mag_inputs": (((self.inputs - self.in_neutral) / (0.5 * (self.in_hi - self.in_lo))) ** 2).mean() * (self.small_k - 1.0),
+            # 小实例的姿态先验：头部与身体的面捕输入（FaceAngleX / Y / Z、BodyX / Y / Z）离中性值的偏差，以及 6 个姿态输出
+            # （ParamAngle*、ParamBodyAngle*）的 postPhysics 偏移，都以 POSE_SD 计。mag_inputs / mag_post 是十几维、上百维的均值，
+            # 落到单个姿态量上太弱：s38.side 曾漂到 FaceAngleX ≈ −28；只收住面捕输入时，漂移又转到 ParamAngleY 偏移（−21）。
+            # 眼距几十像素时画面对姿态几乎没有约束，收在中性值附近。权重 tiny_k = max(0, small_k − 4)：眼距 30px 时 5，
+            # 眼距 ≥ 45px 时为 0（s21.side 眼距 50px，姿态看得清、锚点可靠，加了反而变差）。
+            "mag_pose": ((((self.inputs[:, self.pose_cols] - self.in_neutral[self.pose_cols]) / self.POSE_SD) ** 2).mean()
+                         + ((self.post[:, self.pose_post_cols] / self.POSE_SD) ** 2).mean()) * self.tiny_k,
+            # 小实例的变换先验：粗配准成功的关键帧上，变换 (x, y, ln s, 旋转) 离配准结果的偏差（tf_sd 为单位，tf_w 为逐关键帧权重）。
+            # 光流 / SSIM 在眼距几十像素的实例上对尺度的约束很弱（s38.side 不加时拟合之后眼距 23px，配准约 30px），shots 的眼睛锚点
+            # 又偏几十像素，所以配准成功时用它取代锚点项（见 Fitter.register_small）。
+            "mag_tf": (((self.tf - self.tf_center) / self.tf_sd) ** 2 * self.tf_w[:, None]).sum() / self.tf_w.sum().clamp_min(1.0) * self.tiny_k
+            if self.tf_center is not None else self.tf.sum() * 0,
             "speed": (over ** 2).sum(),
         }
 
@@ -340,7 +413,7 @@ class Traj:
 
     # ------------------------------------------------------------------ 快照（多假设）
     def leaves(self) -> list[torch.Tensor]:
-        return [self.z_in, self.z_tf, self.z_post, *self.consts.values()]
+        return [self.z_in, self.z_tf, self.z_post, *self.consts.values(), self.z_swg]
 
     def snapshot(self) -> dict:
         return {"leaves": [x.detach().clone() for x in self.leaves()], "resample": self.resample,

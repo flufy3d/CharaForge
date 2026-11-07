@@ -70,7 +70,7 @@ class Stage:
     max_frames: int = 40         # 每次外层最多渲染的显示帧数（长镜头轮换子集）
 
 
-DEFAULT_REG = {"sd_inputs": 0.02, "sd_tf": 0.02, "sd_post": 0.3, "mag_post": 0.05, "mag_inputs": 0.05, "speed": 1.0}
+DEFAULT_REG = {"sd_inputs": 0.02, "sd_tf": 0.02, "sd_post": 0.3, "mag_post": 0.05, "mag_inputs": 0.05, "mag_pose": 0.05, "mag_tf": 0.05, "speed": 1.0}
 
 
 class Fitter:
@@ -157,6 +157,9 @@ class Fitter:
                 xy = e.mean(0) - sc * R @ (np.array([sx, 1.0]) * (cc.mean(0) - np.array([t.anchorX, t.anchorY])))
                 rows.append([xy[0], xy[1], math.log(sc), math.degrees(rot)])
             Y = np.array(rows)
+            if t.sw_gain_idx:  # 体型开关的尺度增益不属于关键帧（tf_at 另加），这里扣掉
+                with torch.no_grad():
+                    Y[:, 2] -= (t.shape_ramp(gs) @ t.sw_gain).cpu().numpy()
             A = interp_matrix(t.keys, gs).numpy()
             w = np.array([max(0.3, c_) for _, _, c_ in p.eye_init])
             n = len(t.keys)
@@ -168,12 +171,17 @@ class Fitter:
             t.set_tf(torch.tensor(X, device=t.dev, dtype=torch.float64))
 
     # ------------------------------------------------------------------ 数据项评估（不求导）
-    def score(self, frames: list[int], W=640, H=360, kind="ssim", sig=(16.0, 8.0), resample=None, reuse=None, wmask=None) -> float:
-        """frames 上的数据项（越小越好）：kind = ssim → Σ w (1 − SSIM)；blur → 粗尺度光度项。"""
+    def score(self, frames: list[int], W=640, H=360, kind="ssim", sig=(16.0, 8.0), resample=None, reuse=None, wmask=None,
+              bg_grey: bool = False) -> float:
+        """frames 上的数据项（越小越好）：kind = ssim → Σ w (1 − SSIM)；blur → 粗尺度光度项。
+        bg_grey：渲染合成到中灰底（而不是参考帧）、遮罩只用 wmask（不随渲染的 α 变）。比较「画出来的范围不同」的候选时用：
+        合成到参考帧上、遮罩随 α 变时，没画到的地方等于参考帧本身，画得越少越占便宜（见 estimate_switches）。"""
         s = W / 1280.0
         with torch.no_grad():
             comp, _, outa = self.render(frames, s, W, H, resample=resample, reuse=reuse)
             self._last_outa = outa
+            if bg_grey:
+                comp = torch.cat([comp[..., :3] + 0.5 * (1 - comp[..., 3:4]), torch.ones_like(comp[..., 3:4])], -1)
             ref, excl = self.refs.at(W, H, frames)
             ref, excl = torch.tensor(ref, device=self.dev), torch.tensor(excl, device=self.dev)
             w = torch.tensor([self.wf[f] for f in frames], device=self.dev)
@@ -410,6 +418,7 @@ class Fitter:
         return last
 
     _wnorm = 1.0
+    switch_mask = "intersect"  # 开关估计的数据区：intersect（两种状态都画到的地方）/ union_grey（并集，合成到中灰底）
     lean_hyp = 3  # 前倾试拟合的假设个数
 
     # ------------------------------------------------------------------ 小实例的尺度多假设
@@ -432,93 +441,243 @@ class Fitter:
             out[i, y0:y1, x0:x1] = 1
         return out
 
-    def register_small(self, max_eye: float = 90.0, scales=(0.55, 0.65, 0.75, 0.87, 1.0, 1.15, 1.3), min_score: float = 0.25) -> None:
-        """小实例粗配准（尺度 + 位置多假设，通用）：眼距 < max_eye（720p）的实例，shots 的眼睛锚点常有几成的尺度误差和几十像素的
-        位置误差（s21.side、s38.side），超出光流的捕获范围。做法：
-          1. 每个变换关键帧（取最近的节点帧）单独渲染该图层（640×360），取 α > 0.05 的外接框为模板；
-          2. 模板与参考帧都取「中灰底合成后亮度的梯度幅值」（对背景与颜色差异不敏感），在 shots bbox 外扩一倍的搜索区内，
-             对每个尺度做掩码 NCC 模板匹配（cv2.matchTemplate，TM_CCORR_NORMED + α 掩码）；
-          3. 尺度取各关键帧匹配分之和最大的那个（全图层共用，尺度在镜头内基本不变）；各关键帧的位置取该尺度下的最佳匹配，
-             分数低于 min_score 的关键帧沿用原位置。
-        与 fit4 的 reg 不同：只用于小实例（大实例的锚点可靠，fit4 在 s24 上实测粗配准有害），而且尺度在全图层上投票，
-        不会被个别关键帧（特效、遮挡）带偏。"""
+    # 头部模板：以两眼中点为原点、眼距 d 为单位的裁切范围（x ±2.2d，y −2.6d..+1.6d：头发顶、两耳、下巴与领口）
+    HEAD_BOX = (2.2, 2.6, 1.6)
+
+    def _head_match(self, ref: np.ndarray, src: np.ndarray, off: tuple, eyes: np.ndarray, anc: tuple, R: float):
+        """一个关键帧的头部模板匹配（720p 像素）。ref：参考帧 [720, 1280, 3]；src：该图层单独渲染的窗口（预乘 RGBA [h, w, 4]，
+        左上角在屏幕 off）；eyes：渲染里两眼虹膜的屏幕位置 [2, 2]；anc：图层锚点（变换的 x, y）的屏幕位置；R：允许的最大位移（像素）。
+        模板 = 头部框（HEAD_BOX）内、合成到中灰底的颜色，掩码 = α > 0.3；参考帧在「模板框外扩 R」的区域内做零均值归一化互相关
+        （TM_CCOEFF_NORMED，三通道）。返回 (分数, 新锚点 x, 新锚点 y)；模板太小或出画时返回 None。"""
         import cv2
-        W, H, s = 640, 360, 0.5
-        for ti, t in enumerate(self.T):
+        H, W = ref.shape[:2]
+        ox, oy = off
+        (ex, ey), d = eyes.mean(0), float(np.hypot(*(eyes[1] - eyes[0])))
+        kx, ku, kd = self.HEAD_BOX
+        x0, x1 = max(0, ox, int(ex - kx * d)), min(W, ox + src.shape[1], int(ex + kx * d) + 1)
+        y0, y1 = max(0, oy, int(ey - ku * d)), min(H, oy + src.shape[0], int(ey + kd * d) + 1)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+        s_ = src[y0 - oy:y1 - oy, x0 - ox:x1 - ox]
+        a = s_[..., 3]
+        m = (a > 0.3).astype(np.float32)
+        if m.sum() < 50:
+            return None
+        tpl = (s_[..., :3] * 255 + 128 * (1 - a[..., None])).astype(np.float32)
+        sx0, sy0 = max(0, int(x0 - R)), max(0, int(y0 - R))
+        sx1, sy1 = min(W, int(x1 + R)), min(H, int(y1 + R))
+        if sx1 - sx0 <= x1 - x0 or sy1 - sy0 <= y1 - y0:
+            return None
+        r = cv2.matchTemplate(ref[sy0:sy1, sx0:sx1].astype(np.float32), tpl, cv2.TM_CCOEFF_NORMED, mask=np.repeat(m[..., None], 3, 2))
+        r = np.nan_to_num(r, nan=-1, posinf=-1, neginf=-1)
+        _, mv, _, ml = cv2.minMaxLoc(r)
+        return float(mv), sx0 + ml[0] + (anc[0] - x0), sy0 + ml[1] + (anc[1] - y0)
+
+    def _render_keys(self, t: Traj, gs: list[int], tf: torch.Tensor, chunk: int = 16):
+        """图层 t 在帧 gs（变换 tf [len(gs), 4]）单独渲染，只渲染每帧头部框附近的窗口（720p 像素；整帧渲染慢一个量级）。
+        返回 (窗口 [N, h, w, 4] 预乘 RGBA numpy, 窗口左上角 [N, 2], 两眼屏幕位置 [N, 2, 2], 锚点屏幕位置 [N, 2])。"""
+        kx, ku, kd = self.HEAD_BOX
+        with torch.no_grad():
+            after = physics_batch([t])[0]
+            P = t.final_params(after, gs)
+            TS = t.to_screen(tf, 1.0, gs)
+            ic = t.rig.iris_centers(t.rig.deform(P).verts).double()
+            eyes = torch.einsum("nij,nkj->nki", TS[:, :, :2], ic) + TS[:, None, :, 2]
+            em = eyes.mean(1)
+            dmax = float((eyes[:, 1] - eyes[:, 0]).norm(dim=-1).max())
+            w, h = int(2 * kx * dmax) + 16, int((ku + kd) * dmax) + 16
+            off = torch.stack([torch.round(em[:, 0] - w / 2), torch.round(em[:, 1] - ku * dmax - 8)], 1)
+            TSw = TS.clone()
+            TSw[:, :, 2] -= off
+            srcs = [t.layer_src(P[a:a + chunk], TSw[a:a + chunk], gs[a:a + chunk], 1.0, w, h)[0].cpu().numpy() for a in range(0, len(gs), chunk)]
+        return np.concatenate(srcs), off.long().cpu().numpy(), eyes.cpu().numpy(), tf[:, :2].cpu().numpy()
+
+    def _body_render(self, t: Traj, gs: list[int], tfk: torch.Tensor, sc: float, cur: list, min_score: float) -> dict:
+        """体型假设的整身渲染：在头部匹配给出的位置与尺度上整帧渲染该图层，只取头部匹配成功、且在体型开关之前（斜坡 < 0.5）
+        的关键帧。返回 {关键帧序号: (合成到中灰底的 RGB uint8 [H, W, 3], α > 0.3 [H, W])}。"""
+        pre = np.ones(len(gs), bool)
+        if t.sw_gain_idx:
+            with torch.no_grad():
+                pre = (t.shape_ramp(gs).max(1).values < 0.5).cpu().numpy()
+        js = [j for j in range(len(gs)) if pre[j] and cur[j] is not None and cur[j][0] >= min_score]
+        out = {}
+        if not js:
+            return out
+        with torch.no_grad():
+            tf = tfk[js].clone()
+            tf[:, 2] += math.log(sc)
+            for i, j in enumerate(js):
+                tf[i, 0], tf[i, 1] = cur[j][1], cur[j][2]
+            g = [gs[j] for j in js]
+            after = physics_batch([t])[0]
+            P = t.final_params(after, g)
+            TS = t.to_screen(tf, 1.0, g)
+            for a in range(0, len(g), 8):
+                src, _ = t.layer_src(P[a:a + 8], TS[a:a + 8], g[a:a + 8], 1.0, 1280, 720)
+                for k in range(src.shape[0]):
+                    s = src[k]
+                    img = (s[..., :3] * 255 + 128 * (1 - s[..., 3:4])).clamp(0, 255).byte().cpu().numpy()
+                    out[js[a + k]] = (img, (s[..., 3] > 0.3).cpu().numpy())
+        return out
+
+    @staticmethod
+    def _body_scores(renders: dict, refs: np.ndarray) -> dict:
+        """各体型假设的整身得分：每个关键帧在「所有假设的轮廓之并」这同一个区域里，各假设（合成到中灰底）与参考帧算零均值
+        归一化相关，再对所有假设都有的关键帧取平均。区域按假设各自的轮廓取时，轮廓小的（Q 版）只在头部附近比较，容易占便宜
+        （s15.left：体型 1 以 0.358 略胜实际的 0.4 的 0.341）。"""
+        keys = set.intersection(*[set(r) for r in renders.values()]) if renders else set()
+        sc = {c: [] for c in renders}
+        for j in sorted(keys):
+            m = np.zeros_like(next(iter(renders.values()))[j][1])
+            for r in renders.values():
+                m |= r[j][1]
+            if m.sum() < 200:
+                continue
+            y = refs[j][m].astype(np.float64)
+            y -= y.mean(0)
+            for c, r in renders.items():
+                x = r[j][0][m].astype(np.float64)
+                x -= x.mean(0)
+                sc[c].append(float((x * y).sum() / max(1e-9, np.sqrt((x * x).sum() * (y * y).sum()))))
+        return {c: (float(np.mean(v)) if v else -1.0) for c, v in sc.items()}
+
+    def register_small(self, max_eye: float = 90.0, scales=(0.5, 0.57, 0.65, 0.75, 0.87, 1.0, 1.15, 1.3), fine=(0.92, 1.0, 1.08),
+                       rots=(-12.0, -6.0, 6.0, 12.0), rot_margin: float = 0.02, min_score: float = 0.35,
+                       retry_scales=(0.87, 1.0, 1.15, 1.3), bodies=(0.0, 0.4, 1.0), body_margin: float = 0.03) -> None:
+        """小实例粗配准（尺度 + 位置 + 屏幕内倾斜，通用）：眼距 < max_eye（720p）的实例，shots 的眼睛锚点常有几成的尺度误差和
+        几十像素的位置误差（s21.side 眼距标 50、实际约 35；s38.side 位置偏 30～50px），超出光流的捕获范围。做法：
+          1. 尺度：每个变换关键帧（取最近的节点帧）单独渲染该图层的**头部模板**（两眼中点为原点，x ±2.2d、y −2.6d..+1.6d，
+             d = 渲染眼距；掩码 α > 0.3，颜色合成到中灰底），在参考帧上做零均值归一化互相关（_head_match），
+             位移限制在 R = max(40, 2.5 × shots 眼距) 以内；尺度在全图层上按匹配分之和投票，再在 ×fine 上微调（同样投票）。
+             体型开关之后的关键帧照常参加（渲染里带着开关的尺度增益 Traj.sw_gain 的初值）。
+          2. 屏幕内倾斜：全部关键帧同时加 rots 里的一个旋转，各关键帧分别取最好的（比不转好不到 rot_margin 的不转）。
+          3. 匹配分低于 min_score 的关键帧：搜索半径加倍、逐关键帧试 retry_scales 再匹配一次（shots 的线性插值眼睛在动作快处
+             会偏出 R，s38.side 3368 偏约 80px）。写回变换关键帧的位置、ln s、旋转；仍然失败的（转场空白、特效遮挡）只改尺度。
+          0. 体型多假设（bodies，Clothes2 常量）：每个候选各做一遍第 1 步，再在头部匹配的位置上比较整身模板（_body_render / _body_scores，所有假设用同一个区域），
+             比规划值好 body_margin 以上才换（Traj.set_body 连带改 Clothes2 开关的起点与尺度增益）。
+          4. 很小的实例（Traj.tiny_k > 0，眼距 < 45px）、成功的关键帧过半时，配准结果作为变换先验（Traj.reg_terms 的 mag_tf），并去掉与配准矛盾的 shots 眼睛锚点：
+             光流 / SSIM 在眼距几十像素的实例上对尺度、位置约束很弱，而锚点本身可能偏几十像素（s38.side）。
+        头部角度（FaceAngleX / Y）也试过一起搜：匹配分对它几乎没有分辨力（常落在网格端点、相邻关键帧正负交替），
+        当作先验中心反而把尺度带偏，所以不搜；小实例的姿态由 mag_pose 先验收在中性值附近（见 traj.reg_terms）。
+        上一版（整身模板、梯度幅值、TM_CCORR_NORMED、640×360）有两处偏向「越小越好」：整身模板在真实尺度下常常伸出画面
+        （s38.side 的腿与尾巴），matchTemplate 要求模板完全落在搜索区内，大尺度根本放不到正确位置；非零均值的相关对小模板偏高。
+        s38.side 因此选了 ×0.55（实际约 ×0.9），s15.left 也是 ×0.55（实际约 ×1.0）。
+        大实例不做（锚点可靠，fit4 的经验是粗配准在大实例上有害）。"""
+        for t in self.T:
             if not t.plan.eye_init:
                 continue
             ed = float(np.median([np.hypot(*(e[1] - e[0])) for _, e, _ in t.plan.eye_init]))
             if ed >= max_eye:
                 continue
-            with torch.no_grad():
-                after = physics_batch(self.T)[ti]
-                gs = [min(t.nodes, key=lambda n: abs(n - k)) for k in t.keys]
-                P = t.final_params(after, gs)
-                tf0 = t.tf.detach().clone()
-                TS = t.to_screen(t.tf_at(gs), s, gs)
-                src, _ = t.layer_src(P, TS, gs, s, W, H)
-                anc = (TS[:, :, :2] @ torch.tensor([t.anchorX, t.anchorY], device=self.dev, dtype=TS.dtype)) + TS[:, :, 2]
-            src = src.cpu().numpy()
-            anc = anc.cpu().numpy()
-            refs, _ = self.refs.at(W, H, gs)
-            per = {sc: [] for sc in scales}
+            t0 = time.time()
+            gs = [min(t.nodes, key=lambda n: abs(n - k)) for k in t.keys]
+            refs, _ = self.refs.at(1280, 720, gs)
+            R = max(40.0, 2.5 * ed)
+            tf0 = t.tf.detach().clone()
+            tfk = t.tf_at(gs).detach()   # 关键帧上的变换（gs 与关键帧可能差一两帧，位置按 gs 求、写回关键帧）
+            nk = len(gs)
+            nev = [0]
 
-            def gmag(rgb):
-                g = cv2.cvtColor(rgb.astype(np.float32), cv2.COLOR_RGB2GRAY)
-                g = cv2.GaussianBlur(g, (0, 0), 1.0)
-                return cv2.magnitude(cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1))
-            import sys
-            from .rig import REPO
-            sys.path.insert(0, str(REPO / "tools/qa"))
-            import metric
-            ks = [x for x in t.plan.track if "bbox" in x]
-            for j, g in enumerate(gs):
-                a = src[j, ..., 3]
-                ys, xs = np.nonzero(a > 0.05)
-                if len(xs) < 50:
-                    for sc in scales:
-                        per[sc].append(None)
-                    continue
-                x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
-                img = src[j, ..., :3] * 255 + 128 * (1 - a[..., None])
-                tpl_g, tpl_m = gmag(img)[y0:y1, x0:x1], (a[y0:y1, x0:x1] > 0.3).astype(np.float32)
-                bb = metric._interp_rects(ks, g, "bbox") if ks else None
-                if bb is None:
-                    bx0, by0, bx1, by1 = 0, 0, W, H
-                else:
-                    bx, by, bw, bh = [v * s for v in bb]
-                    bx0, by0 = int(max(0, bx - bw)), int(max(0, by - bh))
-                    bx1, by1 = int(min(W, bx + 2 * bw)), int(min(H, by + 2 * bh))
-                ref_g = gmag(refs[j])[by0:by1, bx0:bx1]
-                for sc in scales:
-                    tw, th = max(4, int(round((x1 - x0) * sc))), max(4, int(round((y1 - y0) * sc)))
-                    if tw >= ref_g.shape[1] or th >= ref_g.shape[0]:
-                        per[sc].append(None)
-                        continue
-                    T_ = cv2.resize(tpl_g, (tw, th), interpolation=cv2.INTER_AREA)
-                    M_ = cv2.resize(tpl_m, (tw, th), interpolation=cv2.INTER_NEAREST)
-                    r = cv2.matchTemplate(ref_g, T_, cv2.TM_CCORR_NORMED, mask=M_)
-                    r = np.nan_to_num(r, nan=-1, posinf=-1, neginf=-1)
-                    _, mv, _, ml = cv2.minMaxLoc(r)
-                    # 新的锚点 = 匹配左上角 + 锚点在模板里的位置 × 尺度
-                    ax = bx0 + ml[0] + (anc[j, 0] - x0) * sc
-                    ay = by0 + ml[1] + (anc[j, 1] - y0) * sc
-                    per[sc].append((float(mv), ax / s, ay / s))
-            tot = {sc: sum(v[0] for v in per[sc] if v is not None) for sc in scales}
-            best = max(tot, key=tot.get)
+            def evaluate(sc: float, rot=None, rad: float = R):
+                nev[0] += 1
+                tf = tfk.clone()
+                tf[:, 2] += math.log(sc)
+                if rot is not None:
+                    tf[:, 3] += rot
+                src, off, eyes, anc = self._render_keys(t, gs, tf)
+                return [self._head_match(refs[j], src[j], off[j], eyes[j], anc[j], rad) for j in range(nk)]
+
+            def total(r):
+                return sum(v[0] for v in r if v is not None)
+            def vote():
+                """1) 尺度投票 + 微调 → (投票表, 粗选, 微调表, 尺度, 逐关键帧匹配)。"""
+                res = {sc: evaluate(sc) for sc in scales}
+                tot = {sc: total(r) for sc, r in res.items()}
+                s1 = max(tot, key=tot.get)
+                res_f = {fk: (res[s1] if fk == 1.0 else evaluate(s1 * fk)) for fk in fine}
+                tot_f = {fk: total(r) for fk, r in res_f.items()}
+                return tot, s1, tot_f, s1 * max(tot_f, key=tot_f.get), list(res_f[max(tot_f, key=tot_f.get)])
+
+            # 0) 体型多假设（Clothes2 常量）：每个候选各做一次尺度投票，再在头部匹配给出的位置上比较整身模板（切换前的关键帧）。
+            #    规划的体型来自 shots 的 variant（缺省 0），小实例常常标错：s38.side 切 Q 版之前实际是体型 1（0.4），
+            #    按 0 拟合时身体大一圈，只能靠扭头部角度、缩放去凑。比规划值好 body_margin 以上才换。
+            body = {}
+            if "Clothes2" in t.rig.pindex:
+                plan_c2 = t.clothes2
+                votes, rend = {}, {}
+                for c2 in [plan_c2] + [c for c in bodies if abs(c - plan_c2) > 1e-6]:
+                    t.set_body(c2)
+                    tfk = t.tf_at(gs).detach()
+                    votes[c2] = vote()
+                    rend[c2] = self._body_render(t, gs, tfk, votes[c2][3], votes[c2][4], min_score)
+                bs = self._body_scores(rend, refs) if len(rend) > 1 else {plan_c2: 0.0}
+                del rend
+                body = {c: (bs[c], votes[c]) for c in votes}
+                best_c2 = max(body, key=lambda c: body[c][0])
+                if body[best_c2][0] < body[plan_c2][0] + body_margin:
+                    best_c2 = plan_c2
+                t.set_body(best_c2)
+                tfk = t.tf_at(gs).detach()
+                tot, s1, tot_f, best_s, cur = body[best_c2][1]
+            else:
+                tot, s1, tot_f, best_s, cur = vote()
+            # 2) 屏幕内倾斜
+            rot = np.zeros(nk)
+            base = list(cur)
+            for v in rots:
+                r = evaluate(best_s, torch.full((nk,), v, device=t.dev, dtype=torch.float64))
+                for j in range(nk):
+                    if r[j] is not None and (cur[j] is None or r[j][0] > cur[j][0]) and (base[j] is None or r[j][0] >= base[j][0] + rot_margin):
+                        cur[j], rot[j] = r[j], v
+            ok = [cur[j] is not None and cur[j][0] >= min_score for j in range(nk)]
+            # 2b) 失败的关键帧：搜索半径加倍、逐关键帧再试几个尺度（shots 的线性插值眼睛在动作快的地方会偏到 R 之外，
+            #     s38.side 3368 偏约 80px；体型开关之后的尺度也可能与全图层投票的不同）
+            kfac = np.ones(nk)
+            bad = [j for j in range(nk) if not ok[j]]
+            if bad:
+                for fk in retry_scales:
+                    r = evaluate(best_s * fk, rad=2 * R)
+                    for j in bad:
+                        if r[j] is not None and r[j][0] >= min_score and (not ok[j] or r[j][0] > cur[j][0]):
+                            cur[j], kfac[j], ok[j], rot[j] = r[j], fk, True, 0.0
+            # 3) 写回
             with torch.no_grad():
                 tf = tf0.clone()
-                moved = 0
-                for j in range(len(t.keys)):
-                    v = per[best][j]
-                    if v is not None and v[0] >= min_score:
-                        tf[j, 0], tf[j, 1] = v[1], v[2]
-                        moved += 1
-                tf[:, 2] += math.log(best)
+                tf[:, 2] += math.log(best_s)
+                for j in range(nk):
+                    if ok[j]:
+                        tf[j, 0], tf[j, 1] = cur[j][1], cur[j][2]
+                        tf[j, 3] += rot[j]
+                        tf[j, 2] += math.log(kfac[j])
                 t.set_tf(tf)
-            shift = float(np.median([np.hypot(v[1] - float(tf0[j, 0]), v[2] - float(tf0[j, 1])) for j, v in enumerate(per[best]) if v is not None])) if any(v is not None for v in per[best]) else 0.0
-            self.log(f"[粗配准 {t.plan.id}] 眼距 {ed:.0f}px：尺度投票 " + " ".join(f"×{k:.2f}:{v:.2f}" for k, v in tot.items())
-                     + f" → ×{best:.2f}；{moved}/{len(t.keys)} 个关键帧改位置（中位移动 {shift:.0f}px@720）")
+                # 4) 只对很小的实例（tiny_k > 0）：变换先验（单位：位置 max(6, 0.5 × 配准后眼距) px、ln s 0.08、旋转 8°；
+                #    失败的关键帧不加），并去掉与配准结果矛盾的 shots 眼睛锚点（离配准位置超过 max(10, 0.6 × 配准后眼距)；
+                #    s38.side 的锚点偏 30～80px，去掉 5 个）。眼距 50px 的 s21.side 加这两项反而变差（锚点 20px 内、姿态看得清）
+                prior = 2 * sum(ok) >= nk and t.tiny_k > 0
+                n_drop = 0
+                if prior:
+                    sp = max(6.0, 0.5 * ed * best_s)
+                    t.tf_center = t.tf.detach().clone()
+                    t.tf_sd = torch.tensor([sp, sp, 0.08, 8.0], device=t.dev, dtype=torch.float64)
+                    t.tf_w = torch.tensor([1.0 if o else 0.0 for o in ok], device=t.dev, dtype=torch.float64)
+                    if t.anchor_xy is not None:
+                        dist = (t.anchor_xy.mean(1) - t.tf_at(t.anchor_frames)[:, :2]).norm(dim=-1)
+                        keep = (dist <= max(10.0, 0.6 * ed * best_s)).cpu().numpy()
+                        n_drop = int((~keep).sum())
+                        if keep.any():
+                            ki = np.nonzero(keep)[0].tolist()
+                            t.anchor_frames = [t.anchor_frames[i] for i in ki]
+                            t.anchor_xy, t.anchor_w = t.anchor_xy[ki], t.anchor_w[ki]
+                        else:
+                            t.anchor_xy = None
+            shift = [float(np.hypot(cur[j][1] - float(tfk[j, 0]), cur[j][2] - float(tfk[j, 1]))) for j in range(nk) if ok[j]]
+            self.log(f"[粗配准 {t.plan.id}] 眼距 {ed:.0f}px：" + (("体型（整身匹配）" + " ".join(f"{c:g}:{v[0]:.3f}" for c, v in body.items())
+                     + f" → Clothes2 {t.clothes2:g}；") if body else "") + "尺度投票 " + " ".join(f"×{k:.2f}:{v:.2f}" for k, v in tot.items())
+                     + f" → ×{s1:.2f}，微调 " + " ".join(f"×{k:.2f}:{v:.2f}" for k, v in tot_f.items()) + f" → ×{best_s:.3f}；"
+                     + f"{len(shift)}/{nk} 个关键帧改位置（中位移动 {np.median(shift) if shift else 0:.0f}px@720）；倾斜 / 匹配分 "
+                     + " ".join(f"{g}:" + (f"{rot[j]:+.0f}°/{cur[j][0]:.2f}" + (f"（重试 ×{kfac[j]:.2f}）" if j in bad else "") if ok[j] else "—") for j, g in enumerate(gs))
+                     + (f"；加变换先验，去掉 {n_drop} 个与配准矛盾的锚点" if prior else "；不加变换先验、锚点照旧")
+                     + f"（{nev[0]} 次渲染，{time.time() - t0:.1f}s）")
 
     def search_scale(self, max_eye: float = 90.0, factors=(0.6, 0.7, 0.85, 1.0, 1.15)) -> None:
         """眼距小于 max_eye（720p）的小实例：shots 的眼睛锚点在小尺寸时常有几成的尺度误差（例如 s21.side），
@@ -624,14 +783,15 @@ class Fitter:
             self.log(f"[lean {self.T[i].plan.id}] 选定 lean {float(self.T[i].consts['lean']):.2f}")
 
     # ------------------------------------------------------------------ 开关切换帧
-    def estimate_switches(self, radius: int = 6, fades=(0, 3, 6, 9, 12, 18, 30), margin: float = 0.001) -> list[dict]:
+    def estimate_switches(self, radius: int = 6, fades=(0, 3, 6, 9, 12, 18, 30), margin: float = 0.001, extra=()) -> list[dict]:
         """开关切换（用户决定由拟合器估计）：shots 标注的切换帧 est 与渐变时长 fade 只作初值。
         同一图层上标注在同一时刻（±1 帧）的切换编成一组一起估计：它们是同一个动作（如 s26 2530 的 key5 / key7 / key12，
         或 Movement* 连同配套的手臂参数），单独移动其中一个常常看不出差别（key5 的部件在 key12 = 1 时被藏起来），
         逐个估计会得到平坦的得分。组内各参数一起平移起点（保持标注的相对时刻），fade 各自保持标注值；
         只有一个参数的组才另外搜 fade（如 s38 的 Clothes2）。
-        坐标搜索：先在 [est − radius, est + radius] 内逐帧搜平移，再（单参数组）在 fades 里搜渐变时长，最后起点 ±2 复核。
-        每个候选整段前向（切换参数可能经物理影响后续帧），数据项 = 该图层覆盖范围内、受影响显示帧上的 SSIM@360 口径。
+        坐标搜索：在 [est − radius, est + radius] 内逐帧搜平移与（单参数组）在 fades 里搜渐变时长交替进行，直到不再变化。
+        每个候选整段前向（切换参数可能经物理影响后续帧），数据项 = 受影响显示帧上、该图层固定数据区（切换前后两种外形都画到的地方，
+        见下面 switch_mask）里的 SSIM@360 口径。
         最好的候选比标注只好不到 margin 时保留标注值（画面上分辨不出，或者主要变化落在排除区里，如 s26 2530 的白色笔刷）。"""
         out = []
         for li, t in enumerate(self.T):
@@ -654,26 +814,46 @@ class Fitter:
                 cache = {}
                 self.score(frames)
                 reuse = {k: v for k, v in enumerate(self._last_per) if k != li}  # 其他图层不随候选变化，只画一次
-                # 数据项只在该图层的覆盖范围（标注状态下输出 α > 0.1，外扩 6px@360）里算：别的实例不随候选变，只会稀释信号
-                with torch.no_grad():
-                    am = torch.stack([self._last_outa[li].get(i, torch.zeros(360, 640, device=self.dev)) for i in range(len(frames))])
-                    wm = F.max_pool2d((am > 0.1).float()[:, None], 13, 1, 6)[:, 0]
-
                 def setp(dc, fd):
                     for x, e, fa in zip(grp, e0, f0):
                         x["est"] = e + dc
                         x["fade"] = fd if single else fa
+                # 数据区（不随候选变）：switch_mask = intersect（缺省）时取「整窗都是切换前状态」与「整窗都是切换后状态」两种渲染里
+                # 该图层输出 α 都 > 0.5 的地方（再腐蚀 1px@360），在这里任何候选都画了东西，比较的只是画的内容；
+                # union_grey 时取两者之并（α > 0.1，外扩 6px），候选合成到中灰底。
+                # 上一版用「标注状态的覆盖 × 候选自己的 α」并合成到参考帧：切换改变图层外形时（s38.side 的 Q 版小一圈），没画到的地方
+                # 等于参考帧本身，越早切成小的 Q 版越占便宜（估计 3345/fade 0）；并集 + 中灰底也不中立——中灰对白底、白围裙这类
+                # 平坦区的 SSIM 不低，同样偏向少画（估计顶到窗口下界 3340/fade 0）。交集口径没有这两种偏向。
+                with torch.no_grad():
+                    st_a = []
+                    for dc in (10 ** 6, -10 ** 6):
+                        setp(dc, f0[0])
+                        self.score(frames, reuse=reuse)
+                        st_a.append(torch.stack([self._last_outa[li].get(i, torch.zeros(360, 640, device=self.dev)) for i in range(len(frames))]))
+                    if self.switch_mask == "intersect":
+                        wm = -F.max_pool2d(-(torch.minimum(*st_a) > 0.5).float()[:, None], 3, 1, 1)[:, 0]
+                    else:
+                        wm = F.max_pool2d((torch.maximum(*st_a) > 0.1).float()[:, None], 13, 1, 6)[:, 0]
+                    setp(0, f0[0])
 
                 def ev(dc, fd):
                     if (dc, fd) not in cache:
                         setp(dc, fd)
-                        cache[(dc, fd)] = self.score(frames, reuse=reuse, wmask=wm)
+                        cache[(dc, fd)] = self.score(frames, reuse=reuse, wmask=wm, bg_grey=self.switch_mask != "intersect")
                     return cache[(dc, fd)]
                 fa0 = f0[0] if single else None
                 shifts = [d for d in range(-radius, radius + 1) if t.plan.fin <= ref_e + d < t.plan.fout]
-                d_best = min(shifts, key=lambda d: ev(d, fa0))
-                f_best = min(sorted(set(fades) | {fa0}), key=lambda fd: ev(d_best, fd)) if single else None
-                d_best = min([d for d in range(d_best - 2, d_best + 3) if t.plan.fin <= ref_e + d < t.plan.fout], key=lambda d: ev(d, f_best))
+                # 坐标搜索：起点（整窗）与 fade 交替，直到不再变化（最多 4 轮；候选有缓存）。
+                # 上一版是「起点 → fade → 起点 ±2」一轮，长 fade 会把起点拖早（s38.side：3346/18，而网格最小在 3347/6）
+                d_best, f_best = 0, fa0
+                for _ in range(4):
+                    d_new = min(shifts, key=lambda d: ev(d, f_best))
+                    f_new = min(sorted(set(fades) | {fa0}), key=lambda fd: ev(d_new, fd)) if single else None
+                    if (d_new, f_new) == (d_best, f_best):
+                        break
+                    d_best, f_best = d_new, f_new
+                for dc, fd in extra:  # 诊断：额外评估的候选（只进 scores，不参与选择）
+                    ev(dc, fd if single else None)
                 if ev(d_best, f_best) > ev(0, fa0) - margin:
                     d_best, f_best = 0, fa0
                 setp(d_best, f_best)

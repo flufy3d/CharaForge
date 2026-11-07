@@ -201,7 +201,12 @@ def main() -> None:
             "renderFrames": len([f for f in fitter.F_all if uu.start <= f < uu.end]), "seed": args.seed,
             "switches": [x for x in switches if any(x["layer"] == t.plan.id for t in tr)],
             "layers": {t.plan.id: {"resample": t.resample, "consts": {k: (v.tolist() if v.dim() else float(v)) for k, v in t.consts.items()},
-                                   "nodes": len(t.nodes), "holds": t.plan.holds} for t in tr},
+                                   "nodes": len(t.nodes), "holds": t.plan.holds, "smallK": t.small_k,
+                                   # 头部角度输入（逐节点，诊断姿态漂移用）、体型开关的尺度增益（ln）
+                                   "headInputs": {k: [round(float(v), 2) for v in t.inputs[:, i]] for i, k in enumerate(t.inputs_fit) if k.startswith("FaceAngle")},
+                                   "swGain": [round(float(v), 4) for v in t.sw_gain],
+                                   "clothes2": t.clothes2,  # 体型常量（小实例的粗配准可能改掉规划值）
+                                   } for t in tr},
             "history": fitter.history if not u.units else [], "decouple": bool(args.decouple), "smoothC": args.smooth_c,
         }, ensure_ascii=False, indent=1))
 
