@@ -30,6 +30,15 @@ from .loss import _sample, blur_l1, composite_on_ref, dis_flows, masked_ssim, me
 from .traj import Traj, interp_matrix, physics_batch
 
 
+def _ssim_chunked(comp, ref, excl, s, mask=None, ch: int = 16):
+    """逐块（ch 帧）算 masked_ssim：SSIM 的 5 路高斯滤波中间量对上百帧的批会占好几 GB。"""
+    out = []
+    for a in range(0, comp.shape[0], ch):
+        S, _ = masked_ssim(comp[a:a + ch], ref[a:a + ch], excl[a:a + ch], s, mask=None if mask is None else mask[a:a + ch])
+        out.append(S)
+    return torch.cat(out)
+
+
 def _canon_grads(opt) -> None:
     """梯度规整（可复现）：A1 的 Triton 反向核与 A2 的物理反向用原子加累加，float64 下低位随求和顺序变化（约 1e-16 相对），
     Adam 把它放大成不同的步长，几十步之后光流目标的阈值判断就会分叉。这里把每个梯度保留 24 位有效数字，
@@ -61,7 +70,7 @@ class Stage:
     max_frames: int = 40         # 每次外层最多渲染的显示帧数（长镜头轮换子集）
 
 
-DEFAULT_REG = {"sd_inputs": 0.02, "sd_tf": 0.02, "sd_post": 0.3, "mag_post": 0.05, "speed": 1.0}
+DEFAULT_REG = {"sd_inputs": 0.02, "sd_tf": 0.02, "sd_post": 0.3, "mag_post": 0.05, "mag_inputs": 0.05, "speed": 1.0}
 
 
 class Fitter:
@@ -70,7 +79,7 @@ class Fitter:
         self.dev = trajs[0].dev
         self.wf = {f: (effect_weight if unit.cls[f] == "effect" else 1.0) for f in unit.frames}
         # 渲染帧：至少是一个图层的节点（新画面）的显示帧
-        self.F_all = sorted({f for t in trajs for f in t.nodes if unit.start <= f < unit.end})
+        self.F_all = sorted({f for t in trajs for f in t.nodes if f in self.wf})
         self.timing: dict[str, float] = {}
         self.history: list[dict] = []
 
@@ -169,11 +178,10 @@ class Fitter:
             ref, excl = torch.tensor(ref, device=self.dev), torch.tensor(excl, device=self.dev)
             w = torch.tensor([self.wf[f] for f in frames], device=self.dev)
             if kind == "ssim":
+                m = None
                 if wmask is not None:  # 只在给定区域（如某个图层的覆盖范围）里算 metric 口径的 SSIM
                     m = metric_mask(comp[..., 3], excl, s) * wmask
-                    S, _ = masked_ssim(comp, ref, excl, s, mask=m)
-                else:
-                    S, _ = masked_ssim(comp, ref, excl, s)
+                S = _ssim_chunked(comp, ref, excl, s, m)
                 return float(((1 - S) * w).sum() / w.sum())
             v = sum(blur_l1(comp, ref, excl, g, s) for g in sig) / len(sig)
             return float((v * w).sum() / w.sum() / 20.0)
@@ -186,8 +194,8 @@ class Fitter:
             comp, per, outa = self.render(frames, s, st.W, st.H, st.chunk)
             ref, excl = self.refs.at(st.W, st.H, frames)
             ref, excl = torch.tensor(ref, device=self.dev), torch.tensor(excl, device=self.dev)
-            S, _ = masked_ssim(comp, ref, excl, s)
-            flows = dis_flows(composite_on_ref(comp, ref), ref)
+            S = _ssim_chunked(comp, ref, excl, s)
+            flows = [x for a in range(0, len(frames), 16) for x in dis_flows(composite_on_ref(comp[a:a + 16], ref[a:a + 16]), ref[a:a + 16])]
             tg = [dict() for _ in self.T]
             nL = len(self.T)
             for i, f in enumerate(frames):
@@ -231,6 +239,27 @@ class Fitter:
             frames = subs[o % len(subs)]
             ft = self.flow_targets(st, frames)
             ms = float(np.mean(list(ft["ssim"].values())))
+            # 本次外层的目标在内层各步不变：预先整理成每个图层的 (行, 顶点, 目标, 权重) 张量；
+            # 内层所有图层（含锚点帧）一次变形（B = 各图层帧数之和），没有逐帧的 GPU 同步
+            plan_l = []
+            w_sum = 0.0
+            for li, t in enumerate(self.T):
+                tgts = ft["targets"][li]
+                uniq = sorted({g for g, _, _ in tgts.values()})
+                rows, cols, tg_, wp = [], [], [], []
+                for f, (g, vid, tgt) in tgts.items():
+                    if vid.numel() == 0:
+                        continue
+                    rows.append(torch.full((vid.numel(),), uniq.index(g), device=self.dev, dtype=torch.long))
+                    cols.append(vid)
+                    tg_.append(tgt)
+                    wp.append(torch.full((vid.numel(),), self.wf[f], device=self.dev, dtype=torch.float64))
+                    w_sum += self.wf[f] * vid.numel()
+                anc = t.anchor_frames if (st.w_anchor > 0 and t.anchor_xy is not None) else []
+                plan_l.append({"uniq": uniq, "anc": anc,
+                               "rows": torch.cat(rows) if rows else None, "cols": torch.cat(cols) if cols else None,
+                               "tgt": torch.cat(tg_) if tg_ else None, "w": torch.cat(wp) if wp else None})
+            self._wnorm = max(w_sum, 1.0)
             for k in range(st.inner):
                 prog = (o * st.inner + k) / max(1, n - 1)
                 kk = 0.5 * (1 + math.cos(math.pi * prog))
@@ -241,39 +270,43 @@ class Fitter:
                 afters = physics_batch(self.T)
                 tot = torch.zeros((), device=self.dev, dtype=torch.float64)
                 data = torch.zeros((), device=self.dev, dtype=torch.float64)
-                lf_sum, w_sum, terms = 0.0, 0.0, {}
-                for li, (t, after) in enumerate(zip(self.T, afters)):
-                    tgts = ft["targets"][li]
-                    if tgts:
-                        uniq = sorted({g for g, _, _ in tgts.values()})
-                        P = t.final_params(after, uniq)
-                        out = t.rig.deform(P)
-                        M = t.to_screen(t.tf_at(uniq), 1.0, uniq).float()
-                        vs = torch.einsum("bij,bvj->bvi", M[:, :, :2], out.verts.to(M.dtype)) + M[:, None, :, 2]
-                        for f, (g, vid, tgt) in tgts.items():
-                            if vid.numel() == 0:
-                                continue
-                            d = (vs[uniq.index(g), vid].double() - tgt).norm(dim=-1)
-                            lf = torch.log1p((d / st.flow_c) ** 2).mean()
-                            # 每个图层的权重按它在该帧的有效点占比（大图层、可见多的图层权重大）
-                            wgt = self.wf[f] * float(vid.numel())
-                            data = data + wgt * lf
-                            lf_sum += wgt * float(lf)
-                            w_sum += wgt
-                    if st.w_anchor > 0 and t.anchor_xy is not None:
-                        pr = t.anchor_pred(t.anchor_frames, after)
+                terms = {}
+                Ps, sizes = [], []
+                for t, after, pl in zip(self.T, afters, plan_l):
+                    gs_all = pl["uniq"] + pl["anc"]
+                    sizes.append(len(gs_all))
+                    if gs_all:
+                        Ps.append(t.final_params(after, gs_all))
+                verts = t.rig.deform(torch.cat(Ps)).verts if Ps else None
+                off = 0
+                for li, (t, pl, nB) in enumerate(zip(self.T, plan_l, sizes)):
+                    if nB == 0:
+                        continue
+                    V = verts[off:off + nB]
+                    off += nB
+                    nu = len(pl["uniq"])
+                    if pl["rows"] is not None:
+                        M = t.to_screen(t.tf_at(pl["uniq"]), 1.0, pl["uniq"])
+                        p = V[pl["rows"], pl["cols"]].to(M.dtype)
+                        Mr = M[pl["rows"]]
+                        vs = torch.einsum("nij,nj->ni", Mr[:, :, :2], p) + Mr[:, :, 2]
+                        dd = (vs - pl["tgt"]).norm(dim=-1)
+                        data = data + (torch.log1p((dd / st.flow_c) ** 2) * pl["w"]).sum()
+                    if pl["anc"]:
+                        c = t.rig.iris_centers(V[nu:]).double()
+                        Ma = t.to_screen(t.tf_at(pl["anc"]), 1.0, pl["anc"])
+                        pr = torch.einsum("nij,nkj->nki", Ma[:, :, :2], c) + Ma[:, None, :, 2]
                         d = (pr - t.anchor_xy).norm(dim=-1)
                         ed = (t.anchor_xy[:, 1] - t.anchor_xy[:, 0]).norm(dim=-1)
-                        c = torch.clamp(0.15 * ed, min=10.0)[:, None]
-                        la = (torch.log1p((d / c) ** 2) * t.anchor_w[:, None]).sum() / (2 * t.anchor_w.sum())
+                        cc = torch.clamp(0.15 * ed, min=10.0)[:, None]
+                        la = (torch.log1p((d / cc) ** 2) * t.anchor_w[:, None]).sum() / (2 * t.anchor_w.sum())
                         tot = tot + st.w_anchor * la
-                        terms[f"anchor_px[{t.plan.id}]"] = float(d.mean())
+                        terms[f"anchor_px[{t.plan.id}]"] = d.mean()
+                for t in self.T:
                     for kname, v in t.reg_terms().items():
                         tot = tot + regw.get(kname, 0.0) * v
-                        terms[kname] = terms.get(kname, 0.0) + float(v)
-                # 数据项按有效点数加权平均（归一的分母固定为外层开始时的值，保证内层各步的目标一致）
-                if k == 0:
-                    self._wnorm = max(w_sum, 1.0)
+                        terms[kname] = terms.get(kname, 0.0) + v.detach()
+                # 数据项按有效点数加权平均（归一的分母在外层开始时固定，内层各步的目标一致）
                 tot = tot + data / self._wnorm
                 tot.backward()
                 _canon_grads(opt)
@@ -281,7 +314,8 @@ class Fitter:
                 for t in self.T:
                     t.project()
                 self._tick("inner", t0)
-                terms["flow"] = lf_sum / max(w_sum, 1.0)
+                terms["flow"] = data.detach() / self._wnorm
+            terms = {k_: float(v) for k_, v in terms.items()}
             self.history.append({"stage": st.name, "outer": o, "ssim": ms, **terms,
                                  "lean": [float(t.consts["lean"]) for t in self.T], "sec": time.time() - t_stage})
             self.log(f"[{st.name}] 外层 {o:2d}（{len(frames)} 帧）SSIM(渲染时) {ms:.4f} flow {terms['flow']:.3f} "
@@ -289,7 +323,94 @@ class Fitter:
                      + f" lean {[round(float(t.consts['lean']), 2) for t in self.T]} ({time.time() - t_stage:.0f}s)")
         return ms
 
+    # ------------------------------------------------------------------ SSIM 精修（与验收同口径，直接对数据项求导）
+    def run_ssim_stage(self, st: Stage, iters: int, w_ssim: float = 1.0) -> float:
+        """光流阶段之后的精修：数据项直接是 metric 口径的 SSIM@360（640×360 渲染，合成到参考帧上），对全部几何未知量求导。
+        光流目标的精度有限（参考帧偏软、大片纯色区、clip 边缘），残差停在 1～2px 时 SSIM 仍有可观的提升空间；
+        接入 A7 的快速光栅化之后带边缘梯度的前向 + 反向约 0.1 s / 帧，这一段才划算。
+        一步：整段物理（保留图）→ 各图层帧的最终参数与 to_screen 截成叶子 → 分块渲染、合成、算 SSIM、逐块反向 →
+        用叶子上的梯度把整段图反向一次（加锚点与时间正则）→ Adam。帧按子集轮换。"""
+        groups = [g for t in self.T for g in t.param_groups(st.lr)]
+        opt = torch.optim.Adam(groups, betas=(0.9, 0.99))
+        base = [g["lr"] for g in opt.param_groups]
+        regw = {**DEFAULT_REG, **st.reg}
+        subs = self.subsets(st)
+        s_ = st.W / 1280.0
+        t_stage = time.time()
+        last = float("nan")
+        for it in range(iters):
+            frames = subs[it % len(subs)]
+            kk = 0.5 * (1 + math.cos(math.pi * it / max(1, iters - 1)))
+            for g_, b in zip(opt.param_groups, base):
+                g_["lr"] = b * (st.lr_final + (1 - st.lr_final) * kk)
+            opt.zero_grad(set_to_none=True)
+            t0 = time.time()
+            afters = physics_batch(self.T)
+            leaves = []
+            for t, after in zip(self.T, afters):
+                act = [f for f in frames if self.active(t, f)]
+                uniq = sorted({t.plan.hold(f) for f in act})
+                if not uniq:
+                    leaves.append(None)
+                    continue
+                P = t.final_params(after, uniq)
+                TS = t.to_screen(t.tf_at(uniq), s_, uniq)
+                leaves.append({"uniq": uniq, "P": P, "TS": TS, "Pl": P.detach().requires_grad_(True), "TSl": TS.detach().requires_grad_(True)})
+            ref, excl = self.refs.at(st.W, st.H, frames)
+            ref, excl = torch.tensor(ref, device=self.dev), torch.tensor(excl, device=self.dev)
+            wsum = sum(self.wf[f] for f in frames)
+            ssum = 0.0
+            for a in range(0, len(frames), st.chunk):
+                cf = frames[a:a + st.chunk]
+                comp = torch.zeros(len(cf), st.H, st.W, 4, device=self.dev)
+                for t, lv in zip(self.T, leaves):
+                    if lv is None:
+                        continue
+                    rows = [i for i, f in enumerate(cf) if self.active(t, f)]
+                    if not rows:
+                        continue
+                    gs = [t.plan.hold(cf[i]) for i in rows]
+                    ug = sorted(set(gs))
+                    ix = [lv["uniq"].index(g) for g in ug]
+                    src, _ = t.layer_src(lv["Pl"][ix], lv["TSl"][ix], ug, s_, st.W, st.H, aa=True, quantize=False)
+                    for i, g in zip(rows, gs):
+                        o = t.out_at(g, s_)
+                        al = torch.full((1, st.H, st.W, 1), o["opacity"], device=self.dev)
+                        if o["clip"]:
+                            al = al * C.clip_coverage(o["clip"], 1, st.H, st.W, comp)
+                        layer = src[ug.index(g)][None] * al
+                        comp = torch.cat([comp[:i], C.blend(comp[i:i + 1], layer, o["blendMode"]), comp[i + 1:]])
+                S, _ = masked_ssim(comp, ref[a:a + len(cf)], excl[a:a + len(cf)], s_)
+                w = torch.tensor([self.wf[f] for f in cf], device=self.dev, dtype=S.dtype)
+                lc = w_ssim * ((1 - S) * w).sum() / wsum
+                lc.backward()
+                ssum += float((S.detach() * w).sum())
+            tot = torch.zeros((), device=self.dev, dtype=torch.float64)
+            for t, lv, after in zip(self.T, leaves, afters):
+                if lv is not None and lv["Pl"].grad is not None:
+                    tot = tot + (lv["P"] * lv["Pl"].grad).sum() + (lv["TS"] * lv["TSl"].grad).sum()
+                if st.w_anchor > 0 and t.anchor_xy is not None:
+                    pr = t.anchor_pred(t.anchor_frames, after)
+                    d = (pr - t.anchor_xy).norm(dim=-1)
+                    ed = (t.anchor_xy[:, 1] - t.anchor_xy[:, 0]).norm(dim=-1)
+                    cc = torch.clamp(0.15 * ed, min=10.0)[:, None]
+                    tot = tot + st.w_anchor * (torch.log1p((d / cc) ** 2) * t.anchor_w[:, None]).sum() / (2 * t.anchor_w.sum())
+                for kname, v in t.reg_terms().items():
+                    tot = tot + regw.get(kname, 0.0) * v
+            tot.backward()
+            _canon_grads(opt)
+            opt.step()
+            for t in self.T:
+                t.project()
+            self._tick("ssim", t0)
+            last = ssum / wsum
+            self.history.append({"stage": st.name, "it": it, "ssim": last, "sec": time.time() - t_stage})
+            if it % 3 == 0 or it == iters - 1:
+                self.log(f"[{st.name}] {it:3d}（{len(frames)} 帧）SSIM {last:.4f}（{time.time() - t_stage:.0f}s）")
+        return last
+
     _wnorm = 1.0
+    lean_hyp = 3  # 前倾试拟合的假设个数
 
     # ------------------------------------------------------------------ 小实例的尺度多假设
     def bbox_mask(self, t: Traj, frames: list[int], W: int, H: int) -> torch.Tensor:
@@ -310,6 +431,94 @@ class Fitter:
             y0, y1 = max(0, int(y * sy)), min(H, int((y + h) * sy) + 1)
             out[i, y0:y1, x0:x1] = 1
         return out
+
+    def register_small(self, max_eye: float = 90.0, scales=(0.55, 0.65, 0.75, 0.87, 1.0, 1.15, 1.3), min_score: float = 0.25) -> None:
+        """小实例粗配准（尺度 + 位置多假设，通用）：眼距 < max_eye（720p）的实例，shots 的眼睛锚点常有几成的尺度误差和几十像素的
+        位置误差（s21.side、s38.side），超出光流的捕获范围。做法：
+          1. 每个变换关键帧（取最近的节点帧）单独渲染该图层（640×360），取 α > 0.05 的外接框为模板；
+          2. 模板与参考帧都取「中灰底合成后亮度的梯度幅值」（对背景与颜色差异不敏感），在 shots bbox 外扩一倍的搜索区内，
+             对每个尺度做掩码 NCC 模板匹配（cv2.matchTemplate，TM_CCORR_NORMED + α 掩码）；
+          3. 尺度取各关键帧匹配分之和最大的那个（全图层共用，尺度在镜头内基本不变）；各关键帧的位置取该尺度下的最佳匹配，
+             分数低于 min_score 的关键帧沿用原位置。
+        与 fit4 的 reg 不同：只用于小实例（大实例的锚点可靠，fit4 在 s24 上实测粗配准有害），而且尺度在全图层上投票，
+        不会被个别关键帧（特效、遮挡）带偏。"""
+        import cv2
+        W, H, s = 640, 360, 0.5
+        for ti, t in enumerate(self.T):
+            if not t.plan.eye_init:
+                continue
+            ed = float(np.median([np.hypot(*(e[1] - e[0])) for _, e, _ in t.plan.eye_init]))
+            if ed >= max_eye:
+                continue
+            with torch.no_grad():
+                after = physics_batch(self.T)[ti]
+                gs = [min(t.nodes, key=lambda n: abs(n - k)) for k in t.keys]
+                P = t.final_params(after, gs)
+                tf0 = t.tf.detach().clone()
+                TS = t.to_screen(t.tf_at(gs), s, gs)
+                src, _ = t.layer_src(P, TS, gs, s, W, H)
+                anc = (TS[:, :, :2] @ torch.tensor([t.anchorX, t.anchorY], device=self.dev, dtype=TS.dtype)) + TS[:, :, 2]
+            src = src.cpu().numpy()
+            anc = anc.cpu().numpy()
+            refs, _ = self.refs.at(W, H, gs)
+            per = {sc: [] for sc in scales}
+
+            def gmag(rgb):
+                g = cv2.cvtColor(rgb.astype(np.float32), cv2.COLOR_RGB2GRAY)
+                g = cv2.GaussianBlur(g, (0, 0), 1.0)
+                return cv2.magnitude(cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1))
+            import sys
+            from .rig import REPO
+            sys.path.insert(0, str(REPO / "tools/qa"))
+            import metric
+            ks = [x for x in t.plan.track if "bbox" in x]
+            for j, g in enumerate(gs):
+                a = src[j, ..., 3]
+                ys, xs = np.nonzero(a > 0.05)
+                if len(xs) < 50:
+                    for sc in scales:
+                        per[sc].append(None)
+                    continue
+                x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
+                img = src[j, ..., :3] * 255 + 128 * (1 - a[..., None])
+                tpl_g, tpl_m = gmag(img)[y0:y1, x0:x1], (a[y0:y1, x0:x1] > 0.3).astype(np.float32)
+                bb = metric._interp_rects(ks, g, "bbox") if ks else None
+                if bb is None:
+                    bx0, by0, bx1, by1 = 0, 0, W, H
+                else:
+                    bx, by, bw, bh = [v * s for v in bb]
+                    bx0, by0 = int(max(0, bx - bw)), int(max(0, by - bh))
+                    bx1, by1 = int(min(W, bx + 2 * bw)), int(min(H, by + 2 * bh))
+                ref_g = gmag(refs[j])[by0:by1, bx0:bx1]
+                for sc in scales:
+                    tw, th = max(4, int(round((x1 - x0) * sc))), max(4, int(round((y1 - y0) * sc)))
+                    if tw >= ref_g.shape[1] or th >= ref_g.shape[0]:
+                        per[sc].append(None)
+                        continue
+                    T_ = cv2.resize(tpl_g, (tw, th), interpolation=cv2.INTER_AREA)
+                    M_ = cv2.resize(tpl_m, (tw, th), interpolation=cv2.INTER_NEAREST)
+                    r = cv2.matchTemplate(ref_g, T_, cv2.TM_CCORR_NORMED, mask=M_)
+                    r = np.nan_to_num(r, nan=-1, posinf=-1, neginf=-1)
+                    _, mv, _, ml = cv2.minMaxLoc(r)
+                    # 新的锚点 = 匹配左上角 + 锚点在模板里的位置 × 尺度
+                    ax = bx0 + ml[0] + (anc[j, 0] - x0) * sc
+                    ay = by0 + ml[1] + (anc[j, 1] - y0) * sc
+                    per[sc].append((float(mv), ax / s, ay / s))
+            tot = {sc: sum(v[0] for v in per[sc] if v is not None) for sc in scales}
+            best = max(tot, key=tot.get)
+            with torch.no_grad():
+                tf = tf0.clone()
+                moved = 0
+                for j in range(len(t.keys)):
+                    v = per[best][j]
+                    if v is not None and v[0] >= min_score:
+                        tf[j, 0], tf[j, 1] = v[1], v[2]
+                        moved += 1
+                tf[:, 2] += math.log(best)
+                t.set_tf(tf)
+            shift = float(np.median([np.hypot(v[1] - float(tf0[j, 0]), v[2] - float(tf0[j, 1])) for j, v in enumerate(per[best]) if v is not None])) if any(v is not None for v in per[best]) else 0.0
+            self.log(f"[粗配准 {t.plan.id}] 眼距 {ed:.0f}px：尺度投票 " + " ".join(f"×{k:.2f}:{v:.2f}" for k, v in tot.items())
+                     + f" → ×{best:.2f}；{moved}/{len(t.keys)} 个关键帧改位置（中位移动 {shift:.0f}px@720）")
 
     def search_scale(self, max_eye: float = 90.0, factors=(0.6, 0.7, 0.85, 1.0, 1.15)) -> None:
         """眼距小于 max_eye（720p）的小实例：shots 的眼睛锚点在小尺寸时常有几成的尺度误差（例如 s21.side），
@@ -361,13 +570,17 @@ class Fitter:
 
     # ------------------------------------------------------------------ 前倾多假设
     def search_lean(self, st_trial: Stage, values=(0.0, -10.0, -20.0, -25.0, -30.0), trial_outer: int = 4) -> None:
-        """规划没固定前倾的图层：先用粗尺度光度项（σ 16 / 8px，在 ±16px 内单调）比较各值（每个值先 reanchor），
-        取前两名各跑 trial_outer 次光流粗对齐（同一初值），按渲染 SSIM 选定，再从选中的那一支继续。
+        """规划没固定前倾的图层（planAuto：每个单元至多一个）：先用粗尺度光度项（σ 16 / 8px，在 ±16px 内单调）比较各值
+        （每个值先 reanchor），取前两名；再做两次试拟合——第 k 次把每个这样的图层设为它自己的第 k 名，整批一起跑
+        trial_outer 次光流粗对齐——最后每个单元各自取 SSIM 更好的那一次（单元之间互不影响，所以可以一起试）。
         单一的光度项比较在 −20 与 −30 之间常常打平，直接取第一名会落进局部极小（s24 上 0.735 vs 0.79+）。"""
         free = [i for i, t in enumerate(self.T) if t.lean_free]
         if not free:
             return
-        frames = self.F_all[::max(1, len(self.F_all) // 24)]
+        units = sorted({self.T[i].plan.unit for i in free})
+        ufr = {un: [f for f in self.F_all if any(self.active(t, f) for t in self.T if t.plan.unit == un)] for un in units}
+        ufr = {un: fr[::max(1, len(fr) // 24)] for un, fr in ufr.items()}
+        ranks = {}
         for i in free:
             t = self.T[i]
             res = []
@@ -375,74 +588,106 @@ class Fitter:
                 with torch.no_grad():
                     t.consts["lean"].fill_(v)
                 self.reanchor([i])
-                sc = self.score(frames, 320, 180, kind="blur")
+                sc = self.score(ufr[t.plan.unit], 320, 180, kind="blur")
                 res.append((sc, v))
                 self.log(f"[lean {t.plan.id}] {v:6.1f}：粗尺度光度 {sc:.4f}")
-            res.sort()
-            snap0 = [x.snapshot() for x in self.T]
-            best = None
-            for sc, v in res[:2]:
-                for x, sn in zip(self.T, snap0):
-                    x.restore(sn)
-                with torch.no_grad():
-                    t.consts["lean"].fill_(v)
-                self.reanchor([i])
-                self.run_flow_stage(st_trial, trial_outer)
-                q = self.score(frames, 640, 360, kind="ssim")
-                self.log(f"[lean {t.plan.id}] 假设 {v:6.1f} → 光流粗对齐 {trial_outer} 次后 1−SSIM {q:.4f}（lean {float(t.consts['lean']):.2f}）")
-                if best is None or q < best[0]:
-                    best = (q, v, [x.snapshot() for x in self.T])
-            for x, sn in zip(self.T, best[2]):
+            # 试拟合的假设：光度排名第一，再加两个与已选值相差 ≥ 10 的（各取光度最好的），保证假设分散——
+            # 光度项在 clip / 近景镜头里分不清前倾（s25 实测：光度偏好 0 / −10，正确的是约 −26）
+            order = [v for _, v in sorted(res)]
+            pick = [order[0]]
+            for v in order[1:]:
+                if len(pick) < self.lean_hyp and all(abs(v - q) >= 10 for q in pick):
+                    pick.append(v)
+            ranks[i] = pick
+        snap0 = [x.snapshot() for x in self.T]
+        trials = []
+        for k in range(max(len(r) for r in ranks.values()) if trial_outer > 0 else 1):
+            for x, sn in zip(self.T, snap0):
                 x.restore(sn)
-            self.log(f"[lean {t.plan.id}] 选定假设 {best[1]}（当前 {float(t.consts['lean']):.2f}）")
+            for i in free:
+                with torch.no_grad():
+                    self.T[i].consts["lean"].fill_(ranks[i][min(k, len(ranks[i]) - 1)])
+            self.reanchor(free)
+            if trial_outer > 0:
+                self.run_flow_stage(st_trial, trial_outer)
+            q = {un: self.score(ufr[un], 640, 360, kind="ssim") for un in units}
+            self.log(f"[lean] 试拟合 {k}：" + "；".join(f"{self.T[i].plan.id} {ranks[i][min(k, len(ranks[i]) - 1)]:.0f}→{float(self.T[i].consts['lean']):.2f}（1−SSIM {q[self.T[i].plan.unit]:.4f}）" for i in free))
+            trials.append((q, [x.snapshot() for x in self.T]))
+        for j, x in enumerate(self.T):
+            un = x.plan.unit
+            if un in units:
+                kbest = min(range(len(trials)), key=lambda k: trials[k][0][un])
+            else:
+                kbest = 0
+            x.restore(trials[kbest][1][j])
+        for i in free:
+            self.log(f"[lean {self.T[i].plan.id}] 选定 lean {float(self.T[i].consts['lean']):.2f}")
 
     # ------------------------------------------------------------------ 开关切换帧
     def estimate_switches(self, radius: int = 6, fades=(0, 3, 6, 9, 12, 18, 30), margin: float = 0.001) -> list[dict]:
         """开关切换（用户决定由拟合器估计）：shots 标注的切换帧 est 与渐变时长 fade 只作初值。
-        坐标搜索：先在 [est − radius, est + radius] 内逐帧搜起点（fade 取标注值），再在 fades 里搜渐变时长，最后起点 ±2 复核。
-        每个候选整段前向（切换参数可能经物理影响后续帧），数据项 = 受影响显示帧上的 SSIM@360 口径（640×360 渲染，与 runtime
-        对拍差 < 1e-3）。受影响的帧 = [est0 − radius, est0 + radius + 最大 fade] 里的渲染帧（新画面帧）。
-        画面上分辨不出的切换（最好的候选比标注只好不到 margin）保留标注值。同一参数在多个图层上（如 s41 两个实例同一个
-        Movement3）各自估计。"""
+        同一图层上标注在同一时刻（±1 帧）的切换编成一组一起估计：它们是同一个动作（如 s26 2530 的 key5 / key7 / key12，
+        或 Movement* 连同配套的手臂参数），单独移动其中一个常常看不出差别（key5 的部件在 key12 = 1 时被藏起来），
+        逐个估计会得到平坦的得分。组内各参数一起平移起点（保持标注的相对时刻），fade 各自保持标注值；
+        只有一个参数的组才另外搜 fade（如 s38 的 Clothes2）。
+        坐标搜索：先在 [est − radius, est + radius] 内逐帧搜平移，再（单参数组）在 fades 里搜渐变时长，最后起点 ±2 复核。
+        每个候选整段前向（切换参数可能经物理影响后续帧），数据项 = 该图层覆盖范围内、受影响显示帧上的 SSIM@360 口径。
+        最好的候选比标注只好不到 margin 时保留标注值（画面上分辨不出，或者主要变化落在排除区里，如 s26 2530 的白色笔刷）。"""
         out = []
-        for t in self.T:
-            for sw in t.plan.switches:
-                est0, fade0 = sw["est"], sw["fade"]
-                lo, hi = est0 - radius, est0 + radius
-                frames = [f for f in self.F_all if lo <= f < hi + max(fades) + 1 and self.active(t, f)]
+        for li, t in enumerate(self.T):
+            sws = sorted(t.plan.switches, key=lambda x: x["est"])
+            groups = []
+            for sw in sws:
+                if groups and abs(sw["est"] - groups[-1][-1]["est"]) <= 1:
+                    groups[-1].append(sw)
+                else:
+                    groups.append([sw])
+            for grp in groups:
+                e0 = [x["est"] for x in grp]
+                f0 = [x["fade"] for x in grp]
+                single = len(grp) == 1
+                ref_e = e0[0]
+                lo, hi = ref_e - radius, ref_e + radius
+                frames = [f for f in self.F_all if lo <= f < hi + max(max(fades), max(f0)) + 1 and self.active(t, f)]
                 if not frames:
                     continue
                 cache = {}
-                li = self.T.index(t)
                 self.score(frames)
                 reuse = {k: v for k, v in enumerate(self._last_per) if k != li}  # 其他图层不随候选变化，只画一次
                 # 数据项只在该图层的覆盖范围（标注状态下输出 α > 0.1，外扩 6px@360）里算：别的实例不随候选变，只会稀释信号
                 with torch.no_grad():
                     am = torch.stack([self._last_outa[li].get(i, torch.zeros(360, 640, device=self.dev)) for i in range(len(frames))])
                     wm = F.max_pool2d((am > 0.1).float()[:, None], 13, 1, 6)[:, 0]
-                cache[(est0, fade0)] = self.score(frames, reuse=reuse, wmask=wm)
 
-                def ev(c, fd):
-                    if (c, fd) not in cache:
-                        sw["est"], sw["fade"] = c, fd
-                        cache[(c, fd)] = self.score(frames, reuse=reuse, wmask=wm)
-                    return cache[(c, fd)]
-                starts = [c for c in range(lo, hi + 1) if t.plan.fin <= c < t.plan.fout]
-                c_best = min(starts, key=lambda c: ev(c, fade0))
-                f_best = min(sorted(set(fades) | {fade0}), key=lambda fd: ev(c_best, fd))
-                c_best = min([c for c in range(c_best - 2, c_best + 3) if t.plan.fin <= c < t.plan.fout], key=lambda c: ev(c, f_best))
-                if ev(c_best, f_best) > ev(est0, fade0) - margin:
-                    c_best, f_best = est0, fade0
-                sw["est"], sw["fade"] = c_best, f_best
-                self.log(f"[开关 {t.plan.id}] {sw['param']} {sw['from']}→{sw['to']}：标注 {est0}/fade {fade0}（1−SSIM {ev(est0, fade0):.4f}）"
-                         f" → 估计 {c_best}/fade {f_best}（{ev(c_best, f_best):.4f}；{len(frames)} 帧，{len(cache)} 个候选）")
-                sw["est"], sw["fade"] = c_best, f_best
-                out.append({"layer": t.plan.id, "param": sw["param"], "shots": [est0, fade0], "est": [c_best, f_best],
-                            "scores": {f"{c}/{fd}": v for (c, fd), v in cache.items()}})
+                def setp(dc, fd):
+                    for x, e, fa in zip(grp, e0, f0):
+                        x["est"] = e + dc
+                        x["fade"] = fd if single else fa
+
+                def ev(dc, fd):
+                    if (dc, fd) not in cache:
+                        setp(dc, fd)
+                        cache[(dc, fd)] = self.score(frames, reuse=reuse, wmask=wm)
+                    return cache[(dc, fd)]
+                fa0 = f0[0] if single else None
+                shifts = [d for d in range(-radius, radius + 1) if t.plan.fin <= ref_e + d < t.plan.fout]
+                d_best = min(shifts, key=lambda d: ev(d, fa0))
+                f_best = min(sorted(set(fades) | {fa0}), key=lambda fd: ev(d_best, fd)) if single else None
+                d_best = min([d for d in range(d_best - 2, d_best + 3) if t.plan.fin <= ref_e + d < t.plan.fout], key=lambda d: ev(d, f_best))
+                if ev(d_best, f_best) > ev(0, fa0) - margin:
+                    d_best, f_best = 0, fa0
+                setp(d_best, f_best)
+                names = "+".join(x["param"] for x in grp)
+                self.log(f"[开关 {t.plan.id}] {names}：标注 {ref_e}" + (f"/fade {fa0}" if single else f"（fade {f0}）")
+                         + f"（1−SSIM {ev(0, fa0):.4f}） → 估计 {ref_e + d_best}" + (f"/fade {f_best}" if single else "")
+                         + f"（{ev(d_best, f_best):.4f}；{len(frames)} 帧，{len(cache)} 个候选；得分极差 {max(cache.values()) - min(cache.values()):.4f}）")
+                for x, e, fa in zip(grp, e0, f0):
+                    out.append({"layer": t.plan.id, "param": x["param"], "group": names, "shots": [e, fa], "est": [x["est"], x["fade"]],
+                                "scores": {f"{ref_e + d}/{fd}": v for (d, fd), v in cache.items()}})
         return out
 
     # ------------------------------------------------------------------ 外观常量
-    def fit_appearance(self, n_frames: int = 12, iters: int = 30, resamples=(1.0, 0.8, 0.6)) -> dict:
+    def fit_appearance(self, n_frames: int = 8, iters: int = 20, resamples=(1.0, 0.7)) -> dict:
         """blur σ、dofK、颜色滤镜、resample。几何已定：1280×720 上把选中显示帧的各图层缓冲（滤镜之前）渲染一次缓存，
         之后只对滤镜求导。数据项 = metric 口径 SSIM@360（合成到参考帧 → 2×2 区域平均 = INTER_AREA → 遮罩内 SSIM）。
         resample 在 A3 里不可导，各图层共用一个值逐个优化后取最好。帧：优先普通帧，均匀取；有景深段的图层保证取到段内帧。"""

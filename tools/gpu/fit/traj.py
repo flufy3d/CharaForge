@@ -89,6 +89,7 @@ class Traj:
         self.Wk = interp_matrix(self.keys, self.frames).to(**dd)
         # ---- 未知量 ----
         neu = torch.tensor([vts.neutral.get(k, 0.0) for k in self.inputs_fit], **dd)
+        self.in_neutral = neu
         self.in_lo = torch.tensor([INPUT_DIMS[k]["lo"] for k in self.inputs_fit], **dd)
         self.in_hi = torch.tensor([INPUT_DIMS[k]["hi"] for k in self.inputs_fit], **dd)
         self.in_tau = torch.tensor([INPUT_DIMS[k]["tau"] for k in self.inputs_fit], **dd)
@@ -128,6 +129,9 @@ class Traj:
         self.resample = 1.0
         self.clothes2 = float(plan.fixed.get("clothes2", plan.constants.get("Clothes2", 0.0)))
         self.has_dof = any(v is not None for v in plan.dof)
+        # 小实例的先验加权：眼距（shots 眼睛采样的中位数，720p）< 90px 时 small_k = (90 / 眼距)²，最多 16
+        ed = float(np.median([np.hypot(*(e[1] - e[0])) for _, e, _ in plan.eye_init])) if plan.eye_init else 200.0
+        self.small_k = float(min(16.0, max(1.0, (90.0 / max(ed, 1.0)) ** 2)))
         # 锚点：显示帧 f 的画面 = 帧 g 的求值
         self.anchor_frames = [plan.hold(f) for f, _, _ in plan.anchors]
         self.anchor_xy = torch.tensor(np.stack([e for _, e, _ in plan.anchors]), **dd) if plan.anchors else None
@@ -303,7 +307,11 @@ class Traj:
             "sd_inputs": (sd_in ** 2).sum(1).mean() if sd_in.numel() else self.inputs.sum() * 0,
             "sd_tf": (sd_tf ** 2).sum(1).mean() if sd_tf.numel() else self.tf.sum() * 0,
             "sd_post": (sd_po ** 2).mean() if sd_po.numel() else self.post.sum() * 0,
-            "mag_post": ((self.post / (0.15 * self.post_scale)) ** 2).mean(),
+            "mag_post": ((self.post / (0.15 * self.post_scale)) ** 2).mean() * self.small_k,
+            # 面捕输入离中性值的幅度先验（以 INPUT_DIMS 的 lo..hi 半宽为单位）。只对小实例有分量（small_k > 1）：
+            # 眼距几十像素的实例，光流 / SSIM 对表情、头部角度几乎没有约束，会漂到范围端点（s38.side 曾出现 ParamAngleY = 30，
+            # 脸在头发里缩成一小块）。大实例 small_k = 1，这一项为 0。
+            "mag_inputs": (((self.inputs - self.in_neutral) / (0.5 * (self.in_hi - self.in_lo))) ** 2).mean() * (self.small_k - 1.0),
             "speed": (over ** 2).sum(),
         }
 

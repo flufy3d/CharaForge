@@ -107,6 +107,8 @@ class Rig:
         phys = json.loads((MODEL_DIR / "大肥鱼.physics3.json").read_text(encoding="utf-8"))
         self.phys = PhysicsRig(phys, self.param_ids, self.pmin.astype(np.float32).tolist(), self.pmax.astype(np.float32).tolist(),
                                device=device, dtype=torch.float64)
+        # A8：Triton 融合核（rollout 自动走 fused_rollout，与 eager 逐位相同、确定性）；旧的 torch.compile 路径只在 phys_compile 时用
+        self.phys.auto_fused = not phys_compile
         if phys_compile:
             self.phys.compile()
         self.static = static_from_moc(self.moc)
@@ -131,21 +133,29 @@ class Rig:
 
     GRAPH_BUCKET = 16
 
+    GRAPH_MAX = 64  # 一张图的最大批；更大的批分块（多图层 / 多单元批处理时 B 可以到几百，整批建图会占满显存）
+
     def deform(self, params: torch.Tensor):
-        """[B, P] 物理之后的参数 → A1 输出。use_graph 时把 B 补齐到 16 的倍数（重复最后一行）走 CUDA graph，再截回 B；
-        输出与普通 forward 逐位相同（A7 实测），被补的行不参与求导（截掉了）。"""
+        """[B, P] 物理之后的参数 → A1 输出。use_graph 时按 GRAPH_MAX 分块，每块把 B 补齐到 16 的倍数（重复最后一行）
+        走 CUDA graph，再截回、拼接；输出与普通 forward 逐位相同（A7 实测），被补的行不参与求导（截掉了）。
+        分块之后同一张图会在一次前向里重放多次：求导时 A7 的 graphed 会自动退回普通 forward（结果正确），所以求导的大批不走图。"""
+        import dataclasses
         x = params.to(self.l2d.dtype)
         B = x.shape[0]
         if not self.use_graph or B == 0:
             return self.l2d(x)
+        grad = torch.is_grad_enabled() and x.requires_grad
+        if B > self.GRAPH_MAX:
+            if grad:
+                return self.l2d(x)
+            outs = [self.deform(x[a:a + self.GRAPH_MAX]) for a in range(0, B, self.GRAPH_MAX)]
+            return dataclasses.replace(outs[0], **{f.name: torch.cat([getattr(o, f.name) for o in outs]) for f in dataclasses.fields(outs[0])})
         Bp = -(-B // self.GRAPH_BUCKET) * self.GRAPH_BUCKET
         if Bp > B:
             x = torch.cat([x, x[-1:].detach().expand(Bp - B, -1)], 0)
-        grad = torch.is_grad_enabled() and x.requires_grad
-        out = self.l2d.graphed(Bp, grad=grad, max_cached=10)(x)
+        out = self.l2d.graphed(Bp, grad=grad, max_cached=6)(x)
         if Bp == B:
             return out
-        import dataclasses
         return dataclasses.replace(out, **{f.name: getattr(out, f.name)[:B] for f in dataclasses.fields(out)})
 
     def _iris_offsets(self) -> torch.Tensor:

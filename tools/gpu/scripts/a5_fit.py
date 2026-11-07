@@ -28,7 +28,7 @@ from PIL import Image  # noqa: E402
 
 from fit.export import build_layer  # noqa: E402
 from fit.optimize import Fitter, Stage  # noqa: E402
-from fit.plan import Refs, finalize_nodes, make_unit  # noqa: E402
+from fit.plan import finalize_nodes, make_batch, make_refs, make_unit  # noqa: E402
 from fit.rig import REPO, VTUBE, Rig  # noqa: E402
 from fit.traj import Traj  # noqa: E402
 from fit.vts import Vts  # noqa: E402
@@ -75,6 +75,9 @@ def main() -> None:
     ap.add_argument("--deform64", type=int, default=1, help="变形器 float64（逐位可复现）")
     ap.add_argument("--switch-after", default="F1",
                     help="在哪个阶段之后估计开关切换帧（缺省 F1：此时还没有逐节点的 postPhysics 偏移，姿态不会去迁就标注的切换时刻）")
+    ap.add_argument("--max-frames", type=int, default=40, help="每次外层最多渲染的显示帧数（多于它时按子集轮换）")
+    ap.add_argument("--ssim-iters", type=int, default=12, help="光流阶段之后 SSIM@360 精修的迭代数（0 关闭）")
+    ap.add_argument("--lean", type=float, default=None, help="诊断：所有前倾可拟合的图层固定用这个初值（跳过多假设）")
     ap.add_argument("--no-lean-trial", action="store_true", help="前倾只做光度比较、不跑两支短试拟合")
     args = ap.parse_args()
 
@@ -94,9 +97,15 @@ def main() -> None:
     from l2d import composite as _C, raster as _R
     _R.FAST_DEFAULT = bool(args.fast)
     _C.CHECKPOINT = bool(args.fast)
-    rig = Rig(phys_compile=True, deform_dtype=torch.float64 if args.deform64 else torch.float32)
+    rig = Rig(phys_compile=False, deform_dtype=torch.float64 if args.deform64 else torch.float32)
     rig.use_graph = bool(args.graph)
-    u = make_unit(args.shot)
+    # --shot 可以是逗号分隔的多个镜头：各自所在的拟合单元摞成一批（多单元批处理），结果按单元分别落盘到 <out>/<单元>/
+    units = []
+    for x in args.shot.split(","):
+        uu = make_unit(x)
+        if uu.unit not in [v.unit for v in units]:
+            units.append(uu)
+    u = make_batch(units)
     out = Path(args.out or REPO / f".data/gpu/fit/{u.unit}")
     (out / "preview").mkdir(parents=True, exist_ok=True)
     logf = open(out / "fit.log", "w", encoding="utf-8")
@@ -109,7 +118,7 @@ def main() -> None:
 
     torch.cuda.set_per_process_memory_fraction(min(1.0, args.mem_gb * 2**30 / torch.cuda.get_device_properties(0).total_memory))
     T: dict[str, float] = {}
-    refs = Refs(u)
+    refs = make_refs(u)
     finalize_nodes(u, refs)
     vts = Vts(VTUBE, {k: float(v) for k, v in zip(rig.param_ids, rig.pdef)}, decouple=bool(args.decouple))
     trajs = [Traj(rig, lp, vts, smooth_c=args.smooth_c) for lp in u.layers]
@@ -131,14 +140,23 @@ def main() -> None:
     T["初值 + 物理编译"] = time.time() - t0
     torch.cuda.reset_peak_memory_stats()
     S = stages(args.quick)
+    for st in S:
+        st.max_frames = args.max_frames * len(units)  # 每个单元每次外层的帧数与单单元时相同
     previews = [fitter.F_all[i] for i in np.linspace(0, len(fitter.F_all) - 1, 5).astype(int)]
     save_preview(fitter, out / "preview/0_init.jpg", previews)
     t0 = time.time()
-    fitter.search_scale()
-    T["小实例尺度多假设"] = time.time() - t0
+    fitter.register_small()
+    T["小实例粗配准"] = time.time() - t0
     t0 = time.time()
     trial = Stage(**{**S[0].__dict__, "name": "前倾试拟合"})
-    fitter.search_lean(trial, trial_outer=0 if args.no_lean_trial else (2 if args.quick else 4))
+    if args.lean is not None:
+        for t in trajs:
+            if t.lean_free:
+                with torch.no_grad():
+                    t.consts["lean"].fill_(args.lean)
+        fitter.reanchor()
+    else:
+        fitter.search_lean(trial, trial_outer=0 if args.no_lean_trial else (2 if args.quick else 4))
     T["前倾多假设"] = time.time() - t0
     switches = []
     for k, st in enumerate(S):
@@ -151,25 +169,41 @@ def main() -> None:
             switches = fitter.estimate_switches()
             T["开关切换帧估计"] = time.time() - t0
     t0 = time.time()
-    apr = fitter.fit_appearance()
-    log(f"外观：resample {apr['resample']}，SSIM@360 {apr['ssim']:.4f}")
+    if args.ssim_iters > 0:
+        t0 = time.time()
+        sst = Stage("S-SSIM精修", 640, 360, {"tf": 0.3, "inputs": 0.04, "post": 0.06, "lean": 0.1}, chunk=8, w_anchor=0.02,
+                    max_frames=24 * len(units), lr_final=0.3)
+        fitter.run_ssim_stage(sst, args.ssim_iters * min(3, len(fitter.subsets(sst))))
+        T["S-SSIM精修"] = time.time() - t0
+    for uu in (u.units or [u]):
+        sub = Fitter([t for t in trajs if t.plan.unit == uu.unit], uu, refs, log) if u.units else fitter
+        apr = sub.fit_appearance()
+        log(f"外观 {uu.unit}：resample {apr['resample']}，SSIM@360 {apr['ssim']:.4f}")
     T["A-外观常量"] = time.time() - t0
     save_preview(fitter, out / "preview/9_final.jpg", previews)
     peak = torch.cuda.max_memory_allocated() / 2**30
     t0 = time.time()
-    layers = [build_layer(t) for t in trajs]
-    (out / "layers.json").write_text(json.dumps(layers, ensure_ascii=False))
+    for uu in (u.units or [u]):
+        od = (out / uu.unit) if u.units else out
+        od.mkdir(parents=True, exist_ok=True)
+        tr = [t for t in trajs if t.plan.unit == uu.unit]
+        (od / "layers.json").write_text(json.dumps([build_layer(t) for t in tr], ensure_ascii=False))
     T["导出"] = time.time() - t0
     total = sum(T.values())
     log("耗时：" + "，".join(f"{k} {v:.1f}s" for k, v in T.items()) + f"；合计 {total:.1f}s；显存峰值 {peak:.2f} GB")
     log("前向细分：" + "，".join(f"{k} {v:.1f}s" for k, v in fitter.timing.items()))
-    (out / "fit.json").write_text(json.dumps({
-        "unit": u.unit, "shots": u.shot_ids, "range": [u.start, u.end], "timing": T, "totalSec": total, "forwardTiming": fitter.timing,
-        "peakGB": peak, "renderFrames": len(fitter.F_all), "seed": args.seed, "switches": switches,
-        "layers": {t.plan.id: {"resample": t.resample, "consts": {k: (v.tolist() if v.dim() else float(v)) for k, v in t.consts.items()},
-                               "nodes": len(t.nodes), "holds": t.plan.holds} for t in trajs},
-        "history": fitter.history, "decouple": bool(args.decouple), "smoothC": args.smooth_c,
-    }, ensure_ascii=False, indent=1))
+    for uu in (u.units or [u]):
+        od = (out / uu.unit) if u.units else out
+        tr = [t for t in trajs if t.plan.unit == uu.unit]
+        (od / "fit.json").write_text(json.dumps({
+            "unit": uu.unit, "shots": uu.shot_ids, "range": [uu.start, uu.end], "batch": [v.unit for v in units],
+            "timing": T, "totalSec": total, "forwardTiming": fitter.timing, "peakGB": peak,
+            "renderFrames": len([f for f in fitter.F_all if uu.start <= f < uu.end]), "seed": args.seed,
+            "switches": [x for x in switches if any(x["layer"] == t.plan.id for t in tr)],
+            "layers": {t.plan.id: {"resample": t.resample, "consts": {k: (v.tolist() if v.dim() else float(v)) for k, v in t.consts.items()},
+                                   "nodes": len(t.nodes), "holds": t.plan.holds} for t in tr},
+            "history": fitter.history if not u.units else [], "decouple": bool(args.decouple), "smoothC": args.smooth_c,
+        }, ensure_ascii=False, indent=1))
 
 
 if __name__ == "__main__":

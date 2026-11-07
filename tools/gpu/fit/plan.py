@@ -47,6 +47,7 @@ class LayerPlan:
     clip: dict | None               # 逐帧 clip（x, y, width, height, radius 各一列；feather 常量）
     opacity: list | None            # 逐帧不透明度
     track: list
+    unit: str = ""                  # 所属拟合单元（多单元批处理时区分）
     nodes: list[int] = field(default_factory=list)
     keys: list[int] = field(default_factory=list)
     holds: list[dict] = field(default_factory=list)
@@ -93,6 +94,7 @@ class UnitPlan:
     issues: list
     shots: dict = field(default_factory=dict)       # 镜头 ID → shots.json 的镜头
     cls: dict = field(default_factory=dict)         # 帧 → 类别
+    units: list = field(default_factory=list)       # 多单元批：各单元的 UnitPlan（单个单元时为空）
 
     def shot_of(self, f: int) -> dict:
         for sid in self.shot_ids:
@@ -103,7 +105,23 @@ class UnitPlan:
 
     @property
     def frames(self) -> list[int]:
+        if self.units:
+            return [f for u in self.units for f in u.frames]
         return list(range(self.start, self.end))
+
+
+def make_batch(units: list["UnitPlan"]) -> "UnitPlan":
+    """多单元批：把几个拟合单元摞成一个「虚拟单元」。各单元在时间上不重叠，图层只在自己的区间内有效，
+    所以合成、光流、数据项天然互不干扰；物理与变形则对全部图层一次批量求值（批处理的收益所在）。"""
+    if len(units) == 1:
+        return units[0]
+    b = UnitPlan(unit="+".join(u.unit for u in units), shot_ids=[s for u in units for s in u.shot_ids],
+                 start=min(u.start for u in units), end=max(u.end for u in units),
+                 effects=[e for u in units for e in u.effects], layers=[l for u in units for l in u.layers],
+                 skipped=[k for u in units for k in u.skipped], issues=[k for u in units for k in u.issues],
+                 shots={k: v for u in units for k, v in u.shots.items()}, units=list(units))
+    b.cls = {f: c for u in units for f, c in u.cls.items()}
+    return b
 
 
 def load_shots() -> dict:
@@ -123,7 +141,7 @@ def make_unit(sid: str) -> UnitPlan:
     for L in q["layers"]:
         lp = LayerPlan(id=L["id"], fin=L["in"], fout=L["out"], z=L["z"], constants=L["constants"], switches=L["switches"],
                        fixed=L["fixed"], color_filter=L["colorFilter"], dof=L["dof"], scale_x=L["scaleX"], clip=L["clip"],
-                       opacity=L["opacity"], track=L["track"])
+                       opacity=L["opacity"], track=L["track"], unit=q["unit"])
         for t in lp.track:
             if t.get("eyes") and lp.fin <= t["frame"] < lp.fout:
                 e = np.asarray(t["eyes"], np.float64)
@@ -200,6 +218,33 @@ def switch_value(sw: dict, g: int) -> float:
         return sw["to"]
     import math
     return sw["from"] + (sw["to"] - sw["from"]) * (0.5 - 0.5 * math.cos(math.pi * (g - sw["est"]) / sw["fade"]))
+
+
+class MultiRefs:
+    """多单元批：按帧号分派到各单元的 Refs。"""
+
+    def __init__(self, b: UnitPlan):
+        self.parts = [(u, Refs(u)) for u in b.units]
+
+    def _r(self, f: int) -> "Refs":
+        for u, r in self.parts:
+            if u.start <= f < u.end:
+                return r
+        raise KeyError(f)
+
+    def frame(self, f: int):
+        return self._r(f).frame(f)
+
+    def excl(self, f: int):
+        return self._r(f).excl(f)
+
+    def at(self, W: int, H: int, frames: list[int]):
+        rs, es = zip(*[self._r(f).at(W, H, [f]) for f in frames])
+        return np.concatenate(rs), np.concatenate(es)
+
+
+def make_refs(u: UnitPlan):
+    return MultiRefs(u) if u.units else Refs(u)
 
 
 class Refs:
