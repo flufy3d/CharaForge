@@ -30,6 +30,7 @@ import metric  # noqa: E402  （唯一的指标实现：参考帧解码、排除
 
 SHOTS = REPO / "scenes/deepseek-chan/shots.json"
 ANCHOR_CONF = 0.4
+CAMERA_KEY_EVERY = 4  # 镜头运动效果区间内的变换关键帧间隔（finalize_nodes）
 
 
 @dataclass
@@ -207,7 +208,13 @@ def finalize_nodes(u: UnitPlan, refs: "Refs") -> None:
                 segs.append({"start": g, "end": g + k, "every": k})
         every = lp.keys[1] - lp.keys[0] if len(lp.keys) > 1 else 24
         lp.nodes, lp.holds = news, segs
-        lp.keys = list(range(a, news[-1], every)) + [news[-1]]
+        keys = set(range(a, news[-1], every)) | {news[-1]}
+        # 镜头运动效果（zoom / pan / scale）区间内关键帧加密到每 CAMERA_KEY_EVERY 帧：窗口弹出、推近这类缓动在十几帧里
+        # 缩放好几倍（s04 254～268 约 ×3），12 帧一个、线性插值的关键帧跟不上
+        for e in u.effects:
+            if e.get("kind") in ("zoom", "pan", "scale"):
+                keys |= {f for f in range(max(a, int(e["start"])), min(news[-1], int(e["end"])), CAMERA_KEY_EVERY)}
+        lp.keys = sorted(keys)
 
 
 def switch_value(sw: dict, g: int) -> float:

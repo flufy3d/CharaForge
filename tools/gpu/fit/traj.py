@@ -103,6 +103,7 @@ class Traj:
         self.pose_cols = [i for i, k in enumerate(self.inputs_fit) if k in POSE_INPUTS]
         # 变换先验（粗配准成功时由 register_small 设置）：中心 [Nk, 4]、单位 [4]、逐关键帧权重 [Nk]
         self.tf_center, self.tf_sd, self.tf_w = None, None, None
+        self.vmax_k = None  # 逐关键帧区间的速度上限 [Nk−1, 4]（set_camera_ranges），缺省各区间相同
         self.tf_unit = torch.tensor([1.0, 1.0, 0.01, 0.5], **dd)  # 像素、像素、ln scale、度
         self.z_tf = torch.zeros(len(self.keys), 4, **dd).requires_grad_(True)
         # 体型开关（Clothes2 切到 Q 版等改变外形的开关）连带的尺度变化：每个这样的开关一个 ln s 增益，按该开关自己的斜坡加到变换上
@@ -199,6 +200,17 @@ class Traj:
         with torch.no_grad():
             self.z_swg = torch.zeros(len(self.sw_gain_idx), device=self.dev, dtype=torch.float64).requires_grad_(True)
         self._init_sw_gain()
+
+    CAMERA_VMAX = (90.0, 90.0, 0.12, 3.0)  # 镜头运动效果区间内的速度上限：x, y px、ln s、度（每帧）
+
+    def set_camera_ranges(self, ranges: list[tuple[int, int]]) -> None:
+        """shots 的镜头运动效果（zoom / pan / scale，[start, end)）：与之重叠的关键帧区间用 CAMERA_VMAX 作速度上限。"""
+        if not ranges or len(self.keys) < 2:
+            return
+        base = torch.tensor([30.0, 30.0, 0.02, 0.8], device=self.dev, dtype=torch.float64)
+        fast = torch.tensor(self.CAMERA_VMAX, device=self.dev, dtype=torch.float64)
+        rows = [fast if any(a < e and b > s0 for s0, e in ranges) else base for a, b in zip(self.keys[:-1], self.keys[1:])]
+        self.vmax_k = torch.stack(rows)
 
     @property
     def sw_gain(self) -> torch.Tensor:
@@ -359,10 +371,12 @@ class Traj:
         sd_in = second_diff(self.inputs, self.nodes) / self.in_tau
         sd_tf = second_diff(self.tf, self.keys) / torch.tensor([60.0, 60.0, 0.12, 6.0], device=self.dev, dtype=torch.float64)
         sd_po = second_diff(self.post, self.nodes) / (0.05 * self.post_scale)
-        # 速度上限（每帧）：x, y 30px、ln s 0.02、rot 0.8°；超出部分平方惩罚
+        # 速度上限（每帧）：x, y 30px、ln s 0.02、rot 0.8°；超出部分平方惩罚。
+        # 与 shots 的镜头运动效果（zoom / pan / scale）重叠的关键帧区间放宽（set_camera_ranges），
+        # 例如 s04 254～268 窗口从小到大弹出（约 ×3），0.02 / 帧的上限跟不上
         kt = torch.tensor(self.keys, device=self.dev, dtype=torch.float64)[:, None]
         v = (self.tf[1:] - self.tf[:-1]) / (kt[1:] - kt[:-1])
-        vmax = torch.tensor([30.0, 30.0, 0.02, 0.8], device=self.dev, dtype=torch.float64)
+        vmax = self.vmax_k if self.vmax_k is not None else torch.tensor([30.0, 30.0, 0.02, 0.8], device=self.dev, dtype=torch.float64)
         over = ((v.abs() - vmax).clamp_min(0) / vmax)
         return {
             "sd_inputs": (sd_in ** 2).sum(1).mean() if sd_in.numel() else self.inputs.sum() * 0,

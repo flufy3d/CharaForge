@@ -79,6 +79,7 @@ def main() -> None:
     ap.add_argument("--ssim-iters", type=int, default=12, help="光流阶段之后 SSIM@360 精修的迭代数（0 关闭）")
     ap.add_argument("--lean", type=float, default=None, help="诊断：所有前倾可拟合的图层固定用这个初值（跳过多假设）")
     ap.add_argument("--no-lean-trial", action="store_true", help="前倾只做光度比较、不跑两支短试拟合")
+    ap.add_argument("--no-register", action="store_true", help="诊断：不做小实例粗配准（Fitter.register_small）")
     args = ap.parse_args()
 
     # 可复现：固定种子 + 确定性算子（不支持确定性实现的算子只告警，见 fit.md）
@@ -145,7 +146,8 @@ def main() -> None:
     previews = [fitter.F_all[i] for i in np.linspace(0, len(fitter.F_all) - 1, 5).astype(int)]
     save_preview(fitter, out / "preview/0_init.jpg", previews)
     t0 = time.time()
-    fitter.register_small()
+    if not args.no_register:
+        fitter.register_small()
     T["小实例粗配准"] = time.time() - t0
     t0 = time.time()
     trial = Stage(**{**S[0].__dict__, "name": "前倾试拟合"})

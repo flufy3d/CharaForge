@@ -82,6 +82,10 @@ class Fitter:
         self.F_all = sorted({f for t in trajs for f in t.nodes if f in self.wf})
         self.timing: dict[str, float] = {}
         self.history: list[dict] = []
+        # 镜头运动效果（zoom / pan / scale）的区间：这些区间里变换允许快速变化（Traj.set_camera_ranges）
+        cam = [(int(e["start"]), int(e["end"])) for e in unit.effects if e.get("kind") in ("zoom", "pan", "scale")]
+        for t in trajs:
+            t.set_camera_ranges(cam)
 
     def _tick(self, k, t0):
         torch.cuda.synchronize()
@@ -250,7 +254,7 @@ class Fitter:
             # 本次外层的目标在内层各步不变：预先整理成每个图层的 (行, 顶点, 目标, 权重) 张量；
             # 内层所有图层（含锚点帧）一次变形（B = 各图层帧数之和），没有逐帧的 GPU 同步
             plan_l = []
-            w_sum = 0.0
+            w_sum = {}   # 单元 → 有效点权重之和（多单元批处理时各单元分别归一，见下）
             for li, t in enumerate(self.T):
                 tgts = ft["targets"][li]
                 uniq = sorted({g for g, _, _ in tgts.values()})
@@ -262,12 +266,15 @@ class Fitter:
                     cols.append(vid)
                     tg_.append(tgt)
                     wp.append(torch.full((vid.numel(),), self.wf[f], device=self.dev, dtype=torch.float64))
-                    w_sum += self.wf[f] * vid.numel()
+                    w_sum[t.plan.unit] = w_sum.get(t.plan.unit, 0.0) + self.wf[f] * vid.numel()
                 anc = t.anchor_frames if (st.w_anchor > 0 and t.anchor_xy is not None) else []
                 plan_l.append({"uniq": uniq, "anc": anc,
                                "rows": torch.cat(rows) if rows else None, "cols": torch.cat(cols) if cols else None,
                                "tgt": torch.cat(tg_) if tg_ else None, "w": torch.cat(wp) if wp else None})
-            self._wnorm = max(w_sum, 1.0)
+            # 数据项按单元归一：每个单元的数据项除以它自己的有效点数，再对单元求和。上一版除以整批的点数，
+            # 一批里小单元的数据项被摊薄 5～10 倍，而各图层的正则、锚点项不变，相当于正则加重了 5～10 倍
+            # （全片批处理 s23 普通帧 0.436，单独跑 0.688）。单个单元时与原来完全相同。
+            self._wnorm = {un: max(v, 1.0) for un, v in w_sum.items()}
             for k in range(st.inner):
                 prog = (o * st.inner + k) / max(1, n - 1)
                 kk = 0.5 * (1 + math.cos(math.pi * prog))
@@ -278,6 +285,7 @@ class Fitter:
                 afters = physics_batch(self.T)
                 tot = torch.zeros((), device=self.dev, dtype=torch.float64)
                 data = torch.zeros((), device=self.dev, dtype=torch.float64)
+                data_u = {}
                 terms = {}
                 Ps, sizes = [], []
                 for t, after, pl in zip(self.T, afters, plan_l):
@@ -299,7 +307,8 @@ class Fitter:
                         Mr = M[pl["rows"]]
                         vs = torch.einsum("nij,nj->ni", Mr[:, :, :2], p) + Mr[:, :, 2]
                         dd = (vs - pl["tgt"]).norm(dim=-1)
-                        data = data + (torch.log1p((dd / st.flow_c) ** 2) * pl["w"]).sum()
+                        v_ = (torch.log1p((dd / st.flow_c) ** 2) * pl["w"]).sum()
+                        data_u[t.plan.unit] = data_u.get(t.plan.unit, 0.0) + v_
                     if pl["anc"]:
                         c = t.rig.iris_centers(V[nu:]).double()
                         Ma = t.to_screen(t.tf_at(pl["anc"]), 1.0, pl["anc"])
@@ -315,14 +324,16 @@ class Fitter:
                         tot = tot + regw.get(kname, 0.0) * v
                         terms[kname] = terms.get(kname, 0.0) + v.detach()
                 # 数据项按有效点数加权平均（归一的分母在外层开始时固定，内层各步的目标一致）
-                tot = tot + data / self._wnorm
+                for un, v_ in data_u.items():
+                    data = data + v_ / self._wnorm[un]
+                tot = tot + data
                 tot.backward()
                 _canon_grads(opt)
                 opt.step()
                 for t in self.T:
                     t.project()
                 self._tick("inner", t0)
-                terms["flow"] = data.detach() / self._wnorm
+                terms["flow"] = data.detach() / max(1, len(data_u))
             terms = {k_: float(v) for k_, v in terms.items()}
             self.history.append({"stage": st.name, "outer": o, "ssim": ms, **terms,
                                  "lean": [float(t.consts["lean"]) for t in self.T], "sec": time.time() - t_stage})
@@ -367,6 +378,10 @@ class Fitter:
             ref, excl = self.refs.at(st.W, st.H, frames)
             ref, excl = torch.tensor(ref, device=self.dev), torch.tensor(excl, device=self.dev)
             wsum = sum(self.wf[f] for f in frames)
+            # 按单元归一（同 run_flow_stage）：帧 f 的权重除以它所在单元在本子集里的权重之和
+            wu = {}
+            for f in frames:
+                wu[self.unit_of(f)] = wu.get(self.unit_of(f), 0.0) + self.wf[f]
             ssum = 0.0
             for a in range(0, len(frames), st.chunk):
                 cf = frames[a:a + st.chunk]
@@ -390,7 +405,8 @@ class Fitter:
                         comp = torch.cat([comp[:i], C.blend(comp[i:i + 1], layer, o["blendMode"]), comp[i + 1:]])
                 S, _ = masked_ssim(comp, ref[a:a + len(cf)], excl[a:a + len(cf)], s_)
                 w = torch.tensor([self.wf[f] for f in cf], device=self.dev, dtype=S.dtype)
-                lc = w_ssim * ((1 - S) * w).sum() / wsum
+                wn = torch.tensor([wu[self.unit_of(f)] for f in cf], device=self.dev, dtype=S.dtype)
+                lc = w_ssim * ((1 - S) * w / wn).sum()
                 lc.backward()
                 ssum += float((S.detach() * w).sum())
             tot = torch.zeros((), device=self.dev, dtype=torch.float64)
@@ -417,7 +433,14 @@ class Fitter:
                 self.log(f"[{st.name}] {it:3d}（{len(frames)} 帧）SSIM {last:.4f}（{time.time() - t_stage:.0f}s）")
         return last
 
-    _wnorm = 1.0
+    _wnorm: dict = {}
+
+    def unit_of(self, f: int) -> str:
+        """显示帧 f 所在的拟合单元（多单元批处理时区分；单个单元时就是它自己）。"""
+        for uu in (self.u.units or [self.u]):
+            if uu.start <= f < uu.end:
+                return uu.unit
+        return self.u.unit
     switch_mask = "intersect"  # 开关估计的数据区：intersect（两种状态都画到的地方）/ union_grey（并集，合成到中灰底）
     lean_hyp = 3  # 前倾试拟合的假设个数
 
@@ -543,7 +566,8 @@ class Fitter:
 
     def register_small(self, max_eye: float = 90.0, scales=(0.5, 0.57, 0.65, 0.75, 0.87, 1.0, 1.15, 1.3), fine=(0.92, 1.0, 1.08),
                        rots=(-12.0, -6.0, 6.0, 12.0), rot_margin: float = 0.02, min_score: float = 0.35,
-                       retry_scales=(0.87, 1.0, 1.15, 1.3), bodies=(0.0, 0.4, 1.0), body_margin: float = 0.03) -> None:
+                       retry_scales=(0.87, 1.0, 1.15, 1.3), bodies=(0.0, 0.4, 1.0), body_margin: float = 0.03, body_min: float = 0.15,
+                       reliable_conf: float = 0.6) -> None:
         """小实例粗配准（尺度 + 位置 + 屏幕内倾斜，通用）：眼距 < max_eye（720p）的实例，shots 的眼睛锚点常有几成的尺度误差和
         几十像素的位置误差（s21.side 眼距标 50、实际约 35；s38.side 位置偏 30～50px），超出光流的捕获范围。做法：
           1. 尺度：每个变换关键帧（取最近的节点帧）单独渲染该图层的**头部模板**（两眼中点为原点，x ±2.2d、y −2.6d..+1.6d，
@@ -568,6 +592,12 @@ class Fitter:
                 continue
             ed = float(np.median([np.hypot(*(e[1] - e[0])) for _, e, _ in t.plan.eye_init]))
             if ed >= max_eye:
+                continue
+            # 眼睛锚点可靠（一半以上的眼睛采样置信度 ≥ reliable_conf，即人工 / 虹膜精修过）时不配准：锚点本身就定了位置和尺度，
+            # 模板匹配反而可能错（全片批处理 s08.bowl：锚点置信度 0.7～0.8，配准投出 ×0.46、体型 1，钢盆缩成一小只）
+            conf = [c for _, _, c in t.plan.eye_init]
+            if np.mean([c >= reliable_conf for c in conf]) >= 0.5:
+                self.log(f"[粗配准 {t.plan.id}] 眼距 {ed:.0f}px：眼睛锚点可靠（{np.mean([c >= reliable_conf for c in conf]):.0%} 的采样置信度 ≥ {reliable_conf}），不配准")
                 continue
             t0 = time.time()
             gs = [min(t.nodes, key=lambda n: abs(n - k)) for k in t.keys]
@@ -614,7 +644,9 @@ class Fitter:
                 del rend
                 body = {c: (bs[c], votes[c]) for c in votes}
                 best_c2 = max(body, key=lambda c: body[c][0])
-                if body[best_c2][0] < body[plan_c2][0] + body_margin:
+                # 换体型要有证据：比规划值好 body_margin 以上，而且自己的整身相关不低于 body_min
+                # （s08.bowl 三个假设都在 0 附近：−0.009 / 0.037 / 0.070，是噪声）
+                if body[best_c2][0] < body[plan_c2][0] + body_margin or body[best_c2][0] < body_min:
                     best_c2 = plan_c2
                 t.set_body(best_c2)
                 tfk = t.tf_at(gs).detach()
