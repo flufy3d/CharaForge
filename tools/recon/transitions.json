@@ -2730,378 +2730,378 @@
 "s13.main": [
 {
 "frame": 1157,
-"visibleFrac": 0.846,
+"visibleFrac": 0.831,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": null
 },
 {
 "frame": 1158,
-"visibleFrac": 0.846,
+"visibleFrac": 0.831,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": null
 },
 {
 "frame": 1159,
-"visibleFrac": 0.793,
+"visibleFrac": 0.774,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
-"occluder": [
-678.0,
-466.0,
-70.0,
-64.0
-]
+"occluder": null
 },
 {
 "frame": 1160,
-"visibleFrac": 0.793,
+"visibleFrac": 0.774,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
-"occluder": [
-678.0,
-466.0,
-70.0,
-64.0
-]
+"occluder": null
 },
 {
 "frame": 1161,
-"visibleFrac": 0.771,
+"visibleFrac": 0.736,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-678.0,
-464.0,
-68.0,
-68.0
+1120.0,
+398.0,
+128.0,
+150.0
 ]
 },
 {
 "frame": 1162,
-"visibleFrac": 0.771,
+"visibleFrac": 0.736,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-678.0,
-464.0,
-68.0,
-68.0
+1120.0,
+398.0,
+128.0,
+150.0
 ]
 },
 {
 "frame": 1163,
-"visibleFrac": 0.769,
+"visibleFrac": 0.692,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-562.0,
-224.0,
-172.0,
-302.0
+1118.0,
+396.0,
+130.0,
+178.0
 ]
 },
 {
 "frame": 1164,
-"visibleFrac": 0.769,
+"visibleFrac": 0.692,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-562.0,
-224.0,
-172.0,
-302.0
+1118.0,
+396.0,
+130.0,
+178.0
 ]
 },
 {
 "frame": 1165,
-"visibleFrac": 0.767,
+"visibleFrac": 0.688,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-560.0,
-222.0,
-184.0,
-312.0
+1118.0,
+396.0,
+130.0,
+178.0
 ]
 },
 {
 "frame": 1166,
-"visibleFrac": 0.767,
+"visibleFrac": 0.688,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-560.0,
-222.0,
-184.0,
-312.0
+1118.0,
+396.0,
+130.0,
+178.0
 ]
 },
 {
 "frame": 1167,
-"visibleFrac": 0.727,
+"visibleFrac": 0.566,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-556.0,
+694.0,
 172.0,
-240.0,
-348.0
+580.0,
+402.0
 ]
 },
 {
 "frame": 1168,
-"visibleFrac": 0.727,
+"visibleFrac": 0.566,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-556.0,
+694.0,
 172.0,
-240.0,
-348.0
+580.0,
+402.0
 ]
 },
 {
 "frame": 1169,
-"visibleFrac": 0.41,
+"visibleFrac": 0.396,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-76.0,
-342.0,
-544.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-454.0,
-98.0,
-342.0,
-202.0
+396.0,
+96.0,
+878.0,
+478.0
 ]
 },
 {
 "frame": 1170,
-"visibleFrac": 0.41,
+"visibleFrac": 0.396,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-76.0,
-342.0,
-544.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-454.0,
-98.0,
-342.0,
-202.0
+396.0,
+96.0,
+878.0,
+478.0
 ]
 },
 {
 "frame": 1171,
-"visibleFrac": 0.187,
+"visibleFrac": 0.287,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+196.0,
+44.0,
+1078.0,
+530.0
 ]
 },
 {
 "frame": 1172,
-"visibleFrac": 0.187,
+"visibleFrac": 0.287,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ],
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+196.0,
+44.0,
+1078.0,
+530.0
 ]
 },
 {
 "frame": 1173,
-"visibleFrac": 0.024,
+"visibleFrac": 0.192,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-494.0,
-74.0,
-126.0
+110.0,
+64.0,
+1156.0,
+510.0
 ],
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
 "frame": 1174,
-"visibleFrac": 0.024,
+"visibleFrac": 0.192,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-494.0,
-74.0,
-126.0
+110.0,
+64.0,
+1156.0,
+510.0
 ],
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
 "frame": 1175,
-"visibleFrac": 0.024,
+"visibleFrac": 0.193,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-494.0,
-86.0,
-126.0
+110.0,
+104.0,
+1164.0,
+470.0
 ],
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
 "frame": 1176,
-"visibleFrac": 0.024,
+"visibleFrac": 0.193,
 "headFrac": 0.0,
 "eyesVisible": null,
 "visible": [
-454.0,
-494.0,
-84.0,
-126.0
+110.0,
+104.0,
+1164.0,
+470.0
 ],
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
 "frame": 1177,
-"visibleFrac": 0.0,
+"visibleFrac": 0.043,
 "headFrac": 0.0,
 "eyesVisible": null,
-"visible": null,
+"visible": [
+110.0,
+210.0,
+318.0,
+364.0
+],
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
 "frame": 1178,
-"visibleFrac": 0.0,
+"visibleFrac": 0.003,
 "headFrac": 0.0,
 "eyesVisible": null,
-"visible": null,
-"occluder": [
+"visible": [
+146.0,
 454.0,
-74.0,
-342.0,
-546.0
+160.0,
+92.0
+],
+"occluder": [
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
@@ -3111,10 +3111,10 @@
 "eyesVisible": null,
 "visible": null,
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
@@ -3124,10 +3124,10 @@
 "eyesVisible": null,
 "visible": null,
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
@@ -3137,10 +3137,10 @@
 "eyesVisible": null,
 "visible": null,
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
@@ -3150,10 +3150,10 @@
 "eyesVisible": null,
 "visible": null,
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
@@ -3163,10 +3163,10 @@
 "eyesVisible": null,
 "visible": null,
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
@@ -3176,10 +3176,10 @@
 "eyesVisible": null,
 "visible": null,
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
@@ -3189,10 +3189,10 @@
 "eyesVisible": null,
 "visible": null,
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 },
 {
@@ -3202,10 +3202,10 @@
 "eyesVisible": null,
 "visible": null,
 "occluder": [
-454.0,
-74.0,
-342.0,
-546.0
+110.0,
+44.0,
+1164.0,
+530.0
 ]
 }
 ]
@@ -3213,10 +3213,10 @@
 "refState": {
 "s13.main": {
 "bbox": [
-453.7,
-74.7,
-341.7,
-546.6
+110.0,
+45.0,
+1165.0,
+530.0
 ],
 "head": [
 411.7,
