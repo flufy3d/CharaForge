@@ -77,9 +77,14 @@ def main() -> None:
                     help="在哪个阶段之后估计开关切换帧（缺省 F1：此时还没有逐节点的 postPhysics 偏移，姿态不会去迁就标注的切换时刻）")
     ap.add_argument("--max-frames", type=int, default=40, help="每次外层最多渲染的显示帧数（多于它时按子集轮换）")
     ap.add_argument("--ssim-iters", type=int, default=12, help="光流阶段之后 SSIM@360 精修的迭代数（0 关闭）")
+    ap.add_argument("--ssim-max-frames", type=int, default=72,
+                    help="SSIM 精修每次迭代每个单元最多用的显示帧数（多于它时按子集轮换）。原为 24：每步只看约 1/5 的帧，结果随合批组成波动约 0.06（s25），见 fit.md")
     ap.add_argument("--lean", type=float, default=None, help="诊断：所有前倾可拟合的图层固定用这个初值（跳过多假设）")
     ap.add_argument("--no-lean-trial", action="store_true", help="前倾只做光度比较、不跑两支短试拟合")
     ap.add_argument("--no-register", action="store_true", help="诊断：不做小实例粗配准（Fitter.register_small）")
+    ap.add_argument("--motion-w", type=float, default=0.0, help="实验：运动幅度约束的权重（Fitter.motion_term），0 = 关")
+    ap.add_argument("--motion-c", type=float, default=2.0, help="实验：运动幅度约束允许的倍数（Fitter.motion_c）")
+    ap.add_argument("--camera-key-every", type=int, default=None, help="诊断：镜头运动效果区间内的关键帧间隔（缺省 plan.CAMERA_KEY_EVERY）")
     args = ap.parse_args()
 
     # 可复现：固定种子 + 确定性算子（不支持确定性实现的算子只告警，见 fit.md）
@@ -101,6 +106,9 @@ def main() -> None:
     rig = Rig(phys_compile=False, deform_dtype=torch.float64 if args.deform64 else torch.float32)
     rig.use_graph = bool(args.graph)
     # --shot 可以是逗号分隔的多个镜头：各自所在的拟合单元摞成一批（多单元批处理），结果按单元分别落盘到 <out>/<单元>/
+    if args.camera_key_every:
+        import fit.plan as _plan
+        _plan.CAMERA_KEY_EVERY = args.camera_key_every
     units = []
     for x in args.shot.split(","):
         uu = make_unit(x)
@@ -124,6 +132,8 @@ def main() -> None:
     vts = Vts(VTUBE, {k: float(v) for k, v in zip(rig.param_ids, rig.pdef)}, decouple=bool(args.decouple))
     trajs = [Traj(rig, lp, vts, smooth_c=args.smooth_c) for lp in u.layers]
     fitter = Fitter(trajs, u, refs, log)
+    fitter.motion_w = args.motion_w
+    fitter.motion_c = args.motion_c
     T["装载（模型、贴图、参考帧、规划）"] = time.time() - t0
     log(f"单元 {u.unit}（{'+'.join(u.shot_ids)}）[{u.start}, {u.end})，渲染帧 {len(fitter.F_all)}")
     for lp, t in zip(u.layers, trajs):
@@ -174,7 +184,7 @@ def main() -> None:
     if args.ssim_iters > 0:
         t0 = time.time()
         sst = Stage("S-SSIM精修", 640, 360, {"tf": 0.3, "inputs": 0.04, "post": 0.06, "lean": 0.1}, chunk=8, w_anchor=0.02,
-                    max_frames=24 * len(units), lr_final=0.3)
+                    max_frames=args.ssim_max_frames * len(units), lr_final=0.3)
         fitter.run_ssim_stage(sst, args.ssim_iters * min(3, len(fitter.subsets(sst))))
         T["S-SSIM精修"] = time.time() - t0
     for uu in (u.units or [u]):

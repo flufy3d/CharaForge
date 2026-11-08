@@ -56,6 +56,7 @@ class LayerPlan:
     holds: list[dict] = field(default_factory=list)
     anchors: list = field(default_factory=list)    # (帧, [[x,y],[x,y]], confidence)
     eye_init: list = field(default_factory=list)   # (帧, [[x,y],[x,y]], confidence)
+    dref: dict = field(default_factory=dict)       # 帧 → 原视频帧间差（finalize_nodes 的重复帧检测量）
 
     def hold(self, f: int) -> int:
         for h in self.holds:
@@ -238,6 +239,7 @@ def finalize_nodes(u: UnitPlan, refs: "Refs") -> None:
                 segs.append({"start": g, "end": g + k, "every": k})
         every = lp.keys[1] - lp.keys[0] if len(lp.keys) > 1 else 24
         lp.nodes, lp.holds = news, segs
+        lp.dref = d  # 帧 f → 原视频 f−1 → f 在实例区域的平均绝对差（运动幅度约束 Fitter.motion_term 用）
         keys = set(range(a, news[-1], every)) | {news[-1]}
         # 镜头运动效果（zoom / pan / scale）区间内关键帧加密到每 CAMERA_KEY_EVERY 帧：窗口弹出、推近这类缓动在十几帧里
         # 缩放好几倍（s04 254～268 约 ×3），12 帧一个、线性插值的关键帧跟不上

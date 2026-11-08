@@ -327,6 +327,10 @@ class Fitter:
                 for un, v_ in data_u.items():
                     data = data + v_ / self._wnorm[un]
                 tot = tot + data
+                if self.motion_w > 0:
+                    mt = self.motion_term(afters, o)
+                    tot = tot + self.motion_w * mt
+                    terms["motion"] = mt.detach()
                 tot.backward()
                 _canon_grads(opt)
                 opt.step()
@@ -421,6 +425,8 @@ class Fitter:
                     tot = tot + st.w_anchor * (torch.log1p((d / cc) ** 2) * t.anchor_w[:, None]).sum() / (2 * t.anchor_w.sum())
                 for kname, v in t.reg_terms().items():
                     tot = tot + regw.get(kname, 0.0) * v
+            if self.motion_w > 0:
+                tot = tot + self.motion_w * self.motion_term(afters, it)
             tot.backward()
             _canon_grads(opt)
             opt.step()
@@ -434,6 +440,53 @@ class Fitter:
         return last
 
     _wnorm: dict = {}
+    # 运动幅度约束（实验，缺省关）：见 motion_term
+    motion_w = 0.0
+    motion_c = 2.0      # 允许的倍数：我们的帧间位移 ≤ motion_c × 本图层的典型比例 × 原视频帧间差
+    motion_k = 3        # 每步只取 1/motion_k 的相邻节点对（轮换），控制变形批量
+    motion_sub = 8      # 顶点降采样
+
+    def motion_term(self, afters, o: int) -> torch.Tensor:
+        """运动幅度约束（实验）：相邻两个新画面节点之间，我们的帧间运动不应远大于原视频的帧间变化。
+        我们的运动 m_i = 两节点间可见顶点（降采样）的屏幕位移均值（720p 像素）；原视频的变化 d_i = 后一节点处
+        重复帧检测的帧间差（plan.dref，实例区域的 RGB 平均绝对差）。两者量纲不同，按本图层的中位比例 r = median(m / max(d, 1)) 校准，
+        只惩罚 m_i > motion_c · r · max(d_i, 1) 的超出部分（平方，按允许量归一）。针对的是「原视频几乎不动、我们每个新画面帧都走一段」
+        （s13 1123–1135：身体位置、髋 / 腿角度、尾巴的偏移平滑地漂，闪烁尖峰）。"""
+        tot = torch.zeros((), device=self.dev, dtype=torch.float64)
+        for t, after in zip(self.T, afters):
+            nd = t.nodes
+            if len(nd) < 3 or not t.plan.dref:
+                continue
+            sel = [i for i in range(len(nd) - 1) if i % self.motion_k == o % self.motion_k]
+            if not sel:
+                continue
+            gs = sorted({nd[i] for i in sel} | {nd[i + 1] for i in sel})
+            P = t.final_params(after, gs)
+            out = t.rig.deform(P)
+            vd = t.rig.raster.geom.vtx_draw
+            ok = (out.visible & (out.opacity > 0.05))[:, vd][:, ::self.motion_sub]
+            V = out.verts[:, ::self.motion_sub].double()
+            M = t.to_screen(t.tf_at(gs), 1.0, gs)
+            S = torch.einsum("nij,nvj->nvi", M[:, :, :2], V) + M[:, None, :, 2]
+            with torch.no_grad():
+                inside = (S[..., 0] > 0) & (S[..., 0] < 1280) & (S[..., 1] > 0) & (S[..., 1] < 720)
+            ms, ds = [], []
+            for i in sel:
+                a, b = gs.index(nd[i]), gs.index(nd[i + 1])
+                m = ok[a] & ok[b] & (inside[a] | inside[b])
+                if int(m.sum()) < 20:
+                    continue
+                ms.append((S[b] - S[a])[m].norm(dim=-1).mean())
+                ds.append(max(t.plan.dref.get(f, 0.0) for f in range(nd[i] + 1, nd[i + 1] + 1)))
+            if len(ms) < 3:
+                continue
+            m = torch.stack(ms)
+            d = torch.tensor(ds, device=self.dev, dtype=torch.float64).clamp_min(1.0)
+            with torch.no_grad():
+                r = float(torch.median(m / d))
+            allow = self.motion_c * r * d + 2.0
+            tot = tot + (((m - allow).clamp_min(0) / allow) ** 2).mean()
+        return tot
 
     def unit_of(self, f: int) -> str:
         """显示帧 f 所在的拟合单元（多单元批处理时区分；单个单元时就是它自己）。"""
