@@ -104,6 +104,18 @@ class Traj:
         # 变换先验（粗配准成功时由 register_small 设置）：中心 [Nk, 4]、单位 [4]、逐关键帧权重 [Nk]
         self.tf_center, self.tf_sd, self.tf_w = None, None, None
         self.vmax_k = None  # 逐关键帧区间的速度上限 [Nk−1, 4]（set_camera_ranges），缺省各区间相同
+        # 可见框中心（逐关键帧，720p；shots 的 bbox 裁到画面内，没有时用 head 框）：给 lever() 算力臂；全段都没有框时为 None。
+        # 不能先用 head 框：腿部特写的 head 框在画面外、就在锚点附近，算出来的力臂反而很短
+        import sys as _sys
+        from .rig import REPO as _REPO
+        _sys.path.insert(0, str(_REPO / "tools/qa"))
+        import metric as _metric
+        cs = []
+        for k in self.keys:
+            from .plan import _on_screen
+            r = _on_screen(_metric._interp_skip_null(plan.track, k, "bbox")) or _on_screen(_metric._interp_skip_null(plan.track, k, "head"))
+            cs.append([r[0] + r[2] / 2, r[1] + r[3] / 2] if r else [float("nan"), float("nan")])
+        self.vis_c = torch.tensor(cs, **dd) if any(not math.isnan(c[0]) for c in cs) else None
         self.tf_unit = torch.tensor([1.0, 1.0, 0.01, 0.5], **dd)  # 像素、像素、ln scale、度
         self.z_tf = torch.zeros(len(self.keys), 4, **dd).requires_grad_(True)
         # 体型开关（Clothes2 切到 Q 版等改变外形的开关）连带的尺度变化：每个这样的开关一个 ln s 增益，按该开关自己的斜坡加到变换上
@@ -201,16 +213,32 @@ class Traj:
             self.z_swg = torch.zeros(len(self.sw_gain_idx), device=self.dev, dtype=torch.float64).requires_grad_(True)
         self._init_sw_gain()
 
-    CAMERA_VMAX = (90.0, 90.0, 0.12, 3.0)  # 镜头运动效果区间内的速度上限：x, y px、ln s、度（每帧）
+    VMAX = (30.0, 30.0, 0.02, 0.8)  # 速度上限（每帧）：x, y px、ln s、度
+    # 镜头运动效果区间内放宽的分量：pan 只放宽平移，zoom / scale 放宽平移与缩放；旋转都不放宽（这些效果不转画面）。
+    # 上一版三种效果一律放宽平移、缩放、旋转（旋转 3°/帧），s13（pan、腿部特写、锚点在画面外约 2500px）的变换因此来回晃，
+    # 新画面帧上脚部跳 10～20px（闪烁尖峰 5 帧）
+    CAMERA_VMAX = {"pan": (90.0, 90.0, None, None), "zoom": (90.0, 90.0, 0.12, None), "scale": (90.0, 90.0, 0.12, None)}
 
-    def set_camera_ranges(self, ranges: list[tuple[int, int]]) -> None:
-        """shots 的镜头运动效果（zoom / pan / scale，[start, end)）：与之重叠的关键帧区间用 CAMERA_VMAX 作速度上限。"""
+    def set_camera_ranges(self, ranges: list[tuple[int, int, str]]) -> None:
+        """shots 的镜头运动效果（[start, end), kind）：与之重叠的关键帧区间按 CAMERA_VMAX 放宽速度上限。"""
         if not ranges or len(self.keys) < 2:
             return
-        base = torch.tensor([30.0, 30.0, 0.02, 0.8], device=self.dev, dtype=torch.float64)
-        fast = torch.tensor(self.CAMERA_VMAX, device=self.dev, dtype=torch.float64)
-        rows = [fast if any(a < e and b > s0 for s0, e in ranges) else base for a, b in zip(self.keys[:-1], self.keys[1:])]
-        self.vmax_k = torch.stack(rows)
+        rows = []
+        for a, b in zip(self.keys[:-1], self.keys[1:]):
+            r = list(self.VMAX)
+            for s0, e, kind in ranges:
+                if a < e and b > s0:
+                    r = [max(x, y) if y is not None else x for x, y in zip(r, self.CAMERA_VMAX[kind])]
+            rows.append(r)
+        self.vmax_k = torch.tensor(rows, device=self.dev, dtype=torch.float64)
+
+    def lever(self) -> torch.Tensor:
+        """逐关键帧的力臂 [Nk]（720p 像素）：shots 可见框（head 或 bbox）中心到图层锚点（两眼中点）的距离，不求导。
+        旋转、缩放对画面的影响 = 角度 / ln s × 力臂；锚点在画面外很远时（腿部特写），零点几度就是几十像素。"""
+        if self.vis_c is None:
+            return torch.zeros(len(self.keys), device=self.dev, dtype=torch.float64)
+        with torch.no_grad():
+            return (self.vis_c - self.tf[:, :2]).norm(dim=-1).nan_to_num(0.0)
 
     @property
     def sw_gain(self) -> torch.Tensor:
@@ -369,14 +397,24 @@ class Traj:
     # ------------------------------------------------------------------ 正则
     def reg_terms(self) -> dict[str, torch.Tensor]:
         sd_in = second_diff(self.inputs, self.nodes) / self.in_tau
-        sd_tf = second_diff(self.tf, self.keys) / torch.tensor([60.0, 60.0, 0.12, 6.0], device=self.dev, dtype=torch.float64)
+        # 变换的二阶差分：平移以 60px 计；旋转、缩放以 6°、0.12 计，但力臂长时按画面像素收紧到「力臂处 60px」
+        # （min(6°, 60px / 力臂)、min(0.12, 60px / 力臂)）。力臂 < 约 500px 的常见情况不变
+        L = self.lever()
+        Lm = L[1:-1] if len(self.keys) > 2 else L[:0]
+        den = torch.stack([torch.full_like(Lm, 60.0), torch.full_like(Lm, 60.0),
+                           torch.minimum(torch.full_like(Lm, 0.12), 60.0 / Lm.clamp_min(1.0)),
+                           torch.minimum(torch.full_like(Lm, 6.0), 60.0 / (Lm.clamp_min(1.0) * math.pi / 180))], 1)
+        sd_tf = second_diff(self.tf, self.keys) / den
         sd_po = second_diff(self.post, self.nodes) / (0.05 * self.post_scale)
         # 速度上限（每帧）：x, y 30px、ln s 0.02、rot 0.8°；超出部分平方惩罚。
         # 与 shots 的镜头运动效果（zoom / pan / scale）重叠的关键帧区间放宽（set_camera_ranges），
         # 例如 s04 254～268 窗口从小到大弹出（约 ×3），0.02 / 帧的上限跟不上
         kt = torch.tensor(self.keys, device=self.dev, dtype=torch.float64)[:, None]
         v = (self.tf[1:] - self.tf[:-1]) / (kt[1:] - kt[:-1])
-        vmax = self.vmax_k if self.vmax_k is not None else torch.tensor([30.0, 30.0, 0.02, 0.8], device=self.dev, dtype=torch.float64)
+        vmax = self.vmax_k if self.vmax_k is not None else torch.tensor(self.VMAX, device=self.dev, dtype=torch.float64)[None].expand(len(self.keys) - 1, 4)
+        # 旋转、缩放的速度上限同样按力臂换算成画面像素，不超过平移的上限（力臂 1500px 以上才起作用）
+        Lv = (0.5 * (L[1:] + L[:-1])).clamp_min(1.0)[:, None]
+        vmax = torch.cat([vmax[:, :2], torch.minimum(vmax[:, 2:3], vmax[:, :1] / Lv), torch.minimum(vmax[:, 3:4], vmax[:, :1] / (Lv * math.pi / 180))], 1)
         over = ((v.abs() - vmax).clamp_min(0) / vmax)
         return {
             "sd_inputs": (sd_in ** 2).sum(1).mean() if sd_in.numel() else self.inputs.sum() * 0,

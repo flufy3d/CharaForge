@@ -83,7 +83,7 @@ class Fitter:
         self.timing: dict[str, float] = {}
         self.history: list[dict] = []
         # 镜头运动效果（zoom / pan / scale）的区间：这些区间里变换允许快速变化（Traj.set_camera_ranges）
-        cam = [(int(e["start"]), int(e["end"])) for e in unit.effects if e.get("kind") in ("zoom", "pan", "scale")]
+        cam = [(int(e["start"]), int(e["end"]), e["kind"]) for e in unit.effects if e.get("kind") in ("zoom", "pan", "scale")]
         for t in trajs:
             t.set_camera_ranges(cam)
 

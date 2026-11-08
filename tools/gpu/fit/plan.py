@@ -30,6 +30,8 @@ import metric  # noqa: E402  （唯一的指标实现：参考帧解码、排除
 
 SHOTS = REPO / "scenes/deepseek-chan/shots.json"
 ANCHOR_CONF = 0.4
+HEAD_ANCHOR_W = 0.4  # 由人工 head 框推出的眼睛作锚点时的权重（只在图层没有可靠眼睛锚点时用）
+CADENCE_DUP = 0.25  # cadence 覆盖时仍判为重复的门槛（实例区域 RGB 平均绝对差；新画面一般 > 8，压缩噪声 < 0.25）
 CAMERA_KEY_EVERY = 4  # 镜头运动效果区间内的变换关键帧间隔（finalize_nodes）
 
 
@@ -151,6 +153,14 @@ def make_unit(sid: str) -> UnitPlan:
                 lp.eye_init.append((t["frame"], e, c))
                 if c >= ANCHOR_CONF:
                     lp.anchors.append((t["frame"], e, c))
+        # 没有可靠眼睛锚点的图层（腿部特写、背影等，眼睛不在画面里）：人工标的 head 框（source 含 manual，planAuto 由 head 框推出
+        # 眼睛位置、置信度记 0）也作锚点，权重 HEAD_ANCHOR_W。s12 976～1012、s13 1048 / 1141～1156 的 head 框是 B3 按身体推的，
+        # 渲染与它们吻合时吊袜带等部位才落在原视频的位置（s12@974 不用它们时低约 140px）。线性插值、hold 出来的 head 框不用。
+        if not lp.anchors:
+            for t in lp.track:
+                if t.get("eyes") and t.get("head") and lp.fin <= t["frame"] < lp.fout and "manual" in (t.get("source") or ""):
+                    e = np.asarray(t["eyes"], np.float64)
+                    lp.anchors.append((t["frame"], e[np.argsort(e[:, 0])], HEAD_ANCHOR_W))
         lp.keys = list(range(lp.fin, lp.fout - 1, 12 if zoom else 24)) + [lp.fout - 1]
         layers.append(lp)
     u = UnitPlan(unit=q["unit"], shot_ids=q["shots"], start=q["start"], end=q["end"], effects=q["effects"], layers=layers,
@@ -159,8 +169,20 @@ def make_unit(sid: str) -> UnitPlan:
     return u
 
 
+def _on_screen(r, min_side: float = 24.0):
+    """框 [x, y, w, h] 裁到画面之后还有 min_side 见方以上时返回裁后的框，否则 None。"""
+    if not r:
+        return None
+    x0, y0 = max(0.0, r[0]), max(0.0, r[1])
+    x1, y1 = min(1280.0, r[0] + r[2]), min(720.0, r[1] + r[3])
+    return [x0, y0, x1 - x0, y1 - y0] if x1 - x0 >= min_side and y1 - y0 >= min_side else None
+
+
 def _interp_box(track: list, f: int):
-    return metric._interp_skip_null(track, f, "head") or metric._interp_skip_null(track, f, "bbox")
+    """实例在帧 f 的可见框：head 框在画面内（裁后够大）时用 head，否则用 bbox，都没有时 None（调用方用整个画面）。
+    腿部特写等镜头的 head 框在画面外很远（s13：y ≈ −800～−2400），上一版直接用它，裁出来的区域为空，
+    重复帧检测的 d 恒为 0，整段被判成重复（s13 1045～1051 每 6 帧一个新画面，1047、1049 实际不同）。"""
+    return _on_screen(metric._interp_skip_null(track, f, "head")) or _on_screen(metric._interp_skip_null(track, f, "bbox"))
 
 
 def finalize_nodes(u: UnitPlan, refs: "Refs") -> None:
@@ -170,6 +192,7 @@ def finalize_nodes(u: UnitPlan, refs: "Refs") -> None:
     for lp in u.layers:
         a, b = lp.fin, lp.fout
         d = {}
+        novalid = set()   # 实例区域为空（出画）的帧：d 无意义
         for f in range(a + 1, b):
             cur, prev = refs.frame(f).astype(np.int32), refs.frame(f - 1).astype(np.int32)
             box = _interp_box(lp.track, f)
@@ -179,6 +202,8 @@ def finalize_nodes(u: UnitPlan, refs: "Refs") -> None:
                 x0, x1 = max(0, round(x + w * 0.2)), min(1280, round(x + w * 0.8))
                 y0, y1 = max(62, round(y + h * 0.25)), min(652, round(y + h * 0.9))
             d[f] = float(np.abs(cur[y0:y1:2, x0:x1:2] - prev[y0:y1:2, x0:x1:2]).mean()) if y1 > y0 and x1 > x0 else 0.0
+            if not (y1 > y0 and x1 > x0):
+                novalid.add(f)
         is_new = {a: True}
         for f in range(a + 1, b):
             nb = min(d.get(f - 1, np.inf), d.get(f + 1, np.inf))
@@ -196,6 +221,11 @@ def finalize_nodes(u: UnitPlan, refs: "Refs") -> None:
         for c in cad:
             for f in range(max(c["start"], a + 1), min(c["end"], b)):
                 is_new[f] = (f - c["start"]) % c["every"] == 0
+                # cadence 说「新」、但原视频这一帧在实例区域里与上一帧逐像素相同（d < CADENCE_DUP）时仍按重复处理：
+                # cadence 标的是整段的节奏，原视频在其中偶尔多停几帧（s04 254～257、s05 381～388、s14 1168～1177），
+                # 照 cadence 出新画面，渲染在动、原视频不动 → 闪烁尖峰
+                if is_new[f] and f not in novalid and d[f] < CADENCE_DUP:
+                    is_new[f] = False
         news = sorted(f for f, v in is_new.items() if v)
         segs = []
         for i, g in enumerate(news):
