@@ -116,6 +116,10 @@ apps/player/
   （它验证「antialias=false 与开 MSAA 不同」，harness 本身 msaa=0 时无从验证）。所以 WSL 缺省 MSAA 0。
   s24 实测 MSAA 0 对指标无影响：普通帧 50 帧 SSIM@360 均值 0.7650、最低 0.7108、50/50 ≥ 0.6，与原机器（Vulkan、MSAA 4，均值约 0.765、50/50）一致。
 - 其余部分（物理、motion、合成 pass、读回）在两个后端上都逐位确定。
+- **Core 陈旧顶点（P6 修复）**：Core 不重算被跳过的 drawable（不可见且本次没有 VertexPositionsDidChange）的顶点，
+  Framework 计算遮罩布局时却把它们算进被裁切 drawable 的外接框，于是遮罩边缘几个像素（±1～3）取决于该 Core 模型之前 update 过哪些帧
+  （seek、隔帧渲染、Worker 调度都会触发；测试场景没有覆盖到）。`ModelInstance.update()` 之后把这些顶点置为 NaN，Framework 按「无有效点」跳过。
+  修复后全片乱序 seek 与顺序渲染逐字节相同。细节见 `docs/handoff.md` 第 5 节 P6。
 - 跨机器 / 跨驱动不保证逐位一致（GPU 光栅化与驱动有关）；确定性承诺是「同一机器、同一后端」。
 
 ### 测试结果

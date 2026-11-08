@@ -352,6 +352,22 @@ export class CharaForgeRuntime {
   }
 
   /**
+   * 只预取、不渲染（Worker 路径；同步路径下什么也不做）：把这些帧上各可见图层的求值 + Core update 交给 Worker。
+   * 用于提前做新图层的物理预热（从 in − warmup 起逐帧推进，约 0.05～0.3 秒）：结果留在 inflight 里，
+   * 真正渲染到该帧时直接取用；求值器的状态链与按顺序播放完全相同，所以不改变任何像素。
+   * 任务按帧号从小到大排队，不会抢在播放所需的帧前面。返回全部完成（或作为过期任务被丢弃）时兑现的 Promise。
+   */
+  prefetch(frames: number[]): Promise<void> {
+    if (!this.pool || !this.scene) return Promise.resolve();
+    const jobs: Promise<unknown>[] = [];
+    for (const f of frames) {
+      if (f < 0 || f >= this.scene.duration) continue;
+      for (const p of this.plan(f)) if (p.visible && !p.cacheHit) jobs.push(this.requestUpdate(p).catch(() => {}));
+    }
+    return Promise.all(jobs).then(() => {});
+  }
+
+  /**
    * 请求 (图层, g, 覆盖) 的 Core update 结果；同一请求只发一次。
    * 任务先进入主线程的等待队列，有空闲 Worker 时按帧号从小到大发出（发出时才在主线程求值到「参数就绪」）。
    */

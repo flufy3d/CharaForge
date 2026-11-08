@@ -9,7 +9,7 @@
  *   compare=side|overlay|diff  初始对照模式（需 debug=1 才显示面板）
  *   frame=<n>              初始帧
  *   workers=<n>            求值 Worker 数（缺省 clamp(逻辑核数/2 − 1, 2, 6)；0 = 主线程同步求值）
- *   prewarm=0              不做后台预热（缺省在暂停时预热各图层的第一帧，见 PlayerEngine.startPrewarm）
+ *   prewarm=0              不做新图层预热（缺省加载后与播放中让 Worker 提前做物理预热，见 PlayerEngine.startPrewarm；诊断用）
  * 快捷键：空格 播放/暂停；←/→ ±1 帧；Shift+←/→ ±10 帧；Home/End；[ / ] 上/下一个镜头标记；
  *         D 调试面板；调试面板打开时 1～4 = 对照模式 关/并排/叠加/差异图；M 静音
  */
@@ -99,7 +99,7 @@ function boot(canvas: HTMLCanvasElement): void {
     if (params.has('frame')) eng.seek(Number(params.get('frame')));
     setBoot({ stage: '渲染第一帧' });
     eng.start();
-    // 后台预热各图层的第一帧（物理预热、GL 资源），暂停时进行，避免播放到新图层时卡顿；?prewarm=0 关闭
+    // 让 Worker 提前为各图层做物理预热（见 PlayerEngine.startPrewarm），避免播放到新图层时卡顿；?prewarm=0 关闭（诊断用）
     if (params.get('prewarm') !== '0') eng.startPrewarm();
     setBoot({ scene: sc });
     const vid = params.get('video') ?? DEFAULT_VIDEO;
@@ -328,8 +328,8 @@ function App() {
           {st?.playing ? `实测 ${st.fps.toFixed(1)} fps` : '已暂停'} · 每帧渲染 {st ? st.renderMs.toFixed(1) : '—'} ms · workers {eng?.workers ?? '—'}
         </span>
         {st && st.prewarm.done < st.prewarm.total && (
-          <span className="small warn" title="暂停时把各图层第一次出现的帧离屏渲染一遍（物理预热、GL 资源）。预热完之前播放，第一次走到新图层时可能短暂卡顿。">
-            后台预热图层 {st.prewarm.done}/{st.prewarm.total}{st.playing ? '（播放中暂停）' : ''}
+          <span className="small muted" title="Worker 提前为各图层做物理预热（不阻塞播放、不改变画面）。">
+            预热图层 {st.prewarm.done}/{st.prewarm.total}
           </span>
         )}
       </div>

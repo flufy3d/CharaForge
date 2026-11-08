@@ -5,6 +5,9 @@
  *    （CPU 剖析中 bufferData 占绘制时间约 24%）。UV / 索引在模型生命周期内不变，这里拦截对这些
  *    Core 视图的 bufferData：第一次为该视图建一个 STATIC_DRAW 缓冲，之后直接绑定它，跳过上传。
  *    数据与绘制调用完全相同，像素逐位不变。
+ *    缓存按「模型 URL + drawable 序号 + 种类」共享给同一模型的所有实例（它们的 UV / 索引逐字节相同）。
+ *    以前按实例各建一份，每个新实例第一次绘制要建约 1000 个缓冲；WSL 的 Mesa d3d12 下 GPU 进程执行这些
+ *    命令要 0.1～0.7 秒，渲染进程在 WaitForAvailableEntries 上干等，全片播放到每个新图层都会卡（P5 实测，见 docs/handoff.md）。
  * 2. 绕序修正：带背面剔除的模型在翻转绘制（det < 0）时，主绘制阶段把 Cubism 设置的 frontFace(CCW) 换成 CW。
  */
 import type { CubismRenderer_WebGL } from '@cubism/framework/rendering/cubismrenderer_webgl';
@@ -18,8 +21,12 @@ export interface ProxyContext {
 interface Shared {
   proxy: WebGL2RenderingContext;
   ctx: ProxyContext;
-  staticViews: WeakSet<ArrayBufferView>;
-  cache: WeakMap<ArrayBufferView, WebGLBuffer>;
+  /**
+   * 静态视图 → 共享键。同一个 moc 的所有实例，第 i 个 drawable 的 UV / 索引内容完全相同，
+   * 键 = 模型 URL + drawable 序号 + 种类，所以第二个及以后的实例直接复用第一个实例建好的缓冲。
+   */
+  staticKeys: WeakMap<ArrayBufferView, string>;
+  cache: Map<string, WebGLBuffer>;
 }
 
 const shared = new WeakMap<WebGL2RenderingContext, Shared>();
@@ -28,24 +35,25 @@ export function cubismGlProxy(gl: WebGL2RenderingContext): Shared {
   let s = shared.get(gl);
   if (s) return s;
   const ctx: ProxyContext = { renderer: null, invertWinding: false };
-  const staticViews = new WeakSet<ArrayBufferView>();
-  const cache = new WeakMap<ArrayBufferView, WebGLBuffer>();
+  const staticKeys = new WeakMap<ArrayBufferView, string>();
+  const cache = new Map<string, WebGLBuffer>();
   const overrides: Record<string, unknown> = {
     frontFace(mode: number) {
       const flip = ctx.invertWinding && !!ctx.renderer && !ctx.renderer.isGeneratingMask();
       gl.frontFace(flip ? (mode === gl.CCW ? gl.CW : gl.CCW) : mode);
     },
     bufferData(target: number, data: unknown, usage: number, ...rest: unknown[]) {
-      if (ArrayBuffer.isView(data) && staticViews.has(data) && rest.length === 0) {
-        let buf = cache.get(data);
+      const key = ArrayBuffer.isView(data) && rest.length === 0 ? staticKeys.get(data) : undefined;
+      if (key !== undefined) {
+        let buf = cache.get(key);
         if (buf) {
           gl.bindBuffer(target, buf);
           return;
         }
         buf = gl.createBuffer()!;
-        cache.set(data, buf);
+        cache.set(key, buf);
         gl.bindBuffer(target, buf);
-        gl.bufferData(target, data, gl.STATIC_DRAW);
+        gl.bufferData(target, data as ArrayBufferView, gl.STATIC_DRAW);
         return;
       }
       (gl.bufferData as (...a: unknown[]) => void)(target, data, usage, ...rest);
@@ -71,7 +79,7 @@ export function cubismGlProxy(gl: WebGL2RenderingContext): Shared {
       }
     }
   }
-  s = { proxy: proxy as unknown as WebGL2RenderingContext, ctx, staticViews, cache };
+  s = { proxy: proxy as unknown as WebGL2RenderingContext, ctx, staticKeys, cache };
   shared.set(gl, s);
   return s;
 }

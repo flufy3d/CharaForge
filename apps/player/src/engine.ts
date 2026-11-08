@@ -26,7 +26,7 @@ export interface EngineStatus {
   muted: boolean;
   /** 至少有一帧上屏了 */
   ready: boolean;
-  /** 后台预热进度（各图层的 in 帧） */
+  /** 新图层预热进度（各图层 in 帧的 Worker 预取） */
   prewarm: { done: number; total: number };
 }
 
@@ -96,56 +96,37 @@ export class PlayerEngine {
   }
 
   /*
-   * 后台预热：全片场景有几十个图层，播放第一次走到某图层的 in 时，Worker 要做 90 帧物理预热（约 0.1～0.3 秒），
-   * 主线程第一次画这个实例要建 GL 资源（约 0.15～0.4 秒），实测会卡 0.1～0.6 秒、一次丢几十帧。
-   * 预热 = 把各图层的 in 帧离屏渲染一遍、不上屏；之后求值器在 in 处留有状态（游标 / 最近状态），播放到那里直接续上。
-   * 全部预热约 13 秒，所以不阻塞加载：第一帧出来就可以播放，预热只在暂停且无事可做时一帧一帧进行；
-   * 第一次预热时把所有 in 帧作为预取一起发给 Worker（物理预热在多个 Worker 上并行）。播放中不做主线程部分，
-   * 只把前方 2 秒内将要出现的图层作为预取提前发给 Worker。
-   * 画面只是帧号的函数（规范保证 seek 与顺序播放逐位相同），预热不改变任何一帧的结果，只是挪动开销。
+   * 新图层的预热（只在 Worker 上做，不阻塞主线程、不改变像素）。
+   * 播放第一次走到某图层的 in 时，Worker 要从 in − warmup 起把物理逐帧推进（90 帧，约 0.05～0.3 秒）；
+   * 不提前做，这一帧等不到结果、会丢几帧。所以：
+   *   1. 场景加载后把所有图层的 in 帧一次性作为预取交给 Worker（runtime.prefetch：按帧号排队，不抢播放所需的帧）；
+   *   2. 播放中，前方 3 秒内将出现的图层的 in 帧每帧都放进预取列表（同一请求只发一次；往回 seek 之后同样生效）。
+   * 主线程第一次画某个实例以前也要卡 0.1～0.7 秒（每个实例约 1000 个 GL 缓冲的创建，WSL 的 Mesa d3d12 下很慢），
+   * 已在 glProxy.ts 改为同一模型的实例共用静态缓冲，不再需要在主线程上预热。
+   * 画面只是帧号的函数（规范保证 seek 与顺序播放逐位相同），预取只是挪动开销。
    */
-  private warmQueue: number[] = [];
-  private warmTotal = 0;
-  private warmKicked = false;
-  private warming = false;
-  /** 合成缓冲被预热帧覆盖了（播放中的对照模式会直接复用合成缓冲，需要重画） */
-  private compStale = false;
+  private layerIns: number[] = [];
+  private lookahead = false;
 
-  /** 开始后台预热（场景加载之后调用；再次调用会重新开始）。 */
+  /** 开始预热（场景加载之后调用）。 */
   startPrewarm(): void {
-    this.warmQueue = [...new Set(this.scene.layers.map((l) => l.in))].filter((f) => f > 0 && f < this.duration).sort((a, b) => a - b);
-    this.warmTotal = this.warmQueue.length;
-    this.warmKicked = false;
-    this.status.prewarm = { done: 0, total: this.warmTotal };
-  }
-
-  private warmStep(): void {
-    const f = this.warmQueue.shift()!;
-    const prefetch = this.warmKicked ? [] : [...this.warmQueue];
-    this.warmKicked = true;
-    this.busy = true;
-    this.warming = true;
-    this.busySince = performance.now();
-    this.runtime
-      .renderFrameAsync(f, { prefetch })
-      .catch((e) => console.warn('[player] 预热失败', f, e))
-      .finally(() => {
-        this.busy = false;
-        this.warming = false;
-        this.compStale = true;
-        this.status.prewarm = { done: this.warmTotal - this.warmQueue.length, total: this.warmTotal };
-        this.onStatus(this.status);
+    this.layerIns = [...new Set(this.scene.layers.map((l) => l.in))].filter((f) => f > 0 && f < this.duration).sort((a, b) => a - b);
+    this.lookahead = true;
+    const total = this.layerIns.length;
+    let done = 0;
+    this.status.prewarm = { done, total };
+    for (const f of this.layerIns) {
+      void this.runtime.prefetch([f]).then(() => {
+        this.status.prewarm = { done: ++done, total };
+        if (!this.clock.playing || done === total) this.onStatus(this.status);
       });
+    }
   }
 
-  /** 播放中：已经走过的 in 不用再预热；前方 2 秒内的 in 作为预取发给 Worker（只做 Worker 部分）。 */
+  /** 播放中：前方 3 秒内将出现的图层的 in 帧。 */
   private warmAhead(f: number): number[] {
-    if (!this.warmQueue.length) return [];
-    const ahead = this.warmQueue.filter((x) => x > f + 4 && x <= f + 120);
-    const before = this.warmQueue.length;
-    this.warmQueue = this.warmQueue.filter((x) => x > f + 120);
-    if (this.warmQueue.length !== before) this.status.prewarm = { done: this.warmTotal - this.warmQueue.length, total: this.warmTotal };
-    return ahead;
+    if (!this.lookahead) return [];
+    return this.layerIns.filter((x) => x > f + 4 && x <= f + 180);
   }
 
   /** 静音只改增益，时钟照常以音频时间为准。 */
@@ -262,8 +243,6 @@ export class PlayerEngine {
   private tick(): void {
     if (!this.scene) return;
     if (this.busy) {
-      // 后台预热中、用户没有新的请求：不算等待
-      if (this.warming && this.frame === this.rendered && !this.dirty && !this.clock.playing) return;
       // 远距离 seek 时 Worker 要从最近的物理快照逐帧补到目标帧：等待超过 250 ms 就报给 UI（每 250 ms 一次）
       const w = performance.now() - this.busySince;
       if (w > 250 && Math.floor(w / 250) !== Math.floor(this.status.waitMs / 250)) {
@@ -288,22 +267,17 @@ export class PlayerEngine {
     }
     const comparing = this.compare === 'overlay' || this.compare === 'diff';
     if (this.frame === this.rendered && !this.dirty && !(comparing && this.clock.playing)) {
-      if (!this.clock.playing && this.warmQueue.length) {
-        this.warmStep();
-        return;
-      }
       this.emit(0, 0);
       return;
     }
     const f = this.frame;
     const tickTs = this.tickTs;
-    const needRender = f !== this.rendered || this.dirty || this.compStale;
+    const needRender = f !== this.rendered || this.dirty;
     this.dirty = false;
-    this.compStale = false;
     this.busy = true;
     this.busySince = performance.now();
     // Worker 路径：拿到 f 的数据后立即预取 f+1（播放时下一帧大概率就是它），与本帧绘制重叠
-    // 播放时预取后面几帧（过期的预取在发给 Worker 之前就会被丢弃，不浪费算力），以及前方 2 秒内新图层的 in 帧
+    // 播放时预取后面几帧（过期的预取在发给 Worker 之前就会被丢弃，不浪费算力），以及前方 3 秒内新图层的 in 帧
     const job = needRender
       ? this.runtime.renderFrameAsync(f, { prefetch: this.clock.playing ? [f + 1, f + 2, f + 3, f + 4, ...this.warmAhead(f)] : [] })
       : Promise.resolve(null);
