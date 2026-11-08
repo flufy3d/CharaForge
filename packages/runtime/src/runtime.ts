@@ -6,6 +6,7 @@
  *   - 物理固定步长 1/fps，seek 时从 in − warmup 重放（带检查点），顺序播放增量推进，二者逐位相同。
  */
 import { parseScene, sample, type CameraTransform, type ModelLayer, type Scene, type Transform2D } from '@charaforge/scene';
+import { waitForCubismCore } from './coreReady.ts';
 import { Compositor, type LayerDrawParams, type Pixels, type Region, type ResolvedFilter } from './compositor.ts';
 import { LayerEvaluator, type LayerStateToken, type ParamOverrides } from './evaluator.ts';
 import type { InstanceState, ModelInstance } from './instance.ts';
@@ -141,6 +142,8 @@ export class CharaForgeRuntime {
   }
 
   static async create(opts: RuntimeOptions): Promise<CharaForgeRuntime> {
+    // 主线程同样等 Core 的 WASM 实例化完成（见 coreReady.ts）；没加载 Core 时保持原行为，到加载模型时再报错
+    if ('Live2DCubismCore' in globalThis) await waitForCubismCore();
     const comp = await Compositor.create(opts.width ?? 1280, opts.height ?? 720, { canvas: opts.canvas, msaa: opts.msaa });
     const rt = new CharaForgeRuntime(comp, opts);
     await rt.workerInit;

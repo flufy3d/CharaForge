@@ -155,7 +155,11 @@ void main() {
   finalColor = acc / float(k * k);
 }`;
 
-/** 调试视图：A=渲染，B=参考视频帧（非预乘、不透明）。mode 0 = 叠加（mix），1 = 差异 |A−B|·gain。 */
+/**
+ * 调试视图（只用于播放器的 presentDebug，不影响 renderFrame / readPixels）：A=渲染（预乘），B=参考视频帧（不透明）。
+ * 先把 A 按 alpha 合成到 B 上（C = A + (1−αA)·B，与 docs/pipeline.md 指标定义的 C_f 相同），再：
+ * mode 0 = 叠加 mix(C, B, uMix)；mode 1 = 差异 |C−B|·gain（没画到角色的地方为 0，只显示角色区域的差异）。
+ */
 export const DEBUG_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 precision highp sampler2D;
@@ -169,7 +173,7 @@ out vec4 finalColor;
 void main() {
   vec4 a = texture(uTexture, vUV);
   vec3 b = texture(uVideo, vUV).rgb;
-  vec3 ca = a.rgb + (1.0 - a.a) * vec3(0.0); // 渲染结果（背景已在合成时铺好）
+  vec3 ca = a.rgb + (1.0 - a.a) * b; // 渲染合成到参考帧上（场景有不透明背景时 αA = 1，等于渲染本身）
   if (uMode < 0.5) finalColor = vec4(mix(ca, b, uMix), 1.0);
   else finalColor = vec4(clamp(abs(ca - b) * uGain, 0.0, 1.0), 1.0);
 }`;

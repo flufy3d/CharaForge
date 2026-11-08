@@ -202,6 +202,20 @@ export class Compositor {
     this.quadOverwrite.state.blend = false;
     this.overwriteStage.addChild(this.quadOverwrite);
     this.resize(width, height);
+    this.warmShaders();
+  }
+
+  /**
+   * 预先链接全部合成着色器：各画一次全屏 pass 到临时缓冲（不碰合成缓冲，不影响任何输出）。
+   * Pixi 在第一次用到某个程序时才编译链接；WSL 的 ANGLE/D3D12 后端单个程序要 0.1～0.3 秒（color、resample 实测约 0.3 秒），
+   * 不预先做的话，播放中第一次用到某种滤镜的那一帧会卡住。
+   */
+  private warmShaders(): void {
+    for (const ps of [this.blur, this.motionBlur, this.color, this.output, this.resample, this.debug, this.copyPass, this.upsample]) {
+      this.pass(ps, this.tmpA, this.tmpB, true);
+      this.pass(ps, this.tmpA, this.tmpB, false);
+    }
+    this.clearRT(this.tmpB, [0, 0, 0, 0]);
   }
 
   /** 改变合成分辨率（重建图层缓冲与合成缓冲）。 */

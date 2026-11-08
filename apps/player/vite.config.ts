@@ -7,6 +7,10 @@
  *   /scenes/...                  场景与镜头表
  *   /packages/scene/examples/... 示例场景
  * 支持 Range 请求（<video>/<audio> 精确 seek 需要）。
+ *
+ * pnpm build 的产物（apps/player/dist/）只含页面和打包后的代码（含 Cubism Framework 编译结果），
+ * 不含 Cubism Core、模型、视频、音频、场景：这些仍按上面的 URL 从仓库目录读取。
+ * 所以 dist/ 必须由带同一白名单的服务器提供：pnpm preview（vite preview，复用本中间件）。
  */
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
@@ -100,8 +104,15 @@ export default defineConfig({
     strictPort: false,
     fs: { allow: [REPO] },
   },
+  // pnpm preview：与 dev 同一个白名单中间件（configurePreviewServer），dist/ 只有页面与打包后的代码
+  preview: {
+    port: 4173,
+    strictPort: false,
+  },
   build: {
     target: 'es2022',
+    // 打包产物放 _app/：缺省的 assets/ 会和白名单里的 /assets/（模型、视频、音频）抢同一个 URL 前缀
+    assetsDir: '_app',
     rollupOptions: {
       input: { index: join(HERE, 'index.html'), harness: join(HERE, 'harness.html') },
     },

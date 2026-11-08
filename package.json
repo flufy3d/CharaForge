@@ -17,6 +17,7 @@
     "build": "pnpm -r run build",
     "framework": "node packages/runtime/scripts/build-framework.mjs",
     "dev": "pnpm --filter @charaforge/player dev",
+    "preview": "pnpm --filter @charaforge/player preview",
     "render": "node packages/runtime/scripts/build-framework.mjs && node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/render.ts",
     "render:gallery": "node packages/runtime/scripts/build-framework.mjs && node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/gallery.ts",
     "test:runtime": "pnpm --filter @charaforge/runtime test",

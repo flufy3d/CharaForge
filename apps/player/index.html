@@ -9,6 +9,17 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Cubism Core 不进仓库；没装时 Framework 在模块加载阶段就会抛错、React 挂不上，这里直接给出提示
+      if (typeof Live2DCubismCore === 'undefined') {
+        document.getElementById('root').innerHTML =
+          '<div class="app"><div class="error-box" role="alert"><strong>没有找到 Live2D Cubism Core</strong>' +
+          '<div>Cubism Core 不进仓库，请先在仓库根目录运行 <code>pnpm run setup</code>（或 <code>pnpm setup:cubism</code>），' +
+          '它会从 Live2D 官方地址下载到 <code>vendor/cubism/core/</code>；然后用 <code>pnpm dev</code> 或 <code>pnpm preview</code> 打开本页。</div>' +
+          '<div class="small">/vendor/cubism/core/live2dcubismcore.min.js 加载失败</div></div></div>';
+        window.__charaforgeNoCore = true;
+      }
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

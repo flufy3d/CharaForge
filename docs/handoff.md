@@ -33,7 +33,7 @@
 |---|---|---|
 | `packages/scene` | 场景格式 `charaforge.scene` v1 和镜头表格式 `charaforge.shots` v1（TypeBox），JSON Schema，曲线求值，校验 | 稳定 |
 | `packages/runtime` | Cubism 封装：确定性物理、参数覆盖钩子、离屏渲染、Worker 并行、合成器（滤镜、clip、frameHold、resample、scaleX/Y） | 稳定，13 项确定性测试 |
-| `apps/player` | 播放器：音频时钟、调试模式；harness 页面；CLI：`pnpm render`、`render:gallery`、`bench`、`verify:video` | 稳定；3 个实例约 59.5fps |
+| `apps/player` | 播放器：音频时钟、调试模式；harness 页面；CLI：`pnpm render`、`render:gallery`、`bench`、`verify:video` | 稳定；3 个实例约 59.5fps（原机器）；P5 打磨过，WSL 机器实测见第 5 节 |
 | `tools/recon` | 镜头分析，`manual.py` 是唯一的人工数据源，产出 `scenes/deepseek-chan/shots.json` | 46 个镜头，经过多轮修正 |
 | `tools/fit` | 拟合引擎 fit4：面捕输入空间轨迹，加光流、雅可比、LM，加逐帧精修，加批量驱动 `scripts/batch.sh`（支持断点续跑） | 能用，但慢、有闪烁，见第 3 节 |
 | `tools/qa` | `metric.py`（指标，唯一实现）和 `report.py`（全片报告、HTML、差异视频） | 能用；有未完成的改动，见第 4 节 |
@@ -114,11 +114,54 @@
 
 ## 5. 剩余阶段
 
-- **P4**：用新引擎重拟合全片，普通帧达到 ≥ 0.6，闪烁消除。把全片质检报告和差异视频给用户确认。
-- **P5**：
-  - 打磨播放器；
-  - `pnpm build` 出静态页（只在本地查看）；
-  - README 写清楚怎么安装、怎么运行、怎么复现整条管线（setup → recon → fit → qa → build），包括三层授权说明和模型署名（README 里已有授权一节）。
+- **P4（完成，提交 f39cce0）**：用新引擎重拟合全片，替换 `scenes/deepseek-chan/scene.json`。
+  - 28 个拟合单元、47 个图层，全部来自 `tools/gpu` 的整段轨迹联合优化（冷启动，`a5_batch.py --max-frames-per-batch 450`，拟合约 3 小时 18 分）。
+  - 全片质检（runtime 渲染 + `metric.py`，门槛 0.6，报告在拟合机器的 `.data/qa/p4b/`）：普通帧 **834/916 ≥ 0.6**（旧引擎 543/901），均值 **0.750**；
+    目测帧均值 0.733（1478/1696 ≥ 0.6）；特效帧均值 0.690（596/760）；闪烁尖峰 **21**（旧引擎 143）。
+  - 遗留问题：s13 窗口展开、s26 笔刷和 ✓ 的排除区、s12，以及剩余的闪烁帧（s13 5、s32 5、s15 4、s31 2 等）。
+- **P5（完成，未提交）**：播放器打磨、`pnpm build` 静态页、README。
+  - **播放器修复**：
+    - 启动只建一个引擎（以前 React StrictMode 下建两个运行时共用一个 canvas，`window.__player` 偶尔指向被丢弃的那个）；
+    - 加载状态（分阶段 + 已用时间）、出错提示（缺 Cubism Core / 模型 / 场景 / 校验失败，带处理办法；音频、参考视频加载失败给非致命提示）；
+      缺 Core 时以前是白屏（Framework 在模块加载时就抛错），现在 `index.html` 直接给出提示；
+    - 快捷键在按钮、滑块、单选框获得焦点时也能用（以前点过对照模式的单选框后快捷键全部失效），空格不再同时触发有焦点的按钮；
+      新增 `1`～`4` 对照模式、`M` 静音；控制栏显示快捷键；
+    - 播放中打开对照模式时参考视频跟着播放（以前视频停着，每帧被重新 seek）；
+    - 差异图 / 叠加改为把渲染合成到原视频上再比较（与指标的 C_f 同口径；以前合成到黑底，背景整片都算差异）——`packages/runtime/src/shaders.ts` 的 `DEBUG_FRAG`，只用于 `presentDebug`；
+    - 署名去重（scene 的 `meta.credits` 和模型 `credits` 相同，以前显示两遍并报 React key 警告），链接可点，加模型发布页与「禁止再分发、不公开部署」说明；
+    - 远距离 seek 时显示「定位中」；「复制本帧链接」；画面高度限制在视口内，控制条不被挤出首屏；
+    - **后台预热**（`PlayerEngine.startPrewarm`，`?prewarm=0` 关闭）：暂停时把各图层的 in 帧离屏渲染一遍。不预热时全片播放到新图层要卡 0.1～0.7 秒
+      （Worker 90 帧物理预热 + 主线程首次画实例），60 秒丢帧 22～24%；
+    - 合成器启动时预先链接全部 pass 着色器（`Compositor.warmShaders`）：WSL 的 ANGLE/D3D12 下 color、resample 首次链接各约 0.3 秒，以前卡在 s04、s06 的第一帧；
+    - `pnpm build` 后 Worker 里启动 Framework 时 Cubism Core 6 的 WASM 还没实例化完（`Cannot read properties of undefined (reading 'apply')`，
+      开发模式下因为模块逐个加载而碰巧没事），新增 `packages/runtime/src/coreReady.ts` 等它就绪（Worker 与主线程）。
+    - 运行时改动不影响输出：`pnpm test:runtime` 12 通过、1 跳过；全片抽 9 帧 `pnpm render` 与 P4 的渲染逐字节相同。
+  - **实测**（WSL2、RTX 5080 Laptop、8 逻辑核 → 缺省 3 个 Worker；测量时另一个拟合任务占用 GPU 64～85%，数据偏保守）：
+    | 场景 | fps | 上屏间隔 p99 / 最大 | 丢帧率 | 画面落后声音（帧）均值 / 最大 |
+    |---|---|---|---|---|
+    | 全片 60 秒，后台预热完（12.5 秒）再播 | **58.97** | 33.4 / 50.1 ms | 1.75% | 0.76 / 3.1 |
+    | 全片 60 秒，就绪后立即播（未预热） | 45.48 | 217 / 717 ms | 24% | 0.76 / 9.6 |
+    | `demo:3`（3 个大实例），3 Worker（缺省），3 次 | 56.75 / 53.55 / 53.15 | 33～50 / 50～83 ms | 5.5～11.3% | 1.1～1.2 / ≤ 5.0 |
+    | `demo:3`，4 / 5 / 6 Worker | 56.55、51.10 / 55.25 / 49.90 | 33～50 / 33～117 ms | 5.8～16.5% | 1.2～1.6 / ≤ 4.4 |
+    | `demo:1`、`demo:2`（3 Worker） | 57.73、60.07 / 58.13 | 16.8～33.4 / ≤ 50 ms | 0～3.6% | 0.4～0.9 / ≤ 2.7 |
+    | `demo:4`（6 Worker） | 32.13、22.67 | 83～133 / 100～150 ms | 46～62% | 2.2～3.0 / ≤ 9.3 |
+
+    原机器（12 逻辑核、5～6 个 Worker、无其他负载）`demo:3` 为 59.3～59.5 fps；这台 8 核机器 3 个 Worker 不够、6 个 Worker 又和主线程 / GPU 进程抢核。
+    音画同步：时钟就是音频输出时间（`getOutputTimestamp` 外推），60 秒内帧号前进 59.97～60.00 帧/秒，前 10% 与后 10% 样本的滞后均值 0.71 / 0.735 帧，没有漂移；
+    把音频请求屏蔽、改用系统时钟时卡顿情况相同，说明卡顿与音频时钟无关。`pnpm verify:video`：50/50 帧逐帧精确。
+    方法：`pnpm bench <场景> <秒数> [workers] [起始帧]`（改过：真实点击播放、报告音画滞后与预热时间；`BENCH_QUERY`、`BENCH_PLAY_NOW`）。
+  - **静态页**：`pnpm build` → `apps/player/dist/`（约 1.5MB、15 个文件，不含模型、视频、音频、场景、Cubism Core；含编译后的 Framework）；
+    `pnpm preview`（新增，`vite preview` 复用白名单中间件 `repoFiles()`）在 `http://localhost:4173/` 完整播放全片、调试模式可用。
+    打包目录改为 `_app/`（缺省 `assets/` 会和白名单 `/assets/` 冲突）。
+  - **README**：项目说明与管线图、三层授权与模型署名、路线 A 说明、环境要求（WSL d3d12）、安装（含 gpu 依赖组两步安装）、播放器与调试模式、静态页、
+    复现整条管线（setup → recon → fit → render → qa → build，命令都实际核对过）、验收口径与 P4 结果、目录结构。
+  - **没做完 / 建议**：
+    - 未预热就播放仍会在新图层处卡顿。主线程部分（每个新实例 0.1～0.6 秒，越往后越大）不是着色器编译也不是 JS，推测是每个图层一个实例、
+      各自的 GL 资源（遮罩缓冲 2048² 等，47 个实例）。根治要改运行时：Worker 路径下主线程实例只是绘制目标（动态数据全部导入覆盖），
+      可以在时间上不重叠的图层之间复用，或者释放远离播放头的实例的 GL 资源。需要总负责人决定。
+    - 预热进行中按播放，最多要等当前预热帧做完（约 0.1～0.6 秒）才开始走。
+    - 4 个实例同屏在这台机器上只有 23～32 fps（原机器 30 fps），见 `docs/runtime-eval.md` 第 6 节。
+    - 其他浏览器（Firefox、Safari）未验证。
 
 ## 6. 环境与操作注意
 

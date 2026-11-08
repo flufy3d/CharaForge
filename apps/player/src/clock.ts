@@ -10,6 +10,7 @@ export class PlaybackClock {
   private ctx: AudioContext | null = null;
   private buffers = new Map<string, AudioBuffer>();
   private sources: AudioBufferSourceNode[] = [];
+  private gains: { node: GainNode; gain: number }[] = [];
   private startCtxTime = 0;
   private startPerf = 0;
   private startSeconds = 0;
@@ -96,9 +97,16 @@ export class PlaybackClock {
         src.connect(gain).connect(this.ctx.destination);
         src.start(when, offset, dur);
         this.sources.push(src);
+        this.gains.push({ node: gain, gain: clip.gain ?? 1 });
       }
     }
     this.playing = true;
+  }
+
+  /** 静音只改增益，不影响时钟。 */
+  setMuted(m: boolean): void {
+    this.muted = m;
+    for (const g of this.gains) g.node.gain.value = m ? 0 : g.gain;
   }
 
   pause(): number {
@@ -124,6 +132,7 @@ export class PlaybackClock {
       }
     }
     this.sources = [];
+    this.gains = [];
   }
 
   dispose(): void {

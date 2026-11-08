@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "node ../../packages/runtime/scripts/build-framework.mjs && vite",
     "build": "node ../../packages/runtime/scripts/build-framework.mjs && vite build",
+    "preview": "vite preview",
     "typecheck": "node ../../packages/runtime/scripts/build-framework.mjs && tsc --noEmit",
     "render": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/render.ts",
     "render:gallery": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/gallery.ts"

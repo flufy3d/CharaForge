@@ -3,6 +3,7 @@
  * （Framework 有模块在加载时就引用全局 Live2DCubismCore）。
  * 主线程消息与其他 Worker 经 MessagePort 发来的 update 消息进入同一个串行队列。
  */
+import { waitForCubismCore } from './coreReady.ts';
 import type { PeerUpdate, WorkerRequest, WorkerResponse } from './workerProtocol.ts';
 
 const scope = self as unknown as {
@@ -26,6 +27,8 @@ async function dispatch(msg: WorkerRequest): Promise<void> {
     const src = await (await fetch(msg.coreUrl)).text();
     // 间接 eval：在 Worker 全局作用域执行 vendor 里的官方 Core 脚本，定义全局 Live2DCubismCore
     (0, eval)(src);
+    // Core 的 WASM 是异步实例化的，就绪之前不能启动 Framework（见 coreReady.ts）
+    await waitForCubismCore();
     main = import('./workerMain.ts');
     for (const p of msg.ports) if (p) p.onmessage = (e: MessageEvent<PeerUpdate>) => enqueuePeer(e.data);
   }
