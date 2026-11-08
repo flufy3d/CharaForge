@@ -4628,7 +4628,7 @@
 {
 "frame": 3281,
 "visibleFrac": 0.786,
-"headFrac": 0.975,
+"headFrac": 0.993,
 "eyesVisible": true,
 "visible": [
 248.0,
@@ -4641,7 +4641,7 @@
 {
 "frame": 3282,
 "visibleFrac": 0.765,
-"headFrac": 0.972,
+"headFrac": 0.992,
 "eyesVisible": true,
 "visible": [
 248.0,
@@ -4654,7 +4654,7 @@
 {
 "frame": 3283,
 "visibleFrac": 0.652,
-"headFrac": 0.963,
+"headFrac": 0.987,
 "eyesVisible": true,
 "visible": [
 248.0,
@@ -4667,7 +4667,7 @@
 {
 "frame": 3284,
 "visibleFrac": 0.617,
-"headFrac": 0.96,
+"headFrac": 0.984,
 "eyesVisible": true,
 "visible": [
 248.0,
@@ -4680,7 +4680,7 @@
 {
 "frame": 3285,
 "visibleFrac": 0.558,
-"headFrac": 0.947,
+"headFrac": 0.978,
 "eyesVisible": true,
 "visible": [
 248.0,
@@ -4693,7 +4693,7 @@
 {
 "frame": 3286,
 "visibleFrac": 0.535,
-"headFrac": 0.942,
+"headFrac": 0.975,
 "eyesVisible": true,
 "visible": [
 248.0,
@@ -4706,7 +4706,7 @@
 {
 "frame": 3287,
 "visibleFrac": 0.47,
-"headFrac": 0.925,
+"headFrac": 0.963,
 "eyesVisible": true,
 "visible": [
 248.0,
@@ -4719,7 +4719,7 @@
 {
 "frame": 3288,
 "visibleFrac": 0.37,
-"headFrac": 0.9,
+"headFrac": 0.945,
 "eyesVisible": true,
 "visible": [
 248.0,
@@ -4732,7 +4732,7 @@
 {
 "frame": 3289,
 "visibleFrac": 0.267,
-"headFrac": 0.89,
+"headFrac": 0.931,
 "eyesVisible": true,
 "visible": [
 256.0,
@@ -4745,8 +4745,8 @@
 {
 "frame": 3290,
 "visibleFrac": 0.133,
-"headFrac": 0.847,
-"eyesVisible": true,
+"headFrac": 0.918,
+"eyesVisible": false,
 "visible": [
 420.0,
 12.0,
@@ -4758,7 +4758,7 @@
 {
 "frame": 3291,
 "visibleFrac": 0.001,
-"headFrac": 0.711,
+"headFrac": 0.839,
 "eyesVisible": false,
 "visible": null,
 "occluder": null
@@ -4766,7 +4766,7 @@
 {
 "frame": 3292,
 "visibleFrac": 0.0,
-"headFrac": 0.691,
+"headFrac": 0.84,
 "eyesVisible": false,
 "visible": null,
 "occluder": [
@@ -4779,7 +4779,7 @@
 {
 "frame": 3293,
 "visibleFrac": 0.0,
-"headFrac": 0.234,
+"headFrac": 0.299,
 "eyesVisible": false,
 "visible": null,
 "occluder": [
@@ -4792,7 +4792,7 @@
 {
 "frame": 3294,
 "visibleFrac": 0.0,
-"headFrac": 0.082,
+"headFrac": 0.093,
 "eyesVisible": false,
 "visible": null,
 "occluder": [
@@ -4826,22 +4826,22 @@
 679.4
 ],
 "head": [
-31.2,
--196.6,
-1037.7,
-922.5
+350.1,
+98.9,
+525.3,
+485.1
 ],
 "eyes": [
 [
-396.5,
-320.1
+558.3,
+392.9
 ],
 [
 686.5,
 354.1
 ]
 ],
-"rotation": 6.7
+"rotation": -16.8
 }
 }
 },
