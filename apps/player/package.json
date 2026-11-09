@@ -11,7 +11,8 @@
     "typecheck": "node ../../packages/runtime/scripts/build-framework.mjs && tsc --noEmit",
     "render": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/render.ts",
     "render:gallery": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/gallery.ts",
-    "accessory:import": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/import-accessory.mjs"
+    "accessory:import": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/import-accessory.mjs",
+    "decoration:command": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/decoration-command.mjs"
   },
   "dependencies": {
     "@charaforge/runtime": "workspace:*",

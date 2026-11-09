@@ -190,6 +190,8 @@ pnpm render --scene scenes/deepseek-chan/scene.json --frames 2368-2441 --out .da
 pnpm render:gallery                          # 开关 / 表情图集 → .data/gallery/
 pnpm accessory:import --input .data/hat.png --id hat --scene packages/scene/examples/accessory.scene.json --attach main
                                              # 导入 PNG/WebP 饰品 → assets/accessories/，stdout 输出 ImageAsset + ImageLayer
+pnpm --silent decoration:command --scene packages/scene/examples/accessory.scene.json --input .data/command.json --out .data/command.scene.json
+                                             # AI 命令层：add/update/remove/setVisible/preview，返回 diff
 pnpm bench demo:3 20                         # 帧率基准（参数：场景 秒数 [workers] [起始帧]），同时报告音画滞后
 pnpm bench scenes/deepseek-chan/scene.json 60    # 全片（带原音频）
 pnpm verify:video                            # 参考视频逐帧定位精度（与 ffmpeg 解码比对）
@@ -343,7 +345,7 @@ pnpm preview      # http://localhost:4173/；或开发模式 pnpm dev
 
 | 路径 | 内容 |
 |---|---|
-| `apps/player/` | 播放器（React + Pixi，`src/main.tsx` UI、`src/editor.tsx` 饰品编辑器、`engine.ts` 渲染循环、`clock.ts` 音频时钟、`videoSync.ts` 参考视频逐帧对齐）；`harness.html` 给测试和拟合用；`scripts/` 下是 render、bench、verify-video、import-accessory 等 CLI |
+| `apps/player/` | 播放器（React + Pixi，`src/main.tsx` UI、`src/editor.tsx` 饰品编辑器、`engine.ts` 渲染循环、`clock.ts` 音频时钟、`videoSync.ts` 参考视频逐帧对齐）；`harness.html` 给测试和拟合用；`scripts/` 下是 render、bench、verify-video、import-accessory、decoration-command 等 CLI |
 | `packages/runtime/` | 运行时：Cubism 封装、确定性物理、Worker 并行求值、合成器（滤镜、clip、frameHold）；`test/` 确定性测试 |
 | `packages/scene/` | 场景格式 `charaforge.scene` v1、镜头表 `charaforge.shots` v1（TypeBox 定义、JSON Schema、`parseScene` / `parseShots`） |
 | `scenes/deepseek-chan/` | `shots.json`（recon 产出、人工校对）、`scene.json`（全片复刻场景，fit 产出） |

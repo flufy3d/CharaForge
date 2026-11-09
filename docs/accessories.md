@@ -2,7 +2,7 @@
 
 本期目标：把 AI 生成或手工准备的透明 PNG/WebP 作为场景资产，挂到模型图层上或独立放在画面里。图片是 **scene 层引用**，不修改模型文件。
 
-> 当前进度：阶段 1 完成 schema、`parseScene` 语义校验和示例；阶段 2 完成 runtime 图片解码/纹理/绘制与 attach；阶段 3 完成导入 CLI 和 `assets/accessories/index.json`；阶段 4 完成播放器内的最小饰品编辑器（`?edit=1`）。
+> 当前进度：阶段 1 完成 schema、`parseScene` 语义校验和示例；阶段 2 完成 runtime 图片解码/纹理/绘制与 attach；阶段 3 完成导入 CLI 和 `assets/accessories/index.json`；阶段 4 完成播放器内的最小饰品编辑器（`?edit=1`）；阶段 5 完成 AI 命令层（CLI/JSON）。
 
 ## 数据
 
@@ -118,6 +118,35 @@ pnpm dev
 - 验收路径：打开示例场景 → 导入透明帽子 → 调 attach/缩放/位置 → 保存 → 刷新同一 URL，图层仍在。
 - 编辑器导入的图片不更新 `assets/accessories/index.json`（目录由 `pnpm accessory:import` 维护）；场景本身仍是唯一编辑源。
 
+## AI 命令层（CLI/JSON）
+
+```bash
+pnpm --silent decoration:command \
+  --scene packages/scene/examples/accessory.scene.json \
+  --input .data/command.json \
+  --out .data/command.scene.json
+```
+
+输入是命令数组、`{ "commands": [...] }` 或单个命令：
+
+```json
+{ "op": "addDecoration", "asset": { "id": "hat", "uri": "accessories/hat.png", "width": 512, "height": 512 }, "layer": { "id": "hat", "kind": "image", "image": "hat", "in": 0, "out": 240, "transform": { "x": 0, "y": 0, "scale": 2 }, "attach": { "layer": "main", "anchor": [0.5, 0.15] } } }
+{ "op": "updateDecoration", "id": "hat", "patch": { "transform": { "scale": 3 }, "attach": { "anchor": [0.5, 0.12] } } }
+{ "op": "removeDecoration", "id": "hat" }
+{ "op": "setDecorationVisible", "id": "hat", "visible": false }
+{ "op": "preview", "frame": 0 }
+```
+
+- 每个命令后都执行 `parseScene`；非法 id、尺寸、URI、attach 目标会直接失败。
+- `addDecoration` 的 `asset.uri` 指向的图片需已由 `pnpm accessory:import` 放到 `assets/accessories/`（命令层不复制文件）。
+- `addDecoration/updateDecoration/setDecorationVisible` 写入的图层带 `provenance: { source: "ai", tool: "decoration-command" }`。
+- `updateDecoration.patch` 可改 `name/in/out/space/transform/opacity/clip/filters/blendMode/attach/semantics`；`transform`/`attach` 是浅合并，`attach: null` 解除绑定。
+- `removeDecoration` 删除图层；图片资源不再被任何图片图层引用时一并删除。
+- `preview` 不改场景，返回该时刻的图层/资源摘要；实际预览用 `pnpm render --scene <out>`。
+- 默认不写回 `--scene`；`--out` 才导出新场景。`--dry-run` 只校验和返回 diff，不写 `--out`。
+- stdout 是 JSON；用 `pnpm --silent` 避免 pnpm 的脚本标题混进 stdout。diff 是简化的 JSON Patch（`add/replace/remove` + 路径 + before/after）。
+- 目前是 CLI/JSON；HTTP/MCP 层后续再接。
+
 ## 示例与验证
 
 - 示例：`packages/scene/examples/accessory.scene.json`（64×64 棋盘 data URI，含一个 attach 图层和一个独立屏幕图层）。
@@ -129,6 +158,7 @@ pnpm --filter @charaforge/scene test
 pnpm test:runtime
 pnpm -r run typecheck
 pnpm accessory:import --input .data/import/hat.png --id hat --scene packages/scene/examples/accessory.scene.json --attach main --dry-run
+pnpm --silent decoration:command --scene packages/scene/examples/accessory.scene.json --input .data/command.json --out .data/command.scene.json --dry-run
 pnpm dev   # ?scene=packages/scene/examples/accessory.scene.json&edit=1
 pnpm render --scene packages/scene/examples/accessory.scene.json --frames 0-30 --out .data/render/acc
 ```
