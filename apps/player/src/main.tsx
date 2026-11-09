@@ -10,6 +10,7 @@
  *   frame=<n>              初始帧
  *   workers=<n>            求值 Worker 数（缺省 clamp(逻辑核数/2 − 1, 2, 6)；0 = 主线程同步求值）
  *   prewarm=0              不做新图层预热（缺省加载后与播放中让 Worker 提前做物理预热，见 PlayerEngine.startPrewarm；诊断用）
+ *   edit=1                 打开饰品编辑器（导入/调整/保存 ImageLayer）
  * 快捷键：空格 播放/暂停；←/→ ±1 帧；Shift+←/→ ±10 帧；Home/End；[ / ] 上/下一个镜头标记；
  *         D 调试面板；调试面板打开时 1～4 = 对照模式 关/并排/叠加/差异图；M 静音
  */
@@ -18,6 +19,7 @@ import type { Scene } from '@charaforge/scene';
 import { StrictMode, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { demoScene } from './demo.ts';
+import { AccessoryEditor } from './editor.tsx';
 import { PlayerEngine, type CompareMode, type EngineStatus } from './engine.ts';
 import { pageUrl, timecode } from './util.ts';
 
@@ -25,6 +27,8 @@ const params = new URLSearchParams(location.search);
 const DEFAULT_SCENE = 'scenes/deepseek-chan/scene.json';
 const FALLBACK_SCENE = 'packages/scene/examples/minimal.scene.json';
 const DEFAULT_VIDEO = 'assets/video/DeepSeek-chan.mp4';
+const EDIT = params.get('edit') === '1';
+const EDIT_SAVE_PATH = params.get('scene') && !params.get('scene')!.startsWith('demo:') ? params.get('scene')! : 'packages/scene/examples/accessory.scene.json';
 const COMPARE_LABEL: Record<CompareMode, string> = { off: '关', side: '并排', overlay: '叠加', diff: '差异图' };
 const COMPARE_MODES: CompareMode[] = ['off', 'side', 'overlay', 'diff'];
 /** 模型原作者的发布页（模型禁止再分发，请从这里获取） */
@@ -257,7 +261,7 @@ function App() {
   const waiting = (st?.waitMs ?? 0) > 0;
 
   return (
-    <div className={debug ? 'app debug-open' : 'app'}>
+    <div className={['app', debug && 'debug-open', EDIT && 'edit-open'].filter(Boolean).join(' ')}>
       <header>
         <strong>CharaForge 播放器</strong>
         <span className="muted">{scene?.meta.title}</span>
@@ -386,6 +390,7 @@ function App() {
           {compare === 'diff' && <div className="row small muted">差异图 = |渲染合成到原视频上 − 原视频| × 放大倍数（与验收指标的 C_f 同一口径；没画到角色的地方为 0）。叠加 = 渲染合成到原视频上，再与原视频按不透明度混合。</div>}
         </div>
       )}
+      {EDIT && scene && eng && <AccessoryEditor engine={eng} defaultSavePath={EDIT_SAVE_PATH} />}
       <div className="keys small muted">
         快捷键：<kbd>空格</kbd> 播放/暂停　<kbd>←</kbd>/<kbd>→</kbd> ±1 帧（<kbd>Shift</kbd> ±10）　<kbd>Home</kbd>/<kbd>End</kbd>　<kbd>[</kbd>/<kbd>]</kbd> 上/下一个镜头　<kbd>D</kbd> 调试　<kbd>1</kbd>–<kbd>4</kbd> 对照模式　<kbd>M</kbd> 静音
       </div>

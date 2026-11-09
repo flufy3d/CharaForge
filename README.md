@@ -168,6 +168,7 @@ URL 参数：
 | `frame=<n>` | 初始帧 |
 | `workers=<n>` | 求值 Worker 数，缺省 clamp(逻辑核数/2 − 1, 2, 6)；0 = 主线程同步求值 |
 | `prewarm=0` | 关闭新图层的 Worker 预热（只用于诊断；关掉后全片丢帧约 10%） |
+| `edit=1` | 打开饰品编辑器：导入/调整/绑定/保存 ImageLayer，见 [docs/accessories.md](docs/accessories.md) |
 
 快捷键：`空格` 播放/暂停，`←`/`→` ±1 帧（`Shift` ±10），`Home`/`End`，`[`/`]` 上/下一个镜头，`D` 调试面板，
 调试面板打开时 `1`～`4` 切换对照模式（关 / 并排 / 叠加 / 差异图），`M` 静音。
@@ -342,7 +343,7 @@ pnpm preview      # http://localhost:4173/；或开发模式 pnpm dev
 
 | 路径 | 内容 |
 |---|---|
-| `apps/player/` | 播放器（React + Pixi，`src/main.tsx` UI、`engine.ts` 渲染循环、`clock.ts` 音频时钟、`videoSync.ts` 参考视频逐帧对齐）；`harness.html` 给测试和拟合用；`scripts/` 下是 render、bench、verify-video 等 CLI |
+| `apps/player/` | 播放器（React + Pixi，`src/main.tsx` UI、`src/editor.tsx` 饰品编辑器、`engine.ts` 渲染循环、`clock.ts` 音频时钟、`videoSync.ts` 参考视频逐帧对齐）；`harness.html` 给测试和拟合用；`scripts/` 下是 render、bench、verify-video、import-accessory 等 CLI |
 | `packages/runtime/` | 运行时：Cubism 封装、确定性物理、Worker 并行求值、合成器（滤镜、clip、frameHold）；`test/` 确定性测试 |
 | `packages/scene/` | 场景格式 `charaforge.scene` v1、镜头表 `charaforge.shots` v1（TypeBox 定义、JSON Schema、`parseScene` / `parseShots`） |
 | `scenes/deepseek-chan/` | `shots.json`（recon 产出、人工校对）、`scene.json`（全片复刻场景，fit 产出） |

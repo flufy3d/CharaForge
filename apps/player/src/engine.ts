@@ -193,6 +193,11 @@ export class PlayerEngine {
     else void this.syncVideoExact();
   }
 
+  /** 编辑器修改了场景对象后调用：下一帧重新渲染，不改变当前帧号。 */
+  redraw(): void {
+    this.dirty = true;
+  }
+
   step(delta: number): void {
     this.seek(this.frame + delta);
   }

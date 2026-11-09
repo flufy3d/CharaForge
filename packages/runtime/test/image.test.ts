@@ -95,6 +95,17 @@ test('透明棋盘图片固定位置渲染：位置、透明边、alpha', async 
   assert.ok(box.x1 >= 185 && box.x1 <= 189, `右边界：${box.x1}`);
 });
 
+test('runtime.addImageLayer 可在运行时追加图片图层', async () => {
+  const scene = baseScene([], []);
+  await h.page.evaluate((s) => window.__charaforge.loadScene(s), scene);
+  await h.page.evaluate(([asset, layer]) => {
+    const rt = (window as unknown as { __cfRuntime: { addImageLayer(a: unknown, l: unknown): Promise<void> } }).__cfRuntime;
+    return rt.addImageLayer(asset, layer);
+  }, [CHECKER, imageLayer()] as const);
+  const box = alphaBBox(await renderRgba(0));
+  assert.ok(box.count > 2000, `追加的图片应可见：${box.count}`);
+});
+
 test('图片图层复用 opacity / clip / color filter', async () => {
   const scene = baseScene([CHECKER], [
     imageLayer({

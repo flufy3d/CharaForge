@@ -2,7 +2,7 @@
 
 本期目标：把 AI 生成或手工准备的透明 PNG/WebP 作为场景资产，挂到模型图层上或独立放在画面里。图片是 **scene 层引用**，不修改模型文件。
 
-> 当前进度：阶段 1 完成 schema、`parseScene` 语义校验和示例；阶段 2 完成 runtime 图片解码/纹理/绘制与 attach；阶段 3 完成导入 CLI 和 `assets/accessories/index.json`。编辑器和 AI 命令层在后续阶段。
+> 当前进度：阶段 1 完成 schema、`parseScene` 语义校验和示例；阶段 2 完成 runtime 图片解码/纹理/绘制与 attach；阶段 3 完成导入 CLI 和 `assets/accessories/index.json`；阶段 4 完成播放器内的最小饰品编辑器（`?edit=1`）。
 
 ## 数据
 
@@ -102,6 +102,22 @@ pnpm accessory:import --input .data/hat.png --id hat --name "帽子" \
 - 不传 `--attach` 时生成独立 `space:"screen"` 图层，位置为画面中心。
 - 解码/缩略图使用仓库已有的 Playwright Chromium（与 `pnpm render` 相同），不新增依赖；首次使用需 `pnpm exec playwright install chromium-headless-shell`。
 
+## 播放器编辑器（`?edit=1`）
+
+```bash
+pnpm dev
+# Chrome / Edge 打开：
+# http://localhost:5173/?scene=packages/scene/examples/accessory.scene.json&edit=1
+```
+
+- 左侧列出所有图片图层；「导入图片」接受 PNG/WebP，导入后先挂到「导入默认绑定」选择的模型图层（缺省第一个模型图层），锚点缺省 `[0.5,0.15]`。
+- 选中图层后可调 X/Y、缩放、旋转、不透明度、attach 目标、anchor、offset、跟随旋转/缩放和可见开关。所有修改直接改当前 scene 对象并 `engine.redraw()`，不重载模型。
+- 导入的图片先用 blob URL 预览；保存时替换成 `assets/accessories/<id>.png|webp` 并写 `sha256`。
+- 保存优先用 File System Access API：第一次点「保存」选择**仓库根目录**，之后写 scene json 和 `assets/accessories/`；不支持时降级为下载 scene.json + 图片文件。
+- 保存路径可在面板里改；默认取 `?scene=` 的路径，没有 `?scene=` 时用示例场景，避免误覆盖全片场景。
+- 验收路径：打开示例场景 → 导入透明帽子 → 调 attach/缩放/位置 → 保存 → 刷新同一 URL，图层仍在。
+- 编辑器导入的图片不更新 `assets/accessories/index.json`（目录由 `pnpm accessory:import` 维护）；场景本身仍是唯一编辑源。
+
 ## 示例与验证
 
 - 示例：`packages/scene/examples/accessory.scene.json`（64×64 棋盘 data URI，含一个 attach 图层和一个独立屏幕图层）。
@@ -113,6 +129,7 @@ pnpm --filter @charaforge/scene test
 pnpm test:runtime
 pnpm -r run typecheck
 pnpm accessory:import --input .data/import/hat.png --id hat --scene packages/scene/examples/accessory.scene.json --attach main --dry-run
+pnpm dev   # ?scene=packages/scene/examples/accessory.scene.json&edit=1
 pnpm render --scene packages/scene/examples/accessory.scene.json --frames 0-30 --out .data/render/acc
 ```
 

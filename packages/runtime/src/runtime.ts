@@ -265,6 +265,22 @@ export class CharaForgeRuntime {
     return this.layers.find((l) => l.layer.id === layerId)?.ev.instance;
   }
 
+  /**
+   * 编辑器用：向当前场景追加一个图片资产和图片图层（追加到 layers 末尾，即最上层）。
+   * 只支持运行时新增；保存前由编辑器把 blob/data URI 换成 assets/accessories/ 下的相对路径。
+   */
+  async addImageLayer(asset: ImageAsset, layer: ImageLayer): Promise<void> {
+    if (!this.scene) throw new Error('尚未加载场景');
+    if (this.scene.layers.some((l) => l.id === layer.id)) throw new Error(`图层 ID 重复：${layer.id}`);
+    if ((this.scene.assets.images ?? []).some((a) => a.id === asset.id)) throw new Error(`图片资源 ID 重复：${asset.id}`);
+    const image = await this.loadImage(asset);
+    if (!this.scene.assets.images) this.scene.assets.images = [];
+    this.scene.assets.images.push(asset);
+    this.scene.layers.push(layer);
+    this.imageLayers.push({ layer, image });
+    this.invalidate();
+  }
+
   /** 帧 f 上每个存在的图层要做什么；返回顺序 = scene.layers 顺序（z 顺序）。 */
   private plan(f: number, overrides?: Record<string, ParamOverrides>): LayerPlan[] {
     const scene = this.scene!;

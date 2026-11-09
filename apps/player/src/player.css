@@ -27,6 +27,21 @@ button.primary { min-width: 84px; background: #2f4a7a; border-color: #44659c; }
 input, select { background: #1d222b; color: inherit; border: 1px solid #3a4356; border-radius: 4px; padding: 3px 6px; }
 .debug { display: flex; flex-direction: column; gap: 6px; background: #1b2029; border: 1px solid #2c3445; border-radius: 6px; padding: 6px 10px; }
 .debug .row { gap: 14px; }
+.edit-open .canvas-box canvas, .edit-open .video-box video { max-height: calc(100vh - 460px); }
+.editor { display: flex; flex-direction: column; gap: 6px; background: #1b2029; border: 1px solid #2c3445; border-radius: 6px; padding: 6px 10px; }
+.editor .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.editor .save-path { flex: 1 1 320px; min-width: 220px; }
+.editor-body { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.editor-list { display: flex; flex-direction: column; gap: 4px; min-width: 220px; max-width: 340px; max-height: 300px; overflow: auto; }
+.editor-list .item { display: flex; gap: 8px; align-items: center; text-align: left; padding: 4px 6px; }
+.editor-list .item span { display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.editor-list .item img { width: 44px; height: 44px; object-fit: contain; background: #11151b; border: 1px solid #2c3445; border-radius: 3px; flex: 0 0 auto; }
+.editor-list .item.active { border-color: #8ab4ff; background: #243049; }
+.editor-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 4px 16px; flex: 1 1 500px; }
+.editor-fields label { display: flex; gap: 6px; align-items: center; }
+.editor-fields input[type="range"] { flex: 1 1 100px; min-width: 80px; }
+.editor-fields input[type="number"] { width: 82px; }
+.editor-fields select { max-width: 210px; }
 .error-box { border: 1px solid #7a3434; background: #2a1618; color: #ffb3b3; border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 4px; }
 .error-box pre { white-space: pre-wrap; font-size: 12px; color: #d9a0a0; margin: 4px 0 0; }
 .notice { border: 1px solid #6b5a2a; background: #2a2414; color: #f0d58a; border-radius: 6px; padding: 6px 12px; }
