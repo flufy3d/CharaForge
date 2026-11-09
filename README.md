@@ -369,5 +369,5 @@ pnpm preview      # http://localhost:4173/；或开发模式 pnpm dev
 | `tools/fit/` | 旧 CPU 拟合引擎 fit4（保留；单元规划与导出代码仍被 GPU 引擎复用） |
 | `tools/qa/` | 验收指标 `metric.py`、闪烁 `flicker.py`、全片报告 `report.py` |
 | `scripts/` | `setup-cubism.mjs`、`setup-assets.mjs`（下载并校验外部资源） |
-| `docs/` | `pipeline.md`（目录、契约、验收口径）、`accessories.md`（外部饰品图片/attach）、`runtime-eval.md`（运行时实现、GPU 与确定性、性能）、`gpu-acceleration.md`（历史提速方案与风险记录） |
+| `docs/` | `pipeline.md`（目录、契约、验收口径）、`accessories.md`（外部饰品图片/attach）、`imagine-agy.md`（AI 生图工具调研与调用约定）、`runtime-eval.md`（运行时实现、GPU 与确定性、性能）、`gpu-acceleration.md`（历史提速方案与风险记录） |
 | `vendor/`、`assets/`、`.cache/`、`.data/` | 外部 SDK、模型与视频、Framework 编译缓存、中间产物（都不进 git） |

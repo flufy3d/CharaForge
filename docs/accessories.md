@@ -176,3 +176,5 @@ pnpm render --scene packages/scene/examples/accessory.scene.json --frames 0-30 -
 ## 授权
 
 AI 生成的饰品图可能带有来源/版权限制。不要把大图或版权不明的图提交进 git；导入目录只记录本地文件的 `sha256`/来源说明，随场景分发前请自行确认授权。
+
+AI 生图工具调研见 [imagine-agy.md](imagine-agy.md)：`imagine-agy` 可以生成 JPEG，但没有 alpha，不能直接当透明饰品；扁平饰品推荐让 agy 生成 SVG 后再栅格化。
