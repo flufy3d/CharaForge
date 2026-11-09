@@ -6,6 +6,7 @@
  *   /vendor/cubism/core/...      Cubism Core（页面用 <script> 引入）
  *   /scenes/...                  场景与镜头表
  *   /packages/scene/examples/... 示例场景
+ *   /__charaforge/list-assets   动作/表情查看器的只读目录列表（仅 assets/models/.../Animation 或 Exp3）
  * 支持 Range 请求（<video>/<audio> 精确 seek 需要）。
  * 路径段可以写成 `_f.<base64url(UTF-8)>`（ASCII 安全的路由，给中文文件名用，见 decodePath），解码后照常做白名单与防穿越检查。
  *
@@ -18,6 +19,7 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Connect, Plugin } from 'vite';
 import { defineConfig } from 'vite';
+import { createAssetListHandler } from './server/assetList.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO = resolve(HERE, '..', '..');
@@ -60,7 +62,10 @@ function decodePath(pathname: string): string {
 }
 
 export function repoFiles(): Plugin {
+  const assetList = createAssetListHandler(REPO);
   const handler: Connect.NextHandleFunction = (req, res, next) => {
+    // 只读素材目录接口（动作/表情查看器用）：必须在 MOUNTS 白名单之前处理。
+    if (assetList(req, res)) return;
     const url = new URL(req.url ?? '/', 'http://x');
     let rel: string;
     try {
@@ -127,7 +132,7 @@ export default defineConfig({
     alias: [{ find: /^@cubism\/framework\/(.*)$/, replacement: `${join(REPO, '.cache', 'cubism-framework')}/$1` }],
   },
   optimizeDeps: {
-    entries: ['index.html', 'harness.html'],
+    entries: ['index.html', 'harness.html', 'motions.html'],
     include: ['pixi.js', 'react', 'react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
   },
   server: {
@@ -145,7 +150,11 @@ export default defineConfig({
     // 打包产物放 _app/：缺省的 assets/ 会和白名单里的 /assets/（模型、视频、音频）抢同一个 URL 前缀
     assetsDir: '_app',
     rollupOptions: {
-      input: { index: join(HERE, 'index.html'), harness: join(HERE, 'harness.html') },
+      input: {
+        index: join(HERE, 'index.html'),
+        harness: join(HERE, 'harness.html'),
+        motions: join(HERE, 'motions.html'),
+      },
     },
   },
 });

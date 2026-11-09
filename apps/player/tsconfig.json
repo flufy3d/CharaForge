@@ -8,5 +8,5 @@
     "baseUrl": ".",
     "paths": { "@cubism/framework/*": ["../../.cache/cubism-framework/*"] }
   },
-  "include": ["src", "scripts", "vite.config.ts", "../../.cache/cubism-framework/live2dcubismcore.d.ts"]
+  "include": ["src", "scripts", "server", "vite.config.ts", "../../.cache/cubism-framework/live2dcubismcore.d.ts"]
 }

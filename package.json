@@ -23,6 +23,7 @@
     "accessory:import": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/import-accessory.mjs",
     "decoration:command": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/decoration-command.mjs",
     "test:runtime": "pnpm --filter @charaforge/runtime test",
+    "test:viewer": "pnpm --filter @charaforge/player test:viewer",
     "verify:video": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/verify-video.ts",
     "bench": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/bench.ts"
   },

@@ -9,6 +9,7 @@
     "build": "node ../../packages/runtime/scripts/build-framework.mjs && vite build",
     "preview": "vite preview",
     "typecheck": "node ../../packages/runtime/scripts/build-framework.mjs && tsc --noEmit",
+    "test:viewer": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test --test-concurrency=1 scripts/asset-list.test.ts scripts/motion-preview.test.ts scripts/motion-viewer.test.ts",
     "render": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/render.ts",
     "render:gallery": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/gallery.ts",
     "accessory:import": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/import-accessory.mjs",

@@ -173,6 +173,23 @@ URL 参数：
 快捷键：`空格` 播放/暂停，`←`/`→` ±1 帧（`Shift` ±10），`Home`/`End`，`[`/`]` 上/下一个镜头，`D` 调试面板，
 调试面板打开时 `1`～`4` 切换对照模式（关 / 并排 / 叠加 / 差异图），`M` 静音。
 
+### 动作 / 表情素材查看器
+
+```bash
+pnpm dev
+# Chrome / Edge 打开：
+# http://localhost:5173/motions.html
+```
+
+- 独立页面，列出当前模型 `Animation/` 下的 8 个 motion3 动作和 `Exp3/` 下的 23 个 exp3 表情；点击即可在角色上预览。
+- 动作显示名称、时长、loop、曲线数等元数据；支持搜索、播放/暂停、逐帧、seek、循环开关（快捷键与播放器一致，另加 `L` 循环）。
+- 列表带 160×160 缩略图；顶部「图集」打开全部素材的 contact sheet。缩略图由一次网格 scene 渲染生成并缓存在 localStorage。
+- 表情预览可选「叠加 IDLE」动作（缺省开启，`?idle=0` 关闭）。
+- 预览使用临时 scene（720×720、60fps），不写盘、不加载原参考视频/音频，也不影响 `?scene=...` 全片播放器和 `?edit=1` 饰品编辑器。
+- 列表来源：`model3.json` 的 `FileReferences.Motions / Expressions` 优先；没有声明时由只读接口
+  `/__charaforge/list-assets` 扫描 `assets/models/**/Animation` 与 `Exp3`。接口契约、安全限制和临时 scene 细节见
+  [docs/motions.md](docs/motions.md)。
+
 **调试模式**（`D` 或 `?debug=1`）：
 
 - **原视频对照**：并排（右侧原视频）、叠加（渲染合成到原视频上，再与原视频按不透明度混合，错位处出现重影）、
@@ -195,6 +212,7 @@ pnpm --silent decoration:command --scene packages/scene/examples/accessory.scene
 pnpm bench demo:3 20                         # 帧率基准（参数：场景 秒数 [workers] [起始帧]），同时报告音画滞后
 pnpm bench scenes/deepseek-chan/scene.json 60    # 全片（带原音频）
 pnpm verify:video                            # 参考视频逐帧定位精度（与 ffmpeg 解码比对）
+pnpm test:viewer                             # 动作 / 表情查看器：列表接口、临时 scene、Playwright smoke
 ```
 
 ## 外部饰品（ImageAsset / ImageLayer）
@@ -219,6 +237,7 @@ pnpm build             # → apps/player/dist/（约 1.5MB，只有页面和打�
 pnpm preview           # → http://localhost:4173/
 ```
 
+- 页面：`index.html`（播放器）、`motions.html`（动作 / 表情素材查看器）、`harness.html`（Playwright 测试接口）。
 - 产物**不含**模型、参考视频、音频、场景文件和 Cubism Core，也不要把它们复制进去。页面按 URL 引用仓库里的原文件：
   `assets/…`（模型、视频、音频）、`vendor/cubism/core/…`（Core）、`scenes/…`、`packages/scene/examples/…`、`packages/scene/schema/…`。
 - 所有这些请求都是**相对页面地址**的（`apps/player/src/util.ts` 的 `pageUrl`，基于 `document.baseURI`；`vite.config.ts` 的 `base: './'`
@@ -230,8 +249,10 @@ pnpm preview           # → http://localhost:4173/
   播放器与运行时（主线程和 Worker）发请求前，把含非 ASCII 字符的路径段换成 `_f.<base64url(UTF-8)>`（`packages/runtime/src/asciiUrl.ts`），
   白名单中间件把它解码回原名后照常做白名单与防穿越检查（支持 Range）。纯 ASCII 的路径保持原样。
 - 提供这些 URL 的是 `apps/player/vite.config.ts` 里的白名单中间件 `repoFiles()`：只读，只开放上面几个目录，
-  拒绝 `..` 穿越，支持 Range 请求（视频精确 seek 需要）。`pnpm dev` 和 `pnpm preview`（`vite preview`）用的是同一个中间件，
-  所以 `pnpm preview` 就能完整播放全片，调试模式、原视频对照也都可用。
+  拒绝 `..` 穿越，支持 Range 请求（视频精确 seek 需要）。另外提供只读素材目录接口
+  `/__charaforge/list-assets?dir=assets/models/.../Animation|Exp3`（见 [docs/motions.md](docs/motions.md)）。
+  `pnpm dev` 和 `pnpm preview`（`vite preview`）用的是同一个中间件，所以 `pnpm preview` 就能完整播放全片，
+  调试模式、原视频对照、动作 / 表情查看器也都可用。
 - 打包代码放在 `dist/_app/`（不用 Vite 缺省的 `assets/`，否则会和白名单的 `/assets/` 抢同一个 URL 前缀）。
 - 不能用 `file://` 直接打开 `dist/index.html`（Worker、fetch、Range 请求都需要 HTTP），也不要换成别的静态服务器：
   那样要么拿不到 `/assets/`，要么就得把模型复制进可发布的目录。

@@ -395,6 +395,9 @@ function App() {
         快捷键：<kbd>空格</kbd> 播放/暂停　<kbd>←</kbd>/<kbd>→</kbd> ±1 帧（<kbd>Shift</kbd> ±10）　<kbd>Home</kbd>/<kbd>End</kbd>　<kbd>[</kbd>/<kbd>]</kbd> 上/下一个镜头　<kbd>D</kbd> 调试　<kbd>1</kbd>–<kbd>4</kbd> 对照模式　<kbd>M</kbd> 静音
       </div>
       <footer>
+        <div>
+          <a href="motions.html">动作 / 表情素材查看器 →</a>
+        </div>
         {credits.map((c) => (
           <div key={c}>模型：{linkify(c)}</div>
         ))}
