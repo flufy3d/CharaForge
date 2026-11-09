@@ -106,6 +106,8 @@ apps/player/
   `CHARAFORGE_GPU=egl`、`GALLIUM_DRIVER=d3d12`、`MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`、**MSAA 0**（`pnpm render`、测试、
   拟合器的 `Pool` 都用这个缺省）；显式设置的环境变量 / `--msaa` 优先。原生 Linux 行为不变。
 - `harness-node.ts` 启动后检查 renderer 字符串，不含 `NVIDIA`（`CHARAFORGE_EXPECT_GPU` 可改）就报错，不会悄悄落到软件渲染。
+- **Windows 原生播放**：播放器页面在 Windows 的 Chrome / Edge 里直接走 ANGLE / D3D，不经过 `harness-node.ts` 的启动参数。
+  2026-11-09 实测 `pnpm build` + `pnpm preview` 可以播放全片；Windows 下的无头测试 / bench 数据待补。
 
 ### 确定性发现
 
@@ -119,7 +121,7 @@ apps/player/
 - **Core 陈旧顶点（P6 修复）**：Core 不重算被跳过的 drawable（不可见且本次没有 VertexPositionsDidChange）的顶点，
   Framework 计算遮罩布局时却把它们算进被裁切 drawable 的外接框，于是遮罩边缘几个像素（±1～3）取决于该 Core 模型之前 update 过哪些帧
   （seek、隔帧渲染、Worker 调度都会触发；测试场景没有覆盖到）。`ModelInstance.update()` 之后把这些顶点置为 NaN，Framework 按「无有效点」跳过。
-  修复后全片乱序 seek 与顺序渲染逐字节相同。细节见 `docs/handoff.md` 第 5 节 P6。
+  修复后全片乱序 seek 与顺序渲染逐字节相同（P6，提交 `3d925e3`）。
 - 跨机器 / 跨驱动不保证逐位一致（GPU 光栅化与驱动有关）；确定性承诺是「同一机器、同一后端」。
 
 ### 测试结果
@@ -182,7 +184,7 @@ f−1、f、f+1 计算 MAE。检查帧：片头片尾、若干中间帧，以及
 | 3. 求值留在图层的主场 Worker（物理链不重复），Core update 经 Worker 间 MessagePort 交给最空闲的 Worker；主线程只导入与绘制 | 37 | 主线程每帧 ≈ 8 ms，但上屏间隔仍是 16.7/33 ms 交替 |
 | 4. **音频时钟平滑**：`AudioContext.currentTime` 按 10.7/21.3 ms 的音频块跳变（实测），导致帧号不均匀前进、部分 rAF 没有新帧；改用 `getOutputTimestamp()` 按 performance.now 外推（已含输出延迟，单调） | 59 | 这一项对桌面浏览器同样适用 |
 | 5. 动态数据缓冲回收（主线程 → Worker 转移复用）、状态栏 4 Hz 刷新 | 59 | 降低 GC 与 React 开销 |
-| 6. Cubism 静态 UV/索引缓冲缓存（GL 包装对象；先试 Proxy，trap 开销反而更大，改为预绑定方法的普通对象） | 59.5 | 像素与优化前逐位相同（render 输出 diff 无差异） |
+| 6. Cubism 静态 UV/索引缓冲缓存（GL 包装对象；先试 Proxy，trap 开销反而更大，改为预绑定方法的普通对象）；P6 起按「模型 URL + drawable 序号 + 种类」在同一模型的所有实例间共享 | 59.5 | 像素与优化前逐位相同（render 输出 diff 无差异）；WSL 的 Mesa d3d12 下每个新实例约 1000 个 buffer 创建从 0.1～0.7 秒降到 6～20 ms |
 
 ### 最终结果（`pnpm bench -- demo:N 秒数 workers`）
 
@@ -203,6 +205,11 @@ f−1、f、f+1 计算 MAE。检查帧：片头片尾、若干中间帧，以及
 
 4 实例：4 × 14 ms 的 Core update + 主线程 ≈ 12 ms，需要约 4.5 个核满载，加上 GPU 进程已超过本机 6 个物理核，只有 30 fps。
 要上 60 需要降低 Core update 本身的开销（它是闭源 WASM，无法优化），或在 4 实例镜头里对远景实例降低更新频率（会改变画面，需规范支持）。
+
+### 全片播放（WSL2，RTX 5080 Laptop，8 逻辑核，3 Worker）
+
+P6 之后加载完立即播放全片 60 秒：58.5～59.6 fps、丢帧 0.7～2.5%（GPU 被拟合任务占用 84～92% 时 3.6～3.8%），
+画面落后声音均值 0.3～0.9 帧、最大 ≤ 8.1 帧，60 秒内无漂移；`?prewarm=0` 时 53.9 fps、丢帧 10.3%。
 
 ## 7. Harness / 运行时接口摘要
 
@@ -227,8 +234,7 @@ f−1、f、f+1 计算 MAE。检查帧：片头片尾、若干中间帧，以及
 5. render CLI 每帧通过 CDP 传 base64 像素再在 Node 端编码 PNG，约 0.25 s/帧（720p）；拟合时请用 region/scale 或 `sha256`。
 6. 不支持 pose3（本模型没有）；model3.json 的 EyeBlink/LipSync 组不生效（按规范无隐式行为）。
 7. 带背面剔除的模型在翻转时的绕序修正已实现但未用真实模型验证（本模型没有剔除 drawable）。
-8. 工作区里新出现的 `tools/fit`（子代理 C）缺 tsconfig / typescript 依赖，`pnpm -r typecheck` 会因它失败；
-   scene / runtime / player 三个包均通过（`pnpm -r --no-bail typecheck`）。
+8. `tools/fit` 是旧的 CPU 拟合引擎（fit4），只有 `fit` 脚本，不参与 `pnpm -r typecheck`；主线拟合已迁到 `tools/gpu`。
 
 ## 9. 对 scene schema 的建议
 

@@ -20,12 +20,14 @@
 
 **目标：让虚拟 AI 不仅会说话，还能自然地表达情绪、做出动作和进行演出。**
 
-## 第一期：PV 复刻
+## 第一期：PV 复刻（已完成）
+
+第一期已完成；全片结果、已知问题和 Windows 原生播放方式见下文。
 
 用 DeepSeek-chan 模型、我们自己的运行时（`packages/runtime`）和场景格式（`charaforge.scene` v1），复刻参考 PV
 （`assets/video/DeepSeek-chan.mp4`，1280×720、60fps、3868 帧）里的角色动画：每个镜头的缩放、裁切、平移，同屏多实例、
 透明度、景深模糊，以及表情、换装、配饰开关。网页播放器逐帧确定地渲染同样的画面，并以原音频为时钟同步播放。
-背景、手指、气泡、粒子、转场剪影等不在范围内（详见 [docs/handoff.md](docs/handoff.md) 第 1 节）。
+背景、手指、气泡、粒子、转场剪影等不在范围内；验收口径见 [docs/pipeline.md](docs/pipeline.md) 最后一节。
 
 整条管线：
 
@@ -70,28 +72,39 @@ Live2D Rigging: 霓虹猫_NeonNeko ／ Free model distributed by Kamiya Ryoko
 **路线 A（moc3 解析器）**：`tools/gpu/l2d/` 里的 moc3 解析器、PyTorch 变形器、物理与光栅化只是**内部拟合工具**，
 用来在 GPU 上搜索参数；它不进播放器、不对外分发。最终画面一律由官方 Cubism Core + Framework 渲染（`packages/runtime`），
 打分也只认 runtime 的渲染结果。Cubism Core 授权里有限制逆向工程的条款，这条路线的风险由项目负责人知悉并决定保留
-（[docs/handoff.md](docs/handoff.md) 第 1 节「路线 A 注意」）。
+（授权风险详见 [docs/gpu-acceleration.md](docs/gpu-acceleration.md) 的「风险」一节）。
 
 ## 环境要求
 
 | 项目 | 要求 |
 |---|---|
-| 系统 | Linux，或 Windows 上的 WSL2（Ubuntu 24.04 实测） |
-| GPU | NVIDIA（渲染、测试、拟合都会检查 WebGL renderer 是否为 NVIDIA，防止悄悄落到软件渲染） |
+| 系统 | 播放器：Windows 10/11 原生（Chrome / Edge）或 Linux；拟合、无头渲染、QA：Linux 或 Windows 上的 WSL2（Ubuntu 24.04 实测） |
+| GPU | 播放器本身不检查；测试、无头渲染与拟合会检查 WebGL renderer 是否为 NVIDIA，防止悄悄落到软件渲染 |
 | Node.js / pnpm | Node ≥ 22（用 `--experimental-strip-types` 直接跑 TS 脚本），pnpm 10 |
 | Python | 3.12，由 [uv](https://docs.astral.sh/uv/) 管理（`tools/.venv`） |
 | ffmpeg | 在 `PATH` 里（setup 解码音频、recon、qa 用）；WSL 机器上是 `~/.local/bin` 下的静态版 |
 | CUDA | 只有 GPU 拟合（`tools/gpu`）需要：CUDA 13.0 工具链（`CUDA_HOME=/usr/local/cuda-13.0`），torch 2.14.1+cu130，nvdiffrast 0.4.0 |
 | 浏览器 | 播放器用 Chrome / Edge（需要 WebGL2、Web Audio、H.264；Firefox 未验证） |
 
-**WSL2 说明**：WSL 里没有 NVIDIA 的 Vulkan / EGL 驱动，无头 Chromium 只能经 Mesa 的 d3d12 驱动走 Windows 的 D3D12。
+**Windows / WSL2 说明**：播放器是浏览器里的 WebGL2 页面，Windows 原生运行 `pnpm dev`（或分两行 `pnpm build`、`pnpm preview`）后用 Chrome / Edge 打开即可，不需要 WSL；GPU 走 Windows 的 ANGLE / D3D，不经过 WSL。2026-11-09 已实测 `pnpm build` + `pnpm preview` 能播放全片。
+
+WSL 里的特殊配置只影响无头 Chromium（`pnpm render`、确定性测试、拟合）：WSL 里没有 NVIDIA 的 Vulkan / EGL 驱动，无头 Chromium 只能经 Mesa 的 d3d12 驱动走 Windows 的 D3D12。
 `apps/player/scripts/harness-node.ts` 检测到 WSL（有 `/usr/lib/wsl/lib/libd3d12.so`、没有 NVIDIA Vulkan ICD）时自动使用
 `--use-angle=gl-egl` + `GALLIUM_DRIVER=d3d12` + `MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`，并把 MSAA 设为 0（此后端开 MSAA 不确定）。
 renderer 应为 `ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce …), OpenGL ES 3.1)`。显式设置的 `CHARAFORGE_GPU` /
 `CHARAFORGE_MSAA` 等环境变量优先。细节见 [docs/runtime-eval.md](docs/runtime-eval.md) 第 4 节。
-在 WSL 里运行 `pnpm dev` 后，用 Windows 上的 Chrome / Edge 打开 `http://localhost:5173` 即可（WSL2 自动转发 localhost，页面用 Windows 原生 GPU）。
+在 WSL 里运行 `pnpm dev` 后，用 Windows 上的 Chrome / Edge 打开 `http://localhost:5173` 也可以（WSL2 自动转发 localhost，页面仍用 Windows 原生 GPU）。
 
 ## 安装
+
+Windows 原生播放不依赖 WSL；先装 Node ≥ 22 和 pnpm。没有 pnpm 时用 Corepack 启用（版本由 `packageManager` 固定为 10.18.0）：
+
+```powershell
+corepack enable
+corepack install --global pnpm@10.18.0
+```
+
+或 `npm install -g pnpm@10.18.0`。装完重开终端，在仓库根目录运行：
 
 ```bash
 pnpm install
@@ -102,6 +115,7 @@ pnpm run setup        # = setup:cubism + setup:assets + setup:py
 - `setup:cubism`：下载 Cubism SDK for Web 5-r.5（校验 sha256），装 Core 与 Framework 到 `vendor/cubism/`，运行前会打印两份 Live2D 许可的链接。
 - `setup:assets`：下载模型（去掉 131MB 的分层 PSD，保留原文件名和使用条款）和参考视频，校验 sha256，再用 ffmpeg 把音频解码成 `assets/video/DeepSeek-chan.wav`（PCM，避免 AAC 编码延迟造成音画偏移）。
 - `setup:py`：`uv sync --project tools`，建立 `tools/.venv`（numpy、opencv、scikit-image、jsonschema、pillow）。
+- Windows 原生安装同样需要 `ffmpeg.exe` 在 `PATH` 里（`setup:assets` 用它把参考音频解码成 PCM）。
 - Playwright 浏览器：`pnpm exec playwright install chromium-headless-shell`（没有 sudo 时不要加 `--with-deps`）。
 
 **GPU 拟合依赖**（`tools/pyproject.toml` 的 `gpu` 依赖组）。nvdiffrast 安装时要编译，并且关闭了构建隔离（`no-build-isolation-package`），
@@ -124,20 +138,24 @@ pnpm -r run typecheck
 tools/.venv/bin/python -I tools/gpu/tests/test_a1_moc3.py    # moc3 解析器与 Core 对拍；tools/gpu/tests/*.py 都可以这样直接运行
 ```
 
+> Windows 原生播放已在 2026-11-09 验证；Windows 下的 `pnpm test:runtime`、`pnpm bench` 尚未跑，数据待补。
+
 ## 播放器
 
 ```bash
 pnpm dev               # http://localhost:5173/
 ```
 
-缺省打开全片场景 `scenes/deepseek-chan/scene.json`（约 25MB，47 个图层），点「播放」或按空格开始，
+Windows 原生同样适用；PowerShell 5.1 不支持 `&&`，`pnpm build` 和 `pnpm preview` 分两行执行即可。
+
+缺省打开全片场景 `scenes/deepseek-chan/scene.json`（约 4.3MB，47 个图层），点「播放」或按空格开始，
 原音频为时钟：画面帧号 = floor(音频时间 × 60)。
 
 - 加载约 6 秒出第一帧（页面显示加载阶段），之后**可以立即播放**。加载后 Worker 会提前为各图层做物理预热
   （约 4 秒，不阻塞播放、不改变画面，控制栏显示「预热图层 k/37」），播放中也会提前预热前方 3 秒内出现的图层。
-- 实测（WSL2、RTX 5080 Laptop、8 逻辑核、3 个 Worker）：加载完立即播放全片 60 秒 58.5～59.0 fps、丢帧 1.7～2.5%
+- 实测（WSL2、RTX 5080 Laptop、8 逻辑核、3 个 Worker）：加载完立即播放全片 60 秒 58.5～59.6 fps、丢帧 0.7～2.5%
   （另一拟合任务把 GPU 占到 84～92% 时 3.6～3.8%），画面相对声音滞后均值约 0.8 帧，60 秒内无漂移。
-  数据与方法见 [docs/handoff.md](docs/handoff.md) 第 5 节。
+  数据与方法见 [docs/runtime-eval.md](docs/runtime-eval.md) 第 6 节；Windows 原生播放尚未做正式 bench。
 
 URL 参数：
 
@@ -201,8 +219,9 @@ pnpm preview           # → http://localhost:4173/
 
 ## 复现整条管线
 
-以下命令都在仓库根目录、WSL / Linux 下运行。视频和模型是不可信数据：Python 一律 `tools/.venv/bin/python -I`，不要在 `assets/` 里执行任何东西。
-中间产物都在 `.data/`（不进 git）。长任务建议用 `systemd-run --user … -p MemoryMax=…` 启动（见 [docs/handoff.md](docs/handoff.md) 第 6 节）；
+以下整条管线（recon / fit / render / qa）的命令都在仓库根目录、WSL / Linux 下运行；播放器本身不受此限制，Windows 原生也可以跑（见上文）。
+视频和模型是不可信数据：Python 一律 `tools/.venv/bin/python -I`，不要在 `assets/` 里执行任何东西。
+中间产物都在 `.data/`（不进 git）。长任务建议用 `systemd-run --user … -p MemoryMax=…` 启动；
 WSL 下 ffmpeg 在 `~/.local/bin`，先 `export PATH=~/.local/bin:$PATH`。
 
 ### 0. setup
@@ -288,7 +307,8 @@ systemd-run --user --unit=cf-qa-report --collect --working-directory=$HOME/Chara
 ### 5. build：播放
 
 ```bash
-pnpm build && pnpm preview      # 或开发模式 pnpm dev
+pnpm build
+pnpm preview      # http://localhost:4173/；或开发模式 pnpm dev
 ```
 
 ## 验收口径与当前结果
@@ -309,6 +329,13 @@ pnpm build && pnpm preview      # 或开发模式 pnpm dev
 
 闪烁尖峰 **23** 帧（旧引擎 143），其中多数在转场或粒子特效里，属于误报；真正的跳变只剩 s13（1117、1119、1131）、s09 783、s21 1912。普通帧不达标的 53 帧主要在 s13（37 帧）。
 
+**已知问题**：
+
+- s13 普通帧仍有 37 帧低于 0.6；s09 783、s21 1912 各 1 个闪烁跳变。其余闪烁尖峰多在转场或粒子特效里，属于误报。
+- s13 的窗口展开、s26 的笔刷和 ✓ 排除区、s12 仍有肉眼可见差异，尚未逐帧修完。
+- P4 渲染曾出现 15 帧「定格」（964～1079）和若干帧与干净渲染不同；同一命令重跑 3 次未复现，怀疑与 GPU 被拟合任务占满有关。质检前应让 GPU 空闲，或渲染后用「相邻两帧逐字节相同、但有图层的保持帧号不同」筛一遍。
+- 4 个实例同屏在 8 逻辑核机器上约 23～32 fps；3 个实例约 58～59 fps（WSL 实测，见 [docs/runtime-eval.md](docs/runtime-eval.md) 第 6 节）。
+
 ## 目录结构
 
 | 路径 | 内容 |
@@ -322,5 +349,5 @@ pnpm build && pnpm preview      # 或开发模式 pnpm dev
 | `tools/fit/` | 旧 CPU 拟合引擎 fit4（保留；单元规划与导出代码仍被 GPU 引擎复用） |
 | `tools/qa/` | 验收指标 `metric.py`、闪烁 `flicker.py`、全片报告 `report.py` |
 | `scripts/` | `setup-cubism.mjs`、`setup-assets.mjs`（下载并校验外部资源） |
-| `docs/` | `pipeline.md`（目录、契约、验收口径）、`handoff.md`（交接与阶段状态）、`runtime-eval.md`（运行时实现、GPU 与确定性、性能）、`gpu-acceleration.md` |
+| `docs/` | `pipeline.md`（目录、契约、验收口径）、`runtime-eval.md`（运行时实现、GPU 与确定性、性能）、`gpu-acceleration.md`（历史提速方案与风险记录） |
 | `vendor/`、`assets/`、`.cache/`、`.data/` | 外部 SDK、模型与视频、Framework 编译缓存、中间产物（都不进 git） |

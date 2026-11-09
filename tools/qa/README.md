@@ -56,7 +56,7 @@ tools/.venv/bin/python -I tools/qa/flicker.py <渲染目录> <起帧-止帧(含)
 tools/.venv/bin/python -I tools/fit/scripts/flicker.py <渲染目录> <起帧-止帧(含)>
 ```
 
-口径（docs/handoff.md 第 3 节）：
+口径（本节，唯一实现见 `flicker.py`）：
 - 渲染（非预乘 RGB，不合成到原视频）和参考帧（与 metric 同一套 ffmpeg 颜色转换）都用 INTER_AREA 降到 320×180 灰度；
 - 区域 = 相邻两帧渲染 alpha 都 > 0.5 的像素，不超过 200 像素不判定；
 - Δ我们、Δ原视频 = 该区域内相邻两帧灰度差的平均；

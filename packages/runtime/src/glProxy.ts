@@ -7,7 +7,7 @@
  *    数据与绘制调用完全相同，像素逐位不变。
  *    缓存按「模型 URL + drawable 序号 + 种类」共享给同一模型的所有实例（它们的 UV / 索引逐字节相同）。
  *    以前按实例各建一份，每个新实例第一次绘制要建约 1000 个缓冲；WSL 的 Mesa d3d12 下 GPU 进程执行这些
- *    命令要 0.1～0.7 秒，渲染进程在 WaitForAvailableEntries 上干等，全片播放到每个新图层都会卡（P5 实测，见 docs/handoff.md）。
+ *    命令要 0.1～0.7 秒，渲染进程在 WaitForAvailableEntries 上干等，全片播放到每个新图层都会卡（P5 实测；P6 起按模型共享缓冲，见 docs/runtime-eval.md 第 6 节）。
  * 2. 绕序修正：带背面剔除的模型在翻转绘制（det < 0）时，主绘制阶段把 Cubism 设置的 frontFace(CCW) 换成 CW。
  */
 import type { CubismRenderer_WebGL } from '@cubism/framework/rendering/cubismrenderer_webgl';

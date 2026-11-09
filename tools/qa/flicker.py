@@ -1,7 +1,7 @@
 """时间稳定性（闪烁）检测：我们的帧间变化是否远大于原视频的帧间变化。全仓库唯一实现
 （report.py、metric.py score 和 tools/fit/scripts/flicker.py 都调用这里）。
 
-口径（docs/handoff.md 第 3 节）：
+口径（见 tools/qa/README.md 的「flicker.py」一节）：
   - 渲染（非预乘 RGB，不合成到原视频）和参考帧（与 metric.py 同一套 ffmpeg 颜色转换得到的全范围 RGB）
     都用 INTER_AREA 降到 320×180 灰度；
   - 区域 = 相邻两帧渲染 alpha 都 > 0.5 的像素（降采样后），不超过 200 像素不判定；

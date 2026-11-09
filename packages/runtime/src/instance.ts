@@ -316,7 +316,7 @@ export class ModelInstance {
    * Core 不重算被跳过的 drawable（不可见、且本次没有 VertexPositionsDidChange）的顶点，数组里留着上一次算到它时的值
    * （或从没算过的 0）。Framework 的 CubismClippingManager.calcClippedDrawableTotalBounds 计算遮罩布局时会把
    * 被裁切 drawable 的顶点全部算进外接框，不看可见性，于是遮罩的布局、进而遮罩边缘几个像素取决于这个 Core 模型
-   * 之前 update 过哪些帧：seek 与顺序播放、隔帧渲染与逐帧渲染、Worker 的调度顺序都会让结果差 ±1～3（P5 实测，见 docs/handoff.md）。
+   * 之前 update 过哪些帧：seek 与顺序播放、隔帧渲染与逐帧渲染、Worker 的调度顺序都会让结果差 ±1～3（P6 修复，见 docs/runtime-eval.md 第 4 节）。
    * 这里把这些「本次未更新」的顶点置为 NaN：外接框计算里 NaN 比较恒为假，Framework 按「没有有效点」跳过它
    * （与它的注释一致）；绘制与遮罩绘制本来就跳过这些 drawable（IsVisible / VertexPositionsDidChange 判断），所以只影响外接框。
    */
