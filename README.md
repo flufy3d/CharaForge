@@ -197,6 +197,21 @@ pnpm bench scenes/deepseek-chan/scene.json 60    # 全片（带原音频）
 pnpm verify:video                            # 参考视频逐帧定位精度（与 ffmpeg 解码比对）
 ```
 
+## 外部饰品（ImageAsset / ImageLayer）
+
+外部 AI 生成或手工准备的透明 PNG/WebP 可以作为 scene 资产挂到角色上，不修改模型文件。完整字段、attach 公式和限制见 [docs/accessories.md](docs/accessories.md)。
+
+```bash
+pnpm accessory:import --input .data/hat.png --id hat --scene packages/scene/examples/accessory.scene.json --attach main
+pnpm dev    # ?scene=packages/scene/examples/accessory.scene.json&edit=1
+pnpm --silent decoration:command --scene packages/scene/examples/accessory.scene.json --input .data/command.json --out .data/command.scene.json
+```
+
+- 图片：PNG/WebP，单边 ≤ 4096、总像素 ≤ 16 MP；导入 CLI 要求至少一个透明/半透明像素。
+- schema：`scene.assets.images` + `kind:"image"` 图层，`version` 仍为 1；旧场景不写 `assets.images` 时行为不变。
+- attach 只跟随目标模型图层的整体变换，不跟骨骼/参数；已知限制和授权注意见文档。
+- 图片文件放 `assets/accessories/`（gitignore，不进仓库）；AI 生成图请自行确认授权，不要把大图/版权不明素材提交进 git。
+
 ## 静态页（`pnpm build`）
 
 ```bash

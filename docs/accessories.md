@@ -79,7 +79,7 @@ Own(p) = (x,y) + R(rotation)·(sx·(px−ax), sy·(py−ay))
 - 图片图层不进入 `LayerEvaluator`，不推进物理/不参与 Core update；Worker 只接收模型图层。
 - 目标模型图层在 `f` 不活跃时，attach 图片不绘制；目标 `opacity=0` 时仍按其变换绘制图片。
 - `rotateWith/scaleWith` 缺省 true；关闭时分别剥离目标旋转/缩放（`scaleWith=false` 同时不继承 `flipX`），平移和相机始终保留。
-- 回归：旧全片场景 `scenes/deepseek-chan/scene.json` 的 1000–1099 共 100 帧，在阶段 2 改动前后逐帧 PNG SHA-256 完全相同。
+- 回归：旧全片场景 `scenes/deepseek-chan/scene.json` 的 1000–1099 共 100 帧，在阶段 2 改动前后、阶段 6 最终复跑时逐帧 PNG SHA-256 完全相同（等价 SSIM 1.0）。
 
 ## 导入 CLI
 
@@ -162,6 +162,16 @@ pnpm --silent decoration:command --scene packages/scene/examples/accessory.scene
 pnpm dev   # ?scene=packages/scene/examples/accessory.scene.json&edit=1
 pnpm render --scene packages/scene/examples/accessory.scene.json --frames 0-30 --out .data/render/acc
 ```
+
+## 已知限制
+
+- attach 只跟随目标模型图层的整体变换，不跟骨骼/参数/部件；头部转动、表情、物理不会带动饰品。
+- 目标模型图层在 `f` 不活跃时 attach 图片不绘制；目标 `opacity=0` 时仍按变换绘制图片。
+- 图片纹理按 URL 跨场景缓存，只在 runtime `dispose()` 时统一释放。
+- 编辑器导入的图片不更新 `assets/accessories/index.json`；目录由导入 CLI 维护。
+- AI 命令层目前是 CLI/JSON，没有 HTTP 服务或 MCP；`preview` 返回摘要，实际预览用 `pnpm render`。
+- 图片导入/缩略图依赖 Playwright Chromium；没有 ffmpeg 回退。
+- `assets/` 不进 git；场景引用本地图片时需随场景一起拷贝 `assets/accessories/`。
 
 ## 授权
 
