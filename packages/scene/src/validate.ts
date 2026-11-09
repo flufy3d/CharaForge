@@ -1,5 +1,5 @@
 import { TypeCompiler } from '@sinclair/typebox/compiler';
-import { Scene } from './scene.ts';
+import { MAX_IMAGE_PIXELS, Scene } from './scene.ts';
 import { Shots } from './shots.ts';
 import type { Scene as SceneT } from './scene.ts';
 import type { Shots as ShotsT } from './shots.ts';
@@ -8,7 +8,6 @@ const sceneChecker = TypeCompiler.Compile(Scene);
 const shotsChecker = TypeCompiler.Compile(Shots);
 
 /** 与 packages/runtime 的图片限制保持一致：单边 4096，总像素 16 Mi（4096²）。 */
-const MAX_IMAGE_PIXELS = 16_777_216;
 
 function check<T>(checker: { Check(v: unknown): boolean; Errors(v: unknown): Iterable<{ path: string; message: string }> }, v: unknown, what: string): T {
   if (checker.Check(v)) return v as T;

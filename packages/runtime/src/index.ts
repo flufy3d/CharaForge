@@ -6,7 +6,7 @@ export { LayerEvaluator, CHECKPOINT_INTERVAL } from './evaluator.ts';
 export type { ParamOverrides, LayerStateToken } from './evaluator.ts';
 export { ModelInstance } from './instance.ts';
 export type { InstanceState, ParamMode } from './instance.ts';
-export { ModelResource, defaultFetcher } from './resources.ts';
+export { ModelResource, ImageResource, defaultFetcher } from './resources.ts';
 export { asciiUrl, ASCII_SEGMENT_PREFIX } from './asciiUrl.ts';
 export type { CanvasInfo, ParameterInfo, PartInfo, Fetcher } from './resources.ts';
 export * as affine from './math.ts';

@@ -1,12 +1,15 @@
 /*
- * 模型资源：多实例共享的只读部分（moc、贴图、physics3 原始数据、motion、exp3、cdi3 显示名）。
+ * 资源：模型（多实例共享的只读部分：moc、贴图、physics3 原始数据、motion、exp3、cdi3 显示名）
+ * 与外部图片（ImageResource，预乘 alpha 纹理）。
  * 实例（ModelInstance）各自持有 CubismModel / 渲染器 / 物理状态。
  *
- * 资源来自不可信下载：这里只做 JSON 解析与二进制读取，不执行任何内容。
+ * 资源来自不可信下载：这里只做 JSON 解析、二进制读取与图片解码，不执行任何内容。
  */
 import { CubismMoc } from '@cubism/framework/model/cubismmoc';
 import { CubismMotion } from '@cubism/framework/motion/cubismmotion';
 import { CubismExpressionMotion } from '@cubism/framework/motion/cubismexpressionmotion';
+import { MAX_IMAGE_PIXELS, MAX_IMAGE_SIDE } from '@charaforge/scene';
+import { ImageSource, Texture } from 'pixi.js';
 import { asciiUrl } from './asciiUrl.ts';
 import { ensureCubism } from './cubism.ts';
 import { ModelInstance } from './instance.ts';
@@ -216,6 +219,77 @@ export class ModelResource {
     this.instanceCount++;
     return new ModelInstance(this, opts);
   }
+}
+
+/**
+ * 外部图片资源：解码一次，上传为预乘 alpha 的 Pixi 纹理。
+ * 图片是不可信数据：只检查文件头、尺寸，然后交给 createImageBitmap 解码；不执行任何内容。
+ * 预乘由 createImageBitmap 完成，Pixi 侧声明 alphaMode = premultiplied-alpha，避免二次预乘。
+ */
+export class ImageResource {
+  readonly url: string;
+  readonly width: number;
+  readonly height: number;
+  readonly texture: Texture;
+  private readonly bitmap: ImageBitmap;
+
+  private constructor(init: { url: string; width: number; height: number; texture: Texture; bitmap: ImageBitmap }) {
+    this.url = init.url;
+    this.width = init.width;
+    this.height = init.height;
+    this.texture = init.texture;
+    this.bitmap = init.bitmap;
+  }
+
+  /** url 必须是绝对 URL；expected 为场景声明的尺寸，必须与实际解码结果一致。 */
+  static async load(url: string, fetcher: Fetcher = defaultFetcher, expected?: { width: number; height: number }): Promise<ImageResource> {
+    const bytes = await fetcher(url);
+    const mime = imageMime(bytes);
+    if (!mime) throw new Error(`不是 PNG/WebP：${url}`);
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await createImageBitmap(new Blob([bytes], { type: mime }), {
+        premultiplyAlpha: 'premultiply',
+        colorSpaceConversion: 'none',
+        imageOrientation: 'none',
+      });
+    } catch (e) {
+      throw new Error(`图片解码失败：${url}（${String((e as Error)?.message ?? e)}）`);
+    }
+    if (bitmap.width < 1 || bitmap.height < 1 || bitmap.width > MAX_IMAGE_SIDE || bitmap.height > MAX_IMAGE_SIDE || bitmap.width * bitmap.height > MAX_IMAGE_PIXELS) {
+      bitmap.close();
+      throw new Error(`图片尺寸超出限制：${url}（${bitmap.width}×${bitmap.height}，单边 ≤ ${MAX_IMAGE_SIDE}，总像素 ≤ ${MAX_IMAGE_PIXELS}）`);
+    }
+    if (expected && (bitmap.width !== expected.width || bitmap.height !== expected.height)) {
+      bitmap.close();
+      throw new Error(`图片尺寸与 scene 声明不一致：${url}（实际 ${bitmap.width}×${bitmap.height}，声明 ${expected.width}×${expected.height}）`);
+    }
+    const source = new ImageSource({
+      resource: bitmap,
+      width: bitmap.width,
+      height: bitmap.height,
+      alphaMode: 'premultiplied-alpha',
+      scaleMode: 'linear',
+      mipmapFilter: 'linear',
+      autoGenerateMipmaps: true,
+      maxAnisotropy: 4,
+    });
+    const texture = new Texture({ source });
+    return new ImageResource({ url, width: bitmap.width, height: bitmap.height, texture, bitmap });
+  }
+
+  dispose(): void {
+    this.texture.destroy(true);
+    this.bitmap.close();
+  }
+}
+
+/** PNG / WebP 文件头。运行时只接受这两种格式（扩展名和 data URI 已在 parseScene 校验）。 */
+function imageMime(bytes: ArrayBuffer): 'image/png' | 'image/webp' | null {
+  const b = new Uint8Array(bytes);
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 && b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a) return 'image/png';
+  if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+  return null;
 }
 
 async function uploadTexture(gl: WebGL2RenderingContext, bytes: ArrayBuffer, anisotropy: number): Promise<WebGLTexture> {

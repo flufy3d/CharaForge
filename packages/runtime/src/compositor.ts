@@ -20,6 +20,7 @@ import {
   autoDetectRenderer,
   Container,
   GlProgram,
+  Matrix,
   Mesh,
   MeshGeometry,
   RenderTexture,
@@ -118,6 +119,8 @@ export class Compositor {
   private readonly upsample: PassShader;
   private readonly rtPool = new Map<string, RenderTexture>();
   private readonly presentSprite = new Sprite();
+  /** 图片纹理 quad（复用同一 Sprite，避免每帧创建容器） */
+  private readonly imageSprite = new Sprite();
   private readbackBuf: Uint8Array = new Uint8Array(0);
 
   static async create(width: number, height: number, opts: CompositorOptions = {}): Promise<Compositor> {
@@ -322,6 +325,28 @@ export class Compositor {
   /** 模型 + filters，返回结果所在的缓冲（三张图层级缓冲之一，下一次调用前有效）。 */
   layerSource(inst: ModelInstance, toScreen: Affine, filters: ResolvedFilter[], antialias = true): RenderTexture {
     let src = this.drawModel(inst, toScreen, this.layerRT, antialias);
+    for (const f of filters) src = this.applyFilter(src, f);
+    return src;
+  }
+
+  /**
+   * 图片纹理 quad：图片局部像素 → 合成像素。画进图层缓冲（透明背景），返回该缓冲。
+   * 预乘 alpha 由 ImageResource 保证；这里只做纹理采样和仿射变换。
+   */
+  drawImage(texture: Texture, toScreen: Affine, target: RenderTexture = this.layerRT): RenderTexture {
+    const s = this.imageSprite;
+    s.texture = texture;
+    s.position.set(0, 0);
+    s.rotation = 0;
+    s.scale.set(1, 1);
+    s.setFromMatrix(new Matrix(toScreen[0], toScreen[1], toScreen[2], toScreen[3], toScreen[4], toScreen[5]));
+    this.renderer.render({ container: s, target, clear: true, clearColor: [0, 0, 0, 0] });
+    return target;
+  }
+
+  /** 图片 + filters，返回结果所在的缓冲（与 layerSource 同语义）。 */
+  layerSourceImage(texture: Texture, toScreen: Affine, filters: ResolvedFilter[]): RenderTexture {
+    let src = this.drawImage(texture, toScreen, this.layerRT);
     for (const f of filters) src = this.applyFilter(src, f);
     return src;
   }

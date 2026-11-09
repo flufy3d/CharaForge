@@ -5,15 +5,15 @@
  *   - 无墙钟时间、无随机、无隐式自动行为；
  *   - 物理固定步长 1/fps，seek 时从 in − warmup 重放（带检查点），顺序播放增量推进，二者逐位相同。
  */
-import { parseScene, sample, type CameraTransform, type ModelLayer, type Scene, type Transform2D } from '@charaforge/scene';
+import { parseScene, sample, type CameraTransform, type ImageAsset, type ImageLayer, type ModelLayer, type Scene, type Transform2D } from '@charaforge/scene';
 import { asciiUrl } from './asciiUrl.ts';
 import { waitForCubismCore } from './coreReady.ts';
 import { Compositor, type LayerDrawParams, type Pixels, type Region, type ResolvedFilter } from './compositor.ts';
 import { LayerEvaluator, type LayerStateToken, type ParamOverrides } from './evaluator.ts';
 import type { InstanceState, ModelInstance } from './instance.ts';
-import { cameraMatrix, IDENTITY, layerMatrix, mul, type Affine } from './math.ts';
+import { cameraMatrix, IDENTITY, layerMatrix, mul, translate, type Affine } from './math.ts';
 import { apply } from './math.ts';
-import { defaultFetcher, ModelResource, type CanvasInfo, type Fetcher } from './resources.ts';
+import { defaultFetcher, ImageResource, ModelResource, type CanvasInfo, type Fetcher } from './resources.ts';
 import { loadSceneAssets, resolver } from './sceneAssets.ts';
 import { WorkerPool, type UpdateResult } from './workerPool.ts';
 
@@ -62,26 +62,38 @@ export interface RenderFrameOptions {
   prefetch?: number[];
 }
 
-interface LayerPlan {
+interface LayerPlanBase {
+  layer: ModelLayer | ImageLayer;
+  visible: boolean;
+  toScreen: Affine;
+  draw: LayerDrawParams;
+}
+
+interface ModelLayerPlan extends LayerPlanBase {
+  kind: 'model';
   layer: ModelLayer;
   ev: LayerEvaluator;
   /** 保持帧（规范 4b），所有属性在 g 求值 */
   g: number;
-  /** 是否需要绘制（不可见时只推进物理，不做 Core update 和绘制） */
-  visible: boolean;
-  toScreen: Affine;
-  draw: LayerDrawParams;
   antialias: boolean;
   overrides?: ParamOverrides;
   /** frameHold 段内 g 已经画过：直接复用缓存的图层缓冲 */
   cacheHit: boolean;
 }
 
+interface ImageLayerPlan extends LayerPlanBase {
+  kind: 'image';
+  layer: ImageLayer;
+  image: ImageResource;
+}
+
+type LayerPlan = ModelLayerPlan | ImageLayerPlan;
+
 const WORKER_CORE_MEMORY = 256 * 1024 * 1024;
 
 interface PendingJob {
   key: string;
-  plan: LayerPlan;
+  plan: ModelLayerPlan;
   resolve: (r: UpdateResult) => void;
   reject: (e: Error) => void;
 }
@@ -108,8 +120,10 @@ export class CharaForgeRuntime {
   private readonly fetcher: Fetcher;
   private readonly maskBufferSize: number;
   private readonly resources = new Map<string, Promise<ModelResource>>();
+  private readonly images = new Map<string, Promise<ImageResource>>();
   private scene: Scene | null = null;
   private layers: { layer: ModelLayer; ev: LayerEvaluator }[] = [];
+  private imageLayers: { layer: ImageLayer; image: ImageResource }[] = [];
   /** 每个模型资源上空闲的实例（换场景时复用，避免反复创建渲染器） */
   private readonly instancePool = new Map<ModelResource, ModelInstance[]>();
   private readonly looseInstances = new Map<number, ModelInstance>();
@@ -176,6 +190,25 @@ export class CharaForgeRuntime {
     return p;
   }
 
+  /** 加载（并缓存）图片资源。同一 URL 被多个 scene 资产引用时共享纹理，但尺寸声明必须一致。 */
+  private loadImage(asset: ImageAsset): Promise<ImageResource> {
+    const url = this.resolveAsset(asset.uri);
+    let p = this.images.get(url);
+    if (!p) {
+      p = ImageResource.load(url, this.fetcher, asset);
+      this.images.set(url, p);
+      p.catch(() => this.images.delete(url));
+    } else {
+      p = p.then((r) => {
+        if (r.width !== asset.width || r.height !== asset.height) {
+          throw new Error(`图片尺寸与 scene 声明不一致：${url}（实际 ${r.width}×${r.height}，声明 ${asset.width}×${asset.height}）`);
+        }
+        return r;
+      });
+    }
+    return p;
+  }
+
   /** 加载场景（对象或 URL）。会做结构 + 语义校验。 */
   async loadScene(input: Scene | unknown | string): Promise<Scene> {
     let raw: unknown = input;
@@ -186,9 +219,10 @@ export class CharaForgeRuntime {
     }
     const scene = parseScene(raw);
     const assets = await loadSceneAssets(scene, (u) => this.loadModel(u), (u) => this.resolveAsset(u));
-    // 阶段 1 只做 schema；图片渲染在阶段 2 接入。先保持旧场景的加载/渲染路径不变。
     const modelLayers = scene.layers.filter((l): l is ModelLayer => l.kind === 'model');
-    if (modelLayers.length !== scene.layers.length) throw new Error('image 图层尚未实现（阶段 2）');
+    const imageLayers = scene.layers.filter((l): l is ImageLayer => l.kind === 'image');
+    const imageAssets = new Map<string, ImageResource>();
+    await Promise.all((scene.assets.images ?? []).map(async (a) => imageAssets.set(a.id, await this.loadImage(a))));
     if (this.pool) await this.pool.loadScene(scene, modelLayers.map((l) => l.id));
 
     // 回收旧图层实例
@@ -203,6 +237,7 @@ export class CharaForgeRuntime {
       const ev = new LayerEvaluator(layer, inst, scene.timebase.fps, resolver(assets.motions, 'motion'), resolver(assets.expressions, 'expression'));
       return { layer, ev };
     });
+    this.imageLayers = imageLayers.map((layer) => ({ layer, image: imageAssets.get(layer.image)! }));
     return scene;
   }
 
@@ -222,6 +257,7 @@ export class CharaForgeRuntime {
       this.instancePool.set(res, pool);
     }
     this.layers = [];
+    this.imageLayers = [];
   }
 
   /** 场景内图层的模型实例（只读访问参数、画布信息等）。 */
@@ -229,35 +265,114 @@ export class CharaForgeRuntime {
     return this.layers.find((l) => l.layer.id === layerId)?.ev.instance;
   }
 
-  /** 帧 f 上每个存在的图层要做什么。 */
+  /** 帧 f 上每个存在的图层要做什么；返回顺序 = scene.layers 顺序（z 顺序）。 */
   private plan(f: number, overrides?: Record<string, ParamOverrides>): LayerPlan[] {
     const scene = this.scene!;
     const W = scene.composition.width;
     const H = scene.composition.height;
     const antialias = scene.composition.antialias ?? true;
-    const plans: LayerPlan[] = [];
+    const modelPlans = new Map<string, ModelLayerPlan>();
     for (const { layer, ev } of this.layers) {
-      // 图层是否存在按显示帧 f 判断；画面（状态与全部属性，含相机）在保持帧 g 求值（规范 4b）
-      if (!ev.isActive(f)) continue;
-      const g = holdFrame(layer, f);
-      if (!ev.isActive(g)) continue;
-      const ov = overrides?.[layer.id];
-      const hasOv = !!ov && !!(ov.pre || ov.post || ov.parts);
-      const opacity = sample(layer.opacity, g, 1);
-      const toWorld = layerMatrix(sampleTransform(layer.transform, g, ev.instance.canvas));
-      const cam = scene.camera ? cameraMatrix(sampleCamera(scene.camera, g), W, H) : IDENTITY;
-      const toScreen = (layer.space ?? 'world') === 'screen' ? toWorld : mul(cam, toWorld);
-      const draw = resolveLayerDraw(layer, g, opacity);
-      const visible = opacity > 0 && layerOnScreen(toScreen, ev.instance.canvas, draw, W, H);
-      const cacheHit = visible && !hasOv && !!layer.frameHold?.length && this.holdCache.get(layer.id) === g;
-      plans.push({ layer, ev, g, visible, toScreen, draw, antialias, overrides: hasOv ? ov : undefined, cacheHit });
+      const p = this.planModel(layer, ev, f, overrides, W, H, antialias);
+      if (p) modelPlans.set(layer.id, p);
+    }
+    const imagePlans = new Map<string, ImageLayerPlan>();
+    for (const { layer, image } of this.imageLayers) {
+      const p = this.planImage(layer, image, f, modelPlans, W, H);
+      if (p) imagePlans.set(layer.id, p);
+    }
+    const plans: LayerPlan[] = [];
+    for (const layer of scene.layers) {
+      const p = layer.kind === 'model' ? modelPlans.get(layer.id) : imagePlans.get(layer.id);
+      if (p) plans.push(p);
     }
     return plans;
   }
 
-  /** 画一个已求值好的图层（模型 → filters → 缓存 → 输出）。 */
+  private planModel(
+    layer: ModelLayer,
+    ev: LayerEvaluator,
+    f: number,
+    overrides: Record<string, ParamOverrides> | undefined,
+    W: number,
+    H: number,
+    antialias: boolean,
+  ): ModelLayerPlan | null {
+    // 图层是否存在按显示帧 f 判断；画面（状态与全部属性，含相机）在保持帧 g 求值（规范 4b）
+    if (!ev.isActive(f)) return null;
+    const g = holdFrame(layer, f);
+    if (!ev.isActive(g)) return null;
+    const ov = overrides?.[layer.id];
+    const hasOv = !!ov && !!(ov.pre || ov.post || ov.parts);
+    const opacity = sample(layer.opacity, g, 1);
+    const toWorld = layerMatrix(sampleTransform(layer.transform, g, ev.instance.canvas));
+    const cam = this.scene!.camera ? cameraMatrix(sampleCamera(this.scene!.camera, g), W, H) : IDENTITY;
+    const toScreen = (layer.space ?? 'world') === 'screen' ? toWorld : mul(cam, toWorld);
+    const draw = resolveLayerDraw(layer, g, opacity);
+    const visible = opacity > 0 && layerOnScreen(toScreen, canvasBounds(ev.instance.canvas), draw, W, H);
+    const cacheHit = visible && !hasOv && !!layer.frameHold?.length && this.holdCache.get(layer.id) === g;
+    return { kind: 'model', layer, ev, g, visible, toScreen, draw, antialias, overrides: hasOv ? ov : undefined, cacheHit };
+  }
+
+  private planImage(
+    layer: ImageLayer,
+    image: ImageResource,
+    f: number,
+    modelPlans: Map<string, ModelLayerPlan>,
+    W: number,
+    H: number,
+  ): ImageLayerPlan | null {
+    const scene = this.scene!;
+    const opacity = sample(layer.opacity, f, 1);
+    const own = layerMatrix(sampleTransform(layer.transform, f, imageCanvas(image)));
+    let toScreen: Affine;
+    if (layer.attach) {
+      const target = modelPlans.get(layer.attach.layer);
+      // 目标在 f 不活跃：图片也不绘制（attach 没有可用的整体变换）
+      if (!target) return null;
+      const targetCanvas = target.ev.instance.canvas;
+      const attach = layer.attach;
+      let mt: Affine;
+      if ((attach.rotateWith ?? true) && (attach.scaleWith ?? true)) {
+        mt = target.toScreen;
+      } else {
+        // 分别剥离目标旋转/缩放（含 flipX），平移与相机始终保留
+        const t = sampleTransform(target.layer.transform, target.g, targetCanvas);
+        const sx = t.scale * (t.scaleX ?? 1) * (t.flipX ? -1 : 1);
+        const sy = t.scale * (t.scaleY ?? 1);
+        const local = layerMatrix({
+          x: t.x,
+          y: t.y,
+          scale: 1,
+          scaleX: (attach.scaleWith ?? true) ? sx : 1,
+          scaleY: (attach.scaleWith ?? true) ? sy : 1,
+          rotation: (attach.rotateWith ?? true) ? t.rotation : 0,
+          anchorX: t.anchorX,
+          anchorY: t.anchorY,
+          flipX: false,
+        });
+        const cam = scene.camera ? cameraMatrix(sampleCamera(scene.camera, target.g), W, H) : IDENTITY;
+        mt = (target.layer.space ?? 'world') === 'screen' ? local : mul(cam, local);
+      }
+      const a = attach.anchor;
+      const o = attach.offset ?? [0, 0];
+      toScreen = mul(mul(mt, translate(a[0] * targetCanvas.width + o[0], a[1] * targetCanvas.height + o[1])), own);
+    } else {
+      const cam = scene.camera ? cameraMatrix(sampleCamera(scene.camera, f), W, H) : IDENTITY;
+      toScreen = (layer.space ?? 'world') === 'screen' ? own : mul(cam, own);
+    }
+    const draw = resolveLayerDraw(layer, f, opacity);
+    const visible = opacity > 0 && layerOnScreen(toScreen, { x0: 0, y0: 0, x1: image.width, y1: image.height }, draw, W, H);
+    return { kind: 'image', layer, image, visible, toScreen, draw };
+  }
+
+  /** 画一个已求值好的图层（模型/图片 → filters → 缓存 → 输出）。 */
   private drawPlanned(p: LayerPlan): void {
     const comp = this.compositor;
+    if (p.kind === 'image') {
+      comp.outputLayer(comp.layerSourceImage(p.image.texture, p.toScreen, p.draw.filters), p.draw);
+      return;
+    }
     if (p.cacheHit) {
       comp.outputLayer(comp.cacheRT(p.layer.id), p.draw);
       return;
@@ -285,6 +400,10 @@ export class CharaForgeRuntime {
     let updates = 0;
     const plans = this.plan(f, opts.overrides);
     for (const p of plans) {
+      if (p.kind === 'image') {
+        if (p.visible) this.drawPlanned(p);
+        continue;
+      }
       if (p.cacheHit) {
         this.drawPlanned(p);
         continue;
@@ -312,10 +431,11 @@ export class CharaForgeRuntime {
     if (!this.scene) throw new Error('尚未加载场景');
     const f = Math.floor(frame);
     const plans = this.plan(f, opts.overrides);
-    // 本帧需要的 g 永远不算过期（向后 seek 时水位要降下来）
-    for (const p of plans) this.watermark.set(p.layer.id, p.g);
+    // 本帧需要的 g 永远不算过期（向后 seek 时水位要降下来）；图片图层不参与 Worker 求值
+    for (const p of plans) if (p.kind === 'model') this.watermark.set(p.layer.id, p.g);
     let steps = 0;
     const waits = plans.map((p) => {
+      if (p.kind !== 'model') return null;
       if (p.cacheHit) return null;
       if (!p.visible) {
         void this.pool!.advance(p.layer.id, p.g, p.overrides).catch((e) => console.error(e));
@@ -325,7 +445,7 @@ export class CharaForgeRuntime {
     });
     for (const pf of opts.prefetch ?? []) {
       if (pf < 0 || pf >= this.scene.duration || pf === f) continue;
-      for (const p of this.plan(pf)) if (p.visible && !p.cacheHit) void this.requestUpdate(p).catch(() => {});
+      for (const p of this.plan(pf)) if (p.kind === 'model' && p.visible && !p.cacheHit) void this.requestUpdate(p).catch(() => {});
     }
     const results = await Promise.all(waits);
     const t1 = performance.now();
@@ -333,7 +453,7 @@ export class CharaForgeRuntime {
     let updates = 0;
     plans.forEach((p, i) => {
       const r = results[i];
-      if (r) {
+      if (p.kind === 'model' && r) {
         steps += r.steps;
         p.ev.instance.importDynamics(r.packet);
         updates++;
@@ -342,6 +462,7 @@ export class CharaForgeRuntime {
     });
     // 清掉已经用过的（≤ 当前 g）请求，并提高水位：更早的预取任务不再需要
     for (const p of plans) {
+      if (p.kind !== 'model') continue;
       this.watermark.set(p.layer.id, p.g + 1);
       const prefix = `${p.layer.id}|`;
       for (const [k, q] of this.inflight) {
@@ -367,7 +488,7 @@ export class CharaForgeRuntime {
     const jobs: Promise<unknown>[] = [];
     for (const f of frames) {
       if (f < 0 || f >= this.scene.duration) continue;
-      for (const p of this.plan(f)) if (p.visible && !p.cacheHit) jobs.push(this.requestUpdate(p).catch(() => {}));
+      for (const p of this.plan(f)) if (p.kind === 'model' && p.visible && !p.cacheHit) jobs.push(this.requestUpdate(p).catch(() => {}));
     }
     return Promise.all(jobs).then(() => {});
   }
@@ -376,7 +497,7 @@ export class CharaForgeRuntime {
    * 请求 (图层, g, 覆盖) 的 Core update 结果；同一请求只发一次。
    * 任务先进入主线程的等待队列，有空闲 Worker 时按帧号从小到大发出（发出时才在主线程求值到「参数就绪」）。
    */
-  private requestUpdate(p: LayerPlan): Promise<UpdateResult> {
+  private requestUpdate(p: ModelLayerPlan): Promise<UpdateResult> {
     const key = `${p.layer.id}|${p.g}|${p.overrides ? JSON.stringify(p.overrides) : ''}`;
     const q = this.inflight.get(key);
     if (q) return q;
@@ -423,6 +544,8 @@ export class CharaForgeRuntime {
 
   dispose(): void {
     this.pool?.dispose();
+    for (const p of this.images.values()) void p.then((r) => r.dispose(), () => {});
+    this.images.clear();
   }
 
   readPixels(region?: Region, scale = 1): Pixels {
@@ -529,10 +652,26 @@ export class CharaForgeRuntime {
 // ---------- 采样工具 ----------
 
 /**
- * 图层是否可能出现在画面上：opacity 已在外面判断；这里看 clip 面积、以及模型画布矩形
- * （经 toScreen 变换、按模糊半径外扩）与合成画面 / clip 矩形是否相交。保守判断：只会多画，不会漏画。
+ * 图层是否可能出现在画面上：opacity 已在外面判断；这里看 clip 面积、以及图层本地矩形
+ * （模型画布或图片，经 toScreen 变换、按模糊半径外扩）与合成画面 / clip 矩形是否相交。保守判断：只会多画，不会漏画。
  */
-function layerOnScreen(toScreen: Affine, c: CanvasInfo, d: LayerDrawParams, W: number, H: number): boolean {
+interface LayerBounds {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+function canvasBounds(c: CanvasInfo): LayerBounds {
+  return { x0: 0, y0: 0, x1: c.width, y1: c.height };
+}
+
+/** 图片图层的本地坐标系 = 图片像素；origin/ppu 不参与 2D 变换，仅为满足 CanvasInfo 类型。 */
+function imageCanvas(image: ImageResource): CanvasInfo {
+  return { width: image.width, height: image.height, originX: 0, originY: 0, pixelsPerUnit: 1 };
+}
+
+function layerOnScreen(toScreen: Affine, b: LayerBounds, d: LayerDrawParams, W: number, H: number): boolean {
   let pad = 1;
   for (const f of d.filters) {
     if (f.type === 'blur') pad += Math.ceil(3 * Math.max(0, f.sigma));
@@ -540,7 +679,7 @@ function layerOnScreen(toScreen: Affine, c: CanvasInfo, d: LayerDrawParams, W: n
     else if (f.type === 'resample' && f.factor > 0 && f.factor < 1) pad += Math.ceil(3 / f.factor);
   }
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const [px, py] of [[0, 0], [c.width, 0], [0, c.height], [c.width, c.height]] as const) {
+  for (const [px, py] of [[b.x0, b.y0], [b.x1, b.y0], [b.x0, b.y1], [b.x1, b.y1]] as const) {
     const [x, y] = apply(toScreen, px, py);
     x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
   }
@@ -601,7 +740,7 @@ export function sampleCamera(c: CameraTransform, f: number) {
   return { x: sample(c.x, f, 0), y: sample(c.y, f, 0), zoom: sample(c.zoom, f, 1), rotation: sample(c.rotation, f, 0) };
 }
 
-function resolveLayerDraw(layer: ModelLayer, f: number, opacity: number): LayerDrawParams {
+function resolveLayerDraw(layer: ModelLayer | ImageLayer, f: number, opacity: number): LayerDrawParams {
   const filters: ResolvedFilter[] = [];
   for (const fl of layer.filters ?? []) {
     if (fl.enabled === false) continue;

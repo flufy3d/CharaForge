@@ -2,7 +2,7 @@
 
 本期目标：把 AI 生成或手工准备的透明 PNG/WebP 作为场景资产，挂到模型图层上或独立放在画面里。图片是 **scene 层引用**，不修改模型文件。
 
-> 当前进度：阶段 1 已完成 schema、`parseScene` 语义校验和示例；runtime 的图片绘制在阶段 2 接入。
+> 当前进度：阶段 1 完成 schema、`parseScene` 语义校验和示例；阶段 2 完成 runtime 图片解码/纹理/绘制与 attach。导入 CLI、编辑器和 AI 命令层在后续阶段。
 
 ## 数据
 
@@ -70,6 +70,17 @@ Own(p) = (x,y) + R(rotation)·(sx·(px−ax), sy·(py−ay))
 - `rotateWith`、`scaleWith` 缺省 `true`；`scaleWith=false` 时不继承目标缩放和 `flipX`。
 - 已知限制：头部转动、表情、物理等骨骼级变化不会带动饰品；需要更细的绑定时再引入骨骼/部件锚点。
 
+## runtime 实现
+
+- `ImageResource`（`packages/runtime/src/resources.ts`）：检查 PNG/WebP 文件头 → `createImageBitmap(premultiplyAlpha: "premultiply")` → Pixi `ImageSource`（`alphaMode: "premultiplied-alpha"`、线性过滤、自动 mipmap）→ 按绝对 URL 缓存。
+- 解码后的实际尺寸必须与 `ImageAsset.width/height` 一致，否则加载失败；运行时也检查 4096/16MP 上限。
+- `Compositor.drawImage` 用 Pixi `Sprite` + `setFromMatrix` 把图片纹理画进图层缓冲，再复用现有 `filters → clip → opacity → blendMode` 输出链。
+- 图层计划按 `scene.layers` 数组顺序生成；图片和模型可以交错，attach 不改变 z 顺序。
+- 图片图层不进入 `LayerEvaluator`，不推进物理/不参与 Core update；Worker 只接收模型图层。
+- 目标模型图层在 `f` 不活跃时，attach 图片不绘制；目标 `opacity=0` 时仍按其变换绘制图片。
+- `rotateWith/scaleWith` 缺省 true；关闭时分别剥离目标旋转/缩放（`scaleWith=false` 同时不继承 `flipX`），平移和相机始终保留。
+- 回归：旧全片场景 `scenes/deepseek-chan/scene.json` 的 1000–1099 共 100 帧，在阶段 2 改动前后逐帧 PNG SHA-256 完全相同。
+
 ## 示例与验证
 
 - 示例：`packages/scene/examples/accessory.scene.json`（64×64 棋盘 data URI，含一个 attach 图层和一个独立屏幕图层）。
@@ -78,7 +89,9 @@ Own(p) = (x,y) + R(rotation)·(sx·(px−ax), sy·(py−ay))
 
 ```bash
 pnpm --filter @charaforge/scene test
+pnpm test:runtime
 pnpm -r run typecheck
+pnpm render --scene packages/scene/examples/accessory.scene.json --frames 0-30 --out .data/render/acc
 ```
 
 ## 授权

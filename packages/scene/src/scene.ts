@@ -98,12 +98,15 @@ export const AudioAsset = Type.Object(
  * uri 相对于资源根目录；也允许 data:image/png;base64,... / data:image/webp;base64,...（示例、测试用）。
  * width/height 是图片像素尺寸，必须与实际解码结果一致；单边上限 4096，总像素上限 16 MP（16,777,216）。
  */
+export const MAX_IMAGE_SIDE = 4096;
+export const MAX_IMAGE_PIXELS = 16_777_216;
+
 export const ImageAsset = Type.Object(
   {
     id: Id,
     uri: Type.String({ minLength: 1, description: '图片路径（相对于资源根目录）或 PNG/WebP data URI' }),
-    width: Type.Integer({ minimum: 1, maximum: 4096, description: '图片像素宽度' }),
-    height: Type.Integer({ minimum: 1, maximum: 4096, description: '图片像素高度' }),
+    width: Type.Integer({ minimum: 1, maximum: MAX_IMAGE_SIDE, description: '图片像素宽度' }),
+    height: Type.Integer({ minimum: 1, maximum: MAX_IMAGE_SIDE, description: '图片像素高度' }),
     sha256: Type.Optional(Type.String({ pattern: '^[0-9a-f]{64}$', description: '文件内容摘要，供目录/去重使用' })),
   },
   { additionalProperties: false },
