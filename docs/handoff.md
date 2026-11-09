@@ -204,6 +204,16 @@
     | `demo:3`，5 Worker | 22% | 53.60 | 10.8% | 50 ms | 1.46 / 4.0 |
 
     P5 时：立即播放 45.5 fps、丢帧 24%、最大 717 ms；预热完再播 1.75%（要先等 12.5 秒）。60 秒内帧号前进 59.95～60.00 帧/秒，没有漂移。
+- **路径前缀（反向代理）支持（完成，未提交）**：用户经 Tailscale 本地代理（`…/api/local-proxy/p/5173/`）打开播放器时，`/assets/…` 等绝对路径的 fetch 打到代理根路径（500）。
+  - 运行时的所有请求改为相对页面地址解析（`apps/player/src/util.ts` 的 `pageUrl`、`CORE_PATH`）：assets、scenes、Cubism Core、参考视频 / 音频（音频经 assetBase）、
+    harness 的场景与视频；Worker 收到的是主线程解析好的绝对 coreUrl / assetBase；`runtime.ts` 的缺省 coreUrl 也改为相对 `document.baseURI`。
+    `index.html` / `harness.html` 的 `<script>`、`<link>` 改为相对路径；`vite.config.ts` 加 `base: './'`（打包产物、Worker 脚本用相对路径）。
+    「复制本帧链接」在当前完整地址上只替换查询串。
+  - 验证：Node 写的模拟代理（`/api/local-proxy/p/<端口>/*` → `127.0.0.1:<端口>/*`）。dev 用「只给 Vite 模块路径加前缀」的改写模式（与用户看到的现象一致：模块能加载）；
+    preview 用只剥前缀、不改写内容的模式。三种情况（代理后的 dev、直接 `localhost:5173`、`pnpm build && pnpm preview` 直连与代理后）Playwright 都是：
+    全片加载（47 图层）、3 个 Worker 从前缀地址启动、播放约 56～58 fps、并排 / 叠加 / 差异图逐帧对齐、复制的链接带前缀，没有失败的请求。
+    `pnpm test:runtime` 12 通过 1 跳过，typecheck 通过，`pnpm verify:video` 50/50。
+  - 已知限制：dev 下 Vite 热更新 websocket 仍连根路径（代理后可能不可用，不影响播放）；前缀地址要以 `/` 结尾（否则相对路径会少一级）。
 
 ## 6. 环境与操作注意
 

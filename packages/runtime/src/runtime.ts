@@ -35,7 +35,7 @@ export interface RuntimeOptions {
    * 两条路径的像素逐位相同（测试 worker 一致性）。
    */
   workers?: number;
-  /** Worker 里加载 Core 的 URL（缺省 /vendor/cubism/core/live2dcubismcore.min.js） */
+  /** Worker 里加载 Core 的 URL（缺省相对页面地址的 vendor/cubism/core/live2dcubismcore.min.js；建议调用方传绝对 URL） */
   coreUrl?: string;
 }
 
@@ -134,7 +134,8 @@ export class CharaForgeRuntime {
     this.maskBufferSize = opts.maskBufferSize ?? 2048;
     this.workerInit = this.pool
       ? this.pool.init(
-          new URL(opts.coreUrl ?? '/vendor/cubism/core/live2dcubismcore.min.js', typeof location !== 'undefined' ? location.href : undefined).href,
+          // 缺省相对页面地址解析（页面可能在反向代理的路径前缀下）；Worker 拿到的是解析好的绝对 URL
+          new URL(opts.coreUrl ?? 'vendor/cubism/core/live2dcubismcore.min.js', typeof document !== 'undefined' ? document.baseURI : location.href).href,
           this.assetBase,
           WORKER_CORE_MEMORY,
         )

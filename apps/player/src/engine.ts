@@ -9,6 +9,7 @@ import { CharaForgeRuntime } from '@charaforge/runtime';
 import type { Marker, Scene } from '@charaforge/scene';
 import { Texture, VideoSource } from 'pixi.js';
 import { PlaybackClock } from './clock.ts';
+import { CORE_PATH, pageUrl } from './util.ts';
 import { loadVideo, seekVideoFrame, timeToFrame } from './videoSync.ts';
 
 export type CompareMode = 'off' | 'side' | 'overlay' | 'diff';
@@ -62,7 +63,8 @@ export class PlayerEngine {
 
   async init(canvas: HTMLCanvasElement, workers: number): Promise<void> {
     this.workers = workers;
-    this.runtime = await CharaForgeRuntime.create({ assetBase: '/assets/', canvas, workers });
+    // 资源与 Core 的 URL 都相对页面地址解析（页面可能在反向代理的路径前缀下），绝对 URL 再交给运行时和 Worker
+    this.runtime = await CharaForgeRuntime.create({ assetBase: pageUrl('assets/'), coreUrl: pageUrl(CORE_PATH), canvas, workers });
   }
 
   resetStats(): void {
@@ -138,7 +140,7 @@ export class PlayerEngine {
 
   /** 加载参考视频（仓库相对路径，缺省 assets/video/DeepSeek-chan.mp4）。 */
   async loadVideo(uri: string): Promise<void> {
-    this.video = await loadVideo(`/${uri.replace(/^\/+/, '')}`);
+    this.video = await loadVideo(pageUrl(uri));
     this.videoSource = new VideoSource({ resource: this.video, autoPlay: false });
     this.videoSource.autoUpdate = false;
     this.videoTex = new Texture({ source: this.videoSource });

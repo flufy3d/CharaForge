@@ -182,7 +182,12 @@ pnpm preview           # → http://localhost:4173/
 ```
 
 - 产物**不含**模型、参考视频、音频、场景文件和 Cubism Core，也不要把它们复制进去。页面按 URL 引用仓库里的原文件：
-  `/assets/…`（模型、视频、音频）、`/vendor/cubism/core/…`（Core）、`/scenes/…`、`/packages/scene/examples/…`、`/packages/scene/schema/…`。
+  `assets/…`（模型、视频、音频）、`vendor/cubism/core/…`（Core）、`scenes/…`、`packages/scene/examples/…`、`packages/scene/schema/…`。
+- 所有这些请求都是**相对页面地址**的（`apps/player/src/util.ts` 的 `pageUrl`，基于 `document.baseURI`；`vite.config.ts` 的 `base: './'`
+  让打包产物、Worker 脚本也用相对路径），所以页面可以挂在反向代理的任意路径前缀下，例如
+  `https://<机器>.ts.net/api/local-proxy/p/5173/`（Tailscale 上的本地代理）。前缀地址要以 `/` 结尾。
+  `pnpm build` 的产物在只剥前缀、不改写内容的代理后面也能用；`pnpm dev` 依赖代理把 Vite 的模块路径（`/@fs/…`、`/node_modules/…`）加上前缀
+  （用户用的本地代理会做，模块能正常加载），热更新的 websocket 仍连根路径，走代理时可能不可用，刷新页面即可。
 - 提供这些 URL 的是 `apps/player/vite.config.ts` 里的白名单中间件 `repoFiles()`：只读，只开放上面几个目录，
   拒绝 `..` 穿越，支持 Range 请求（视频精确 seek 需要）。`pnpm dev` 和 `pnpm preview`（`vite preview`）用的是同一个中间件，
   所以 `pnpm preview` 就能完整播放全片，调试模式、原视频对照也都可用。

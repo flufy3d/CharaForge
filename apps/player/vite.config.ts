@@ -91,6 +91,9 @@ export function repoFiles(): Plugin {
 
 export default defineConfig({
   root: HERE,
+  // 相对 base：build 产物里的脚本、样式、Worker 都用相对路径，页面挂在任意路径前缀下（反向代理）也能用。
+  // 运行时请求（assets/、scenes/、vendor/…）由页面代码相对 document.baseURI 解析（apps/player/src/util.ts 的 pageUrl）。
+  base: './',
   plugins: [repoFiles()],
   resolve: {
     alias: [{ find: /^@cubism\/framework\/(.*)$/, replacement: `${join(REPO, '.cache', 'cubism-framework')}/$1` }],

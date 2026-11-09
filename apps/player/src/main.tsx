@@ -18,7 +18,7 @@ import { StrictMode, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { demoScene } from './demo.ts';
 import { PlayerEngine, type CompareMode, type EngineStatus } from './engine.ts';
-import { timecode } from './util.ts';
+import { pageUrl, timecode } from './util.ts';
 
 const params = new URLSearchParams(location.search);
 const DEFAULT_SCENE = 'scenes/deepseek-chan/scene.json';
@@ -38,10 +38,11 @@ const MODEL_PAGES: { match: RegExp; name: string; url: string }[] = [
 async function resolveScene(): Promise<{ label: string; scene: string | object }> {
   const p = params.get('scene');
   if (p?.startsWith('demo:')) return { label: p, scene: demoScene(Math.max(1, Number(p.slice(5)) || 4)) };
-  if (p) return { label: p, scene: `/${p.replace(/^\/+/, '')}` };
-  const head = await fetch(`/${DEFAULT_SCENE}`, { method: 'HEAD' }).catch(() => null);
-  if (head?.ok) return { label: DEFAULT_SCENE, scene: `/${DEFAULT_SCENE}` };
-  return { label: `${FALLBACK_SCENE}（${DEFAULT_SCENE} 不存在，已回落）`, scene: `/${FALLBACK_SCENE}` };
+  // 场景路径是仓库相对路径，相对页面地址解析（页面可能在反向代理的路径前缀下，不能用 / 开头）
+  if (p) return { label: p, scene: pageUrl(p) };
+  const head = await fetch(pageUrl(DEFAULT_SCENE), { method: 'HEAD' }).catch(() => null);
+  if (head?.ok) return { label: DEFAULT_SCENE, scene: pageUrl(DEFAULT_SCENE) };
+  return { label: `${FALLBACK_SCENE}（${DEFAULT_SCENE} 不存在，已回落）`, scene: pageUrl(FALLBACK_SCENE) };
 }
 
 /* ---------- 启动（模块级单例） ----------
@@ -84,7 +85,7 @@ function boot(canvas: HTMLCanvasElement): void {
   (window as unknown as { __player: PlayerEngine }).__player = eng;
   (async () => {
     if (typeof (globalThis as { Live2DCubismCore?: unknown }).Live2DCubismCore === 'undefined') {
-      setBoot({ error: { title: '没有找到 Live2D Cubism Core', hint: 'Cubism Core 不进仓库，请先运行 pnpm run setup（或 pnpm setup:cubism），它会从 Live2D 官方地址下载到 vendor/cubism/core/。', detail: '/vendor/cubism/core/live2dcubismcore.min.js 未加载' } });
+      setBoot({ error: { title: '没有找到 Live2D Cubism Core', hint: 'Cubism Core 不进仓库，请先运行 pnpm run setup（或 pnpm setup:cubism），它会从 Live2D 官方地址下载到 vendor/cubism/core/。', detail: `${pageUrl('vendor/cubism/core/live2dcubismcore.min.js')} 未加载` } });
       return;
     }
     // 缺省 Worker 数：逻辑核数的一半减一，限制在 [2, 6]（12 核 → 5，实测 3 实例 60fps 所需）
@@ -234,7 +235,11 @@ function App() {
     else q.delete('debug');
     if (debug && compare !== 'off') q.set('compare', compare);
     else q.delete('compare');
-    const url = `${location.origin}${location.pathname}?${q}`;
+    // 在当前完整地址上替换查询串（保留代理的路径前缀）
+    const u = new URL(location.href);
+    u.search = q.toString();
+    u.hash = '';
+    const url = u.href;
     history.replaceState(null, '', url);
     try {
       await navigator.clipboard.writeText(url);

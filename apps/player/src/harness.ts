@@ -4,7 +4,7 @@
  */
 import { CharaForgeRuntime, type InstanceState, type Pixels, type RuntimeState } from '@charaforge/runtime';
 import type { CharaForgeHarness, PixelsResult, ReadOptions, SceneSummary } from './harness-api.ts';
-import { bytesToBase64, sha256Hex } from './util.ts';
+import { bytesToBase64, CORE_PATH, pageUrl, sha256Hex } from './util.ts';
 
 const params = new URLSearchParams(location.search);
 const msaa = params.has('msaa') ? Number(params.get('msaa')) : 4;
@@ -39,7 +39,7 @@ const api: CharaForgeHarness = {
   ready: (async () => {
     const canvas = document.createElement('canvas');
     document.body.appendChild(canvas);
-    runtime = await CharaForgeRuntime.create({ assetBase: '/assets/', canvas, msaa, workers });
+    runtime = await CharaForgeRuntime.create({ assetBase: pageUrl('assets/'), coreUrl: pageUrl(CORE_PATH), canvas, msaa, workers });
     // 调试用：直接访问运行时对象（非稳定接口）
     (window as unknown as { __cfRuntime: CharaForgeRuntime }).__cfRuntime = runtime;
   })(),
@@ -47,7 +47,7 @@ const api: CharaForgeHarness = {
     return { ...runtime.compositor.rendererInfo, msaa: runtime.compositor.msaaSamples, workers };
   },
   async loadScene(scene) {
-    await runtime.loadScene(typeof scene === 'string' ? `/${scene.replace(/^\/+/, '')}` : scene);
+    await runtime.loadScene(typeof scene === 'string' ? pageUrl(scene) : scene);
     return summary();
   },
   async renderFrame(frame, opts = {}) {
@@ -122,7 +122,7 @@ const videos = new Map<string, HTMLVideoElement>();
   /** 把参考视频 seek 到帧 f，返回解码后的 RGB（base64，行从上到下） */
   async frameRGB(uri: string, frame: number, fps: number): Promise<{ width: number; height: number; data: string }> {
     let v = videos.get(uri);
-    if (!v) { v = await loadVideo(`/${uri}`); videos.set(uri, v); }
+    if (!v) { v = await loadVideo(pageUrl(uri)); videos.set(uri, v); }
     await seekVideoFrame(v, frame, fps);
     const c = document.createElement('canvas');
     c.width = v.videoWidth; c.height = v.videoHeight;
