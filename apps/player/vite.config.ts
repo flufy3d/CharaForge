@@ -71,8 +71,10 @@ export function repoFiles(): Plugin {
     }
     if (!MOUNTS.some((m) => rel.startsWith(m))) return next();
     const norm = normalize(rel);
+    // MOUNTS 用 / 书写；Windows 上 normalize 会返回 \，比较前先统一。
+    const mountRel = norm.split(sep).join('/');
     // 规范化之后必须仍在白名单目录内（拒绝 assets/../ 之类的穿越）
-    if (norm.split(sep).includes('..') || !MOUNTS.some((m) => norm.startsWith(m))) {
+    if (norm.split(sep).includes('..') || !MOUNTS.some((m) => mountRel.startsWith(m))) {
       res.statusCode = 403;
       return res.end();
     }
