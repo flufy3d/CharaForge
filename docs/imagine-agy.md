@@ -39,6 +39,15 @@ npx -y imagine-agy "a tiny red apple, flat vector icon, centered, white backgrou
 
 结果：`.data/import/imagine-test.jpg`，55 KB，`JPEG image data, 1024x1024, 300 DPI`，内容为白底苹果图标。输出文件存在且可正常打开。
 
+写实风格也实测成功：同一命令使用 `--ratio 3:4` 生成了一张 896×1200 的写实人像（`.data/import/imagine-realistic.jpg`，717 KB，虚构人物、自然窗光、浅景深），皮肤纹理/发丝/布料质感都可辨认。提示词示例：
+
+```bash
+AGY_BIN='C:\Users\JamesChen-360world\AppData\Local\agy\bin\agy.exe' \
+npx -y imagine-agy "photorealistic cinematic portrait of a fictional young woman with freckles and short dark hair, natural window light, 85mm lens f/1.8, shallow depth of field, realistic skin texture, subtle film grain, muted earth tones, looking slightly off camera, no text, no watermark, not illustration" \
+  -o .data/import/imagine-realistic.jpg \
+  --model gemini-3.8-flash-high --ratio 3:4 --timeout 240s
+```
+
 > Windows PowerShell 里设置环境变量：
 > ```powershell
 > $env:AGY_BIN = "$env:LOCALAPPDATA\agy\bin\agy.exe"
