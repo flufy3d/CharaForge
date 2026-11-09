@@ -187,6 +187,8 @@ URL 参数：
 ```bash
 pnpm render --scene scenes/deepseek-chan/scene.json --frames 2368-2441 --out .data/render/s24   # 离线渲染 PNG（与播放器同一份渲染代码）
 pnpm render:gallery                          # 开关 / 表情图集 → .data/gallery/
+pnpm accessory:import --input .data/hat.png --id hat --scene packages/scene/examples/accessory.scene.json --attach main
+                                             # 导入 PNG/WebP 饰品 → assets/accessories/，stdout 输出 ImageAsset + ImageLayer
 pnpm bench demo:3 20                         # 帧率基准（参数：场景 秒数 [workers] [起始帧]），同时报告音画滞后
 pnpm bench scenes/deepseek-chan/scene.json 60    # 全片（带原音频）
 pnpm verify:video                            # 参考视频逐帧定位精度（与 ffmpeg 解码比对）
@@ -349,5 +351,5 @@ pnpm preview      # http://localhost:4173/；或开发模式 pnpm dev
 | `tools/fit/` | 旧 CPU 拟合引擎 fit4（保留；单元规划与导出代码仍被 GPU 引擎复用） |
 | `tools/qa/` | 验收指标 `metric.py`、闪烁 `flicker.py`、全片报告 `report.py` |
 | `scripts/` | `setup-cubism.mjs`、`setup-assets.mjs`（下载并校验外部资源） |
-| `docs/` | `pipeline.md`（目录、契约、验收口径）、`runtime-eval.md`（运行时实现、GPU 与确定性、性能）、`gpu-acceleration.md`（历史提速方案与风险记录） |
+| `docs/` | `pipeline.md`（目录、契约、验收口径）、`accessories.md`（外部饰品图片/attach）、`runtime-eval.md`（运行时实现、GPU 与确定性、性能）、`gpu-acceleration.md`（历史提速方案与风险记录） |
 | `vendor/`、`assets/`、`.cache/`、`.data/` | 外部 SDK、模型与视频、Framework 编译缓存、中间产物（都不进 git） |

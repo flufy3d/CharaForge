@@ -7,7 +7,7 @@
 | `vendor/cubism/` | Cubism Core（`core/`）与 Framework 源码（`framework/src/`），`pnpm setup:cubism` 安装 | 否 |
 | `assets/models/deepseek-chan/DeepSeek/` | 模型（`大肥鱼.model3.json` 等），`pnpm setup:assets` 安装 | 否 |
 | `assets/video/DeepSeek-chan.mp4` / `.wav` | 参考视频 / 解码后的 PCM 音频 | 否 |
-| `assets/accessories/` | 外部饰品图片与 `index.json` 目录（阶段 3 起由导入 CLI 生成） | 否 |
+| `assets/accessories/` | 外部饰品图片与 `index.json` 目录（`pnpm accessory:import` 生成） | 否 |
 | `packages/scene/schema/*.json` | 由 `pnpm schema` 从 TypeBox 定义生成的 JSON Schema（draft-07） | 是 |
 | `scenes/deepseek-chan/shots.json` | 镜头表（recon 产出，人工校对后提交） | 是 |
 | `scenes/deepseek-chan/scene.json` | 复刻场景（fit 产出） | 是 |

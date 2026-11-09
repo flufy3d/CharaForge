@@ -2,7 +2,7 @@
 
 本期目标：把 AI 生成或手工准备的透明 PNG/WebP 作为场景资产，挂到模型图层上或独立放在画面里。图片是 **scene 层引用**，不修改模型文件。
 
-> 当前进度：阶段 1 完成 schema、`parseScene` 语义校验和示例；阶段 2 完成 runtime 图片解码/纹理/绘制与 attach。导入 CLI、编辑器和 AI 命令层在后续阶段。
+> 当前进度：阶段 1 完成 schema、`parseScene` 语义校验和示例；阶段 2 完成 runtime 图片解码/纹理/绘制与 attach；阶段 3 完成导入 CLI 和 `assets/accessories/index.json`。编辑器和 AI 命令层在后续阶段。
 
 ## 数据
 
@@ -81,6 +81,27 @@ Own(p) = (x,y) + R(rotation)·(sx·(px−ax), sy·(py−ay))
 - `rotateWith/scaleWith` 缺省 true；关闭时分别剥离目标旋转/缩放（`scaleWith=false` 同时不继承 `flipX`），平移和相机始终保留。
 - 回归：旧全片场景 `scenes/deepseek-chan/scene.json` 的 1000–1099 共 100 帧，在阶段 2 改动前后逐帧 PNG SHA-256 完全相同。
 
+## 导入 CLI
+
+```bash
+pnpm accessory:import --input .data/hat.png --id hat --name "帽子" \
+  --scene packages/scene/examples/accessory.scene.json \
+  --attach main --anchor 0.5,0.12 --offset 0,0
+```
+
+- 只接受 PNG / WebP（按文件头判断，不看扩展名）；用浏览器 canvas 解码检查尺寸、透明像素和生成缩略图，不执行图片内容。
+- 要求至少有一个非不透明像素（`alpha < 255`）和至少一个可见像素；全不透明图会被拒绝。
+- 单边 ≤ 4096、总像素 ≤ 16 MP、文件 ≤ 16 MB。
+- 输出：
+  - `assets/accessories/<id>.png|webp`
+  - `assets/accessories/<id>.thumb.png`（96×96）
+  - `assets/accessories/index.json`（`id/name/file/size/bytes/sha256/thumbnail`）
+- stdout 打印 `{ "asset": ImageAsset, "layer": ImageLayer }`；asset 粘到 `assets.images`，layer 粘到 `layers`。默认不改场景。
+- `--scene` 只用于读取 `duration/composition` 和校验 attach 目标，不会写回场景。
+- `--force` 覆盖已有 id/文件；`--dry-run` 只校验并打印 JSON。
+- 不传 `--attach` 时生成独立 `space:"screen"` 图层，位置为画面中心。
+- 解码/缩略图使用仓库已有的 Playwright Chromium（与 `pnpm render` 相同），不新增依赖；首次使用需 `pnpm exec playwright install chromium-headless-shell`。
+
 ## 示例与验证
 
 - 示例：`packages/scene/examples/accessory.scene.json`（64×64 棋盘 data URI，含一个 attach 图层和一个独立屏幕图层）。
@@ -91,6 +112,7 @@ Own(p) = (x,y) + R(rotation)·(sx·(px−ax), sy·(py−ay))
 pnpm --filter @charaforge/scene test
 pnpm test:runtime
 pnpm -r run typecheck
+pnpm accessory:import --input .data/import/hat.png --id hat --scene packages/scene/examples/accessory.scene.json --attach main --dry-run
 pnpm render --scene packages/scene/examples/accessory.scene.json --frames 0-30 --out .data/render/acc
 ```
 
