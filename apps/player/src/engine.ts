@@ -6,13 +6,22 @@
  * （只做 a～f 步，不做 Core update 和绘制），所以画面与「逐帧渲染」时的同一帧逐位相同。
  */
 import { CharaForgeRuntime } from '@charaforge/runtime';
-import type { Marker, Scene } from '@charaforge/scene';
+import type { EditEffect, Marker, Scene } from '@charaforge/scene';
 import { Texture, VideoSource } from 'pixi.js';
 import { PlaybackClock } from './clock.ts';
 import { CORE_PATH, pageUrl } from './util.ts';
 import { loadVideo, seekVideoFrame, timeToFrame } from './videoSync.ts';
 
 export type CompareMode = 'off' | 'side' | 'overlay' | 'diff';
+
+/** PlaybackClock 依赖的场景音频/时基快照：结构编辑后据此判断是否需要重建时钟。 */
+function audioSignature(scene: Scene): string {
+  return JSON.stringify({
+    fps: scene.timebase.fps,
+    assets: (scene.assets.audio ?? []).map((a) => [a.id, a.uri]),
+    clips: scene.audio ?? [],
+  });
+}
 
 export interface EngineStatus {
   frame: number;
@@ -80,6 +89,10 @@ export class PlayerEngine {
 
   /** 音频加载失败的原因（null = 正常或场景没有音频）；失败时退化为系统时钟、无声播放。 */
   audioError: string | null = null;
+  /** 当前 PlaybackClock 对应的音频/时基快照；结构编辑后据此判断是否需要重建时钟。 */
+  private audioState = '';
+  /** 当前求值器与 PlaybackClock 使用的 fps（fps 改变时必须重建求值器）。 */
+  private appliedFps = 0;
 
   async load(scene: string | object, onStage: (stage: string) => void = () => {}): Promise<Scene> {
     this.clock?.dispose();
@@ -92,9 +105,71 @@ export class PlayerEngine {
       console.warn('[player] 音频加载失败', e);
       this.audioError = String(e?.message ?? e);
     });
+    this.audioState = audioSignature(this.scene);
+    this.appliedFps = this.scene.timebase.fps;
     this.frame = 0;
     this.dirty = true;
     return this.scene;
+  }
+
+  /**
+   * 重建播放时钟（音频资产或时基改变后）。保留当前帧、播放状态与静音状态。
+   * 旧时钟的 AudioContext 被关闭，新时钟重新解码当前场景用到的音频。
+   */
+  async reloadClock(): Promise<void> {
+    if (!this.scene) return;
+    const frame = this.frame;
+    const muted = this.clock?.muted ?? this.status.muted;
+    const wasPlaying = this.clock?.playing ?? false;
+    this.clock?.dispose();
+    const clock = new PlaybackClock(this.scene, (u) => this.runtime.resolveAsset(u));
+    clock.setMuted(muted);
+    this.clock = clock;
+    this.audioError = null;
+    await clock.load().catch((e) => {
+      console.warn('[player] 音频加载失败', e);
+      this.audioError = String((e as Error)?.message ?? e);
+    });
+    clock.seek(frame);
+    this.status.muted = muted;
+    this.audioState = audioSignature(this.scene);
+    this.appliedFps = this.scene.timebase.fps;
+    if (wasPlaying) await clock.play(frame);
+    this.dirty = true;
+  }
+
+  /**
+   * 编辑器把一轮场景修改应用到正在运行的引擎（不刷新页面）。
+   * effects 与 scene 包的 EditEffect 对应：
+   *   - structure：runtime.syncScene 整体同步（内部已重建求值器并刷新 Worker）；
+   *   - evaluator：重建主线程求值器并刷新 Worker 场景副本（参数 / motion / expression 修改）；
+   *   - workers：只刷新 Worker 场景副本；
+   *   - audio / clock：重建播放时钟；结构编辑若改了时基或音频也自动重建。
+   * 当前帧保留（越界时夹到 [0, duration−1]），下一帧重新渲染。
+   */
+  async applySceneEdits(scene: Scene, effects: readonly string[]): Promise<void> {
+    const has = (e: EditEffect) => effects.includes(e);
+    const structural = has('structure');
+    const prevAudio = this.audioState;
+    if (structural) {
+      // syncScene 返回解析后的场景（与传入的是同一对象，URL 加载时除外）
+      this.scene = await this.runtime.syncScene(scene);
+    } else {
+      // 非结构编辑假定传入的就是 runtime 当前持有的同一个对象。
+      if (scene !== this.scene) this.scene = scene;
+      if (has('evaluator')) await this.runtime.rebuildEvaluators();
+      else if (has('workers')) await this.runtime.reloadWorkers();
+    }
+
+    // fps 决定 LayerEvaluator 的 dt 与 warmup 步长：只改时钟不够，求值器也要重建。
+    if (!structural && !has('evaluator') && this.scene.timebase.fps !== this.appliedFps) {
+      await this.runtime.rebuildEvaluators();
+    }
+
+    this.frame = Math.max(0, Math.min(this.duration - 1, this.frame));
+    const clockChanged = has('audio') || has('clock') || audioSignature(this.scene) !== prevAudio;
+    if (clockChanged) await this.reloadClock();
+    this.dirty = true;
   }
 
   /*

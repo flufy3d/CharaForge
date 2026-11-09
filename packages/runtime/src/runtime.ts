@@ -14,7 +14,7 @@ import type { InstanceState, ModelInstance } from './instance.ts';
 import { cameraMatrix, IDENTITY, layerMatrix, mul, translate, type Affine } from './math.ts';
 import { apply } from './math.ts';
 import { defaultFetcher, ImageResource, ModelResource, type CanvasInfo, type Fetcher } from './resources.ts';
-import { loadSceneAssets, resolver } from './sceneAssets.ts';
+import { loadSceneAssets, resolver, type SceneAssets } from './sceneAssets.ts';
 import { WorkerPool, type UpdateResult } from './workerPool.ts';
 
 export interface RuntimeOptions {
@@ -124,6 +124,8 @@ export class CharaForgeRuntime {
   private scene: Scene | null = null;
   private layers: { layer: ModelLayer; ev: LayerEvaluator }[] = [];
   private imageLayers: { layer: ImageLayer; image: ImageResource }[] = [];
+  /** 最近一次 loadScene / syncScene 的资源表；rebuildEvaluators 复用它，避免重新加载模型与 motion。 */
+  private sceneAssets: SceneAssets | null = null;
   /** 每个模型资源上空闲的实例（换场景时复用，避免反复创建渲染器） */
   private readonly instancePool = new Map<ModelResource, ModelInstance[]>();
   private readonly looseInstances = new Map<number, ModelInstance>();
@@ -211,6 +213,18 @@ export class CharaForgeRuntime {
 
   /** 加载场景（对象或 URL）。会做结构 + 语义校验。 */
   async loadScene(input: Scene | unknown | string): Promise<Scene> {
+    return this.syncScene(input);
+  }
+
+  /**
+   * 把当前场景同步为新的场景（编辑器用），不刷新页面：
+   *   - 资源按 URL 缓存（loadModel / loadImage），只有新增的模型 / 图片才真正加载；
+   *   - 模型实例按「图层 ID + 模型资源」复用，删除或换了模型的图层把实例还回 instancePool；
+   *   - 所有 LayerEvaluator 重建，参数轨 / motion / expression 等求值输入的修改都会生效；
+   *   - 结构变化后重新给 Worker 发送场景，并清空保持帧缓存、在途请求与检查点。
+   * 对内容相同的场景，渲染结果与重新 loadScene 逐位相同。
+   */
+  async syncScene(input: Scene | unknown): Promise<Scene> {
     let raw: unknown = input;
     if (typeof input === 'string') {
       const res = await fetch(asciiUrl(input, typeof document !== 'undefined' ? document.baseURI : undefined));
@@ -223,22 +237,105 @@ export class CharaForgeRuntime {
     const imageLayers = scene.layers.filter((l): l is ImageLayer => l.kind === 'image');
     const imageAssets = new Map<string, ImageResource>();
     await Promise.all((scene.assets.images ?? []).map(async (a) => imageAssets.set(a.id, await this.loadImage(a))));
-    if (this.pool) await this.pool.loadScene(scene, modelLayers.map((l) => l.id));
 
-    // 回收旧图层实例
-    this.releaseLayers();
+    // 旧场景的 Worker 任务已经无效；先丢弃再整体换场景，避免旧结果落到新图层上。
     this.holdCache.clear();
     this.dropQueue();
-    this.compositor.dropCaches();
-    this.scene = scene;
-    this.compositor.resize(scene.composition.width, scene.composition.height);
-    this.layers = modelLayers.map((layer) => {
-      const inst = this.acquireInstance(assets.models.get(layer.model)!);
-      const ev = new LayerEvaluator(layer, inst, scene.timebase.fps, resolver(assets.motions, 'motion'), resolver(assets.expressions, 'expression'));
-      return { layer, ev };
+    if (this.pool) await this.pool.loadScene(scene, modelLayers.map((l) => l.id));
+
+    // 按 ID 复用模型实例；删除 / 换模型的旧实例还回池子。
+    const prev = new Map<string, { layer: ModelLayer; instance: ModelInstance }>();
+    for (const { layer, ev } of this.layers) prev.set(layer.id, { layer, instance: ev.instance });
+    const reused = new Set<ModelInstance>();
+    const fps = scene.timebase.fps;
+    const motion = resolver(assets.motions, 'motion');
+    const expression = resolver(assets.expressions, 'expression');
+    const nextLayers = modelLayers.map((layer) => {
+      const res = assets.models.get(layer.model);
+      if (!res) throw new Error(`模型资源未加载：${layer.model}`);
+      const old = prev.get(layer.id);
+      let instance: ModelInstance;
+      if (old && old.layer.model === layer.model && old.instance.resource === res) {
+        instance = old.instance;
+        // 与 acquireInstance 一致：从头开始求值（LayerEvaluator 的 initialState 也在这里确定）。
+        instance.resetPhysics();
+        instance.resetPose();
+      } else {
+        instance = this.acquireInstance(res);
+      }
+      reused.add(instance);
+      return { layer, ev: new LayerEvaluator(layer, instance, fps, motion, expression) };
     });
-    this.imageLayers = imageLayers.map((layer) => ({ layer, image: imageAssets.get(layer.image)! }));
+    for (const { instance } of prev.values()) if (!reused.has(instance)) this.releaseInstance(instance);
+
+    const nextImages = imageLayers.map((layer) => {
+      const image = imageAssets.get(layer.image);
+      if (!image) throw new Error(`图片资源未加载：${layer.image}`);
+      return { layer, image };
+    });
+
+    // 全部加载成功后才替换当前状态（失败时旧场景仍可用）。
+    this.layers = nextLayers;
+    this.imageLayers = nextImages;
+    this.sceneAssets = assets;
+    this.scene = scene;
+    this.compositor.dropCaches();
+    this.compositor.resize(scene.composition.width, scene.composition.height);
+    this.invalidate();
     return scene;
+  }
+
+  /**
+   * 重建主线程的 LayerEvaluator（编辑器修改了参数轨 / motion / expression 等求值输入之后）。
+   * 复用现有模型实例与已加载资源，不重新加载模型/图片；最后刷新 Worker 端的场景副本。
+   */
+  async rebuildEvaluators(): Promise<void> {
+    const scene = this.scene;
+    if (!scene) throw new Error('尚未加载场景');
+    const assets = this.sceneAssets;
+    if (!assets) throw new Error('场景资源尚未加载');
+
+    const prev = new Map<string, { layer: ModelLayer; instance: ModelInstance }>();
+    for (const { layer, ev } of this.layers) prev.set(layer.id, { layer, instance: ev.instance });
+    const reused = new Set<ModelInstance>();
+    const fps = scene.timebase.fps;
+    const motion = resolver(assets.motions, 'motion');
+    const expression = resolver(assets.expressions, 'expression');
+    const nextLayers = scene.layers
+      .filter((l): l is ModelLayer => l.kind === 'model')
+      .map((layer) => {
+        const res = assets.models.get(layer.model);
+        if (!res) throw new Error(`模型资源未加载：${layer.model}`);
+        const old = prev.get(layer.id);
+        let instance: ModelInstance;
+        if (old && old.instance.resource === res) {
+          instance = old.instance;
+          instance.resetPhysics();
+          instance.resetPose();
+        } else {
+          instance = this.acquireInstance(res);
+        }
+        reused.add(instance);
+        return { layer, ev: new LayerEvaluator(layer, instance, fps, motion, expression) };
+      });
+    for (const { instance } of prev.values()) if (!reused.has(instance)) this.releaseInstance(instance);
+    this.layers = nextLayers;
+
+    this.invalidate();
+    await this.reloadWorkers();
+  }
+
+  /**
+   * 重新把当前场景发给 Worker（求值输入改变后调用；同步路径下是空操作）。
+   * 丢弃在途请求与水位，旧场景算出的结果不再有效。
+   */
+  async reloadWorkers(): Promise<void> {
+    this.holdCache.clear();
+    this.dropQueue();
+    if (!this.pool || !this.scene) return;
+    const layerIds = this.scene.layers.filter((l): l is ModelLayer => l.kind === 'model').map((l) => l.id);
+    await this.pool.loadScene(this.scene, layerIds);
+    this.holdCache.clear();
   }
 
   private acquireInstance(res: ModelResource): ModelInstance {
@@ -249,15 +346,41 @@ export class CharaForgeRuntime {
     return inst;
   }
 
-  private releaseLayers(): void {
-    for (const { ev } of this.layers) {
-      const res = ev.instance.resource;
-      const pool = this.instancePool.get(res) ?? [];
-      pool.push(ev.instance);
-      this.instancePool.set(res, pool);
+  private releaseInstance(instance: ModelInstance): void {
+    const res = instance.resource;
+    const pool = this.instancePool.get(res) ?? [];
+    pool.push(instance);
+    this.instancePool.set(res, pool);
+  }
+
+  /** 编辑器用：移除模型或图片图层；模型实例还回池子。Worker 副本需调用方按需 reloadWorkers / syncScene。 */
+  removeLayer(id: string): void {
+    const mi = this.layers.findIndex((l) => l.layer.id === id);
+    if (mi >= 0) {
+      const entry = this.layers.splice(mi, 1)[0];
+      if (entry) this.releaseInstance(entry.ev.instance);
     }
-    this.layers = [];
-    this.imageLayers = [];
+    const ii = this.imageLayers.findIndex((l) => l.layer.id === id);
+    if (ii >= 0) this.imageLayers.splice(ii, 1);
+    if (this.scene) {
+      const si = this.scene.layers.findIndex((l) => l.id === id);
+      if (si >= 0) this.scene.layers.splice(si, 1);
+    }
+    this.invalidate();
+  }
+
+  /** 编辑器用：把图层移动到 scene.layers 的 index 位置（z 顺序；不重建求值器）。 */
+  moveLayer(id: string, index: number): void {
+    if (!this.scene) return;
+    const from = this.scene.layers.findIndex((l) => l.id === id);
+    if (from < 0) return;
+    const layer = this.scene.layers.splice(from, 1)[0];
+    if (!layer) return;
+    const to = Math.max(0, Math.min(this.scene.layers.length, Math.floor(index)));
+    this.scene.layers.splice(to, 0, layer);
+    const order = new Map(this.scene.layers.map((l, i) => [l.id, i]));
+    this.layers.sort((a, b) => (order.get(a.layer.id) ?? 0) - (order.get(b.layer.id) ?? 0));
+    this.imageLayers.sort((a, b) => (order.get(a.layer.id) ?? 0) - (order.get(b.layer.id) ?? 0));
   }
 
   /** 场景内图层的模型实例（只读访问参数、画布信息等）。 */

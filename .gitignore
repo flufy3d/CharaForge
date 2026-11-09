@@ -10,6 +10,10 @@ vendor/
 assets/
 .cache/
 
+# 编辑器覆盖保存时自动生成的备份（人工确认后可删）
+scenes/**/*.bak.json
+packages/scene/examples/*.bak.json
+
 # 中间产物：抽帧、拟合结果、质检报告等
 .data/
 out/

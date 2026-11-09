@@ -13,11 +13,16 @@
     "render": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/render.ts",
     "render:gallery": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/gallery.ts",
     "accessory:import": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/import-accessory.mjs",
-    "decoration:command": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/decoration-command.mjs"
+    "decoration:command": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/decoration-command.mjs",
+    "editor:command": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/editor-command.ts",
+    "export:video": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/export-video.ts",
+    "test:editor-api": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test --test-concurrency=1 scripts/editor-api.test.ts",
+    "test:editor": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test --test-concurrency=1 scripts/editor.test.ts"
   },
   "dependencies": {
     "@charaforge/runtime": "workspace:*",
     "@charaforge/scene": "workspace:*",
+    "mediabunny": "^1.65.2",
     "pixi.js": "^8.22.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"

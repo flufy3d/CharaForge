@@ -6,6 +6,7 @@ import { parseScene, sample, sampleCurve, cubicBezier } from '../src/index.ts';
 
 const example = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'examples', 'minimal.scene.json'), 'utf8'));
 const accessory = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'examples', 'accessory.scene.json'), 'utf8'));
+const editorDemo = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'examples', 'editor-demo.scene.json'), 'utf8'));
 
 test('示例场景通过校验', () => {
   parseScene(example);
@@ -13,6 +14,13 @@ test('示例场景通过校验', () => {
 
 test('饰品示例通过校验（图片资源 + 独立/attach 图片图层）', () => {
   parseScene(accessory);
+});
+
+test('编辑器示例通过校验（背景光晕 + 星星 + 音乐轨）', () => {
+  const scene = parseScene(editorDemo);
+  assert.equal(scene.layers.length, 5);
+  assert.equal(scene.assets.images?.length, 3);
+  assert.equal(scene.audio?.length, 1);
 });
 
 test('图片图层引用不存在的图片会报错', () => {

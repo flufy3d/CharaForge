@@ -22,8 +22,12 @@
     "render:gallery": "node packages/runtime/scripts/build-framework.mjs && node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/gallery.ts",
     "accessory:import": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/import-accessory.mjs",
     "decoration:command": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/decoration-command.mjs",
+    "editor:command": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/editor-command.ts",
+    "export:video": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/export-video.ts",
     "test:runtime": "pnpm --filter @charaforge/runtime test",
     "test:viewer": "pnpm --filter @charaforge/player test:viewer",
+    "test:editor": "pnpm --filter @charaforge/player test:editor",
+    "test:editor-api": "pnpm --filter @charaforge/player test:editor-api",
     "verify:video": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/verify-video.ts",
     "bench": "node --experimental-strip-types --disable-warning=ExperimentalWarning apps/player/scripts/bench.ts"
   },

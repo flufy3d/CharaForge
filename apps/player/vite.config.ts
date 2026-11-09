@@ -7,6 +7,7 @@
  *   /scenes/...                  场景与镜头表
  *   /packages/scene/examples/... 示例场景
  *   /__charaforge/list-assets   动作/表情查看器的只读目录列表（仅 assets/models/.../Animation 或 Exp3）
+ *   /__charaforge/editor/...    本地编辑接口（只允许 loopback；见 server/editorApi.ts）
  * 支持 Range 请求（<video>/<audio> 精确 seek 需要）。
  * 路径段可以写成 `_f.<base64url(UTF-8)>`（ASCII 安全的路由，给中文文件名用，见 decodePath），解码后照常做白名单与防穿越检查。
  *
@@ -20,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import type { Connect, Plugin } from 'vite';
 import { defineConfig } from 'vite';
 import { createAssetListHandler } from './server/assetList.ts';
+import { createEditorApi } from './server/editorApi.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO = resolve(HERE, '..', '..');
@@ -63,7 +65,11 @@ function decodePath(pathname: string): string {
 
 export function repoFiles(): Plugin {
   const assetList = createAssetListHandler(REPO);
+  // 本地编辑接口：只接受 loopback，处理 /__charaforge/editor/...；非该前缀返回 false。
+  const editorApi = createEditorApi(REPO);
   const handler: Connect.NextHandleFunction = (req, res, next) => {
+    // 编辑接口必须在静态白名单之前；它自己会拒绝非本机请求。
+    if (editorApi(req, res)) return;
     // 只读素材目录接口（动作/表情查看器用）：必须在 MOUNTS 白名单之前处理。
     if (assetList(req, res)) return;
     const url = new URL(req.url ?? '/', 'http://x');
@@ -132,7 +138,7 @@ export default defineConfig({
     alias: [{ find: /^@cubism\/framework\/(.*)$/, replacement: `${join(REPO, '.cache', 'cubism-framework')}/$1` }],
   },
   optimizeDeps: {
-    entries: ['index.html', 'harness.html', 'motions.html'],
+    entries: ['index.html', 'harness.html', 'motions.html', 'editor.html', 'export.html'],
     include: ['pixi.js', 'react', 'react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
   },
   server: {
@@ -154,6 +160,8 @@ export default defineConfig({
         index: join(HERE, 'index.html'),
         harness: join(HERE, 'harness.html'),
         motions: join(HERE, 'motions.html'),
+        editor: join(HERE, 'editor.html'),
+        export: join(HERE, 'export.html'),
       },
     },
   },

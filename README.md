@@ -4,7 +4,7 @@
 
 面向虚拟 AI 角色的 Live2D 可视化编辑与动画创作工具。
 
-### 核心功能（规划）
+### 核心功能（部分已实现）
 
 1. **角色预览**：加载 Live2D 模型，实时预览与交互。
 2. **动作编辑**：创建、修改、组合角色动作。
@@ -56,6 +56,7 @@
 | Live2D Cubism Core | [Live2D Proprietary Software License](https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html) | **不包含在仓库中**，`pnpm setup:cubism` 从 Live2D 官方地址下载 Cubism SDK for Web 5-r.5 并校验 sha256，装到 `vendor/cubism/core/` |
 | Live2D Cubism Framework | [Live2D Open Software License](https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html) | 同上，源码装到 `vendor/cubism/framework/`，构建时编译到 `.cache/cubism-framework/`（都不进仓库） |
 | DeepSeek-chan 模型 | 原作者的使用条款（随模型附带，`assets/models/deepseek-chan/terms/`） | **不包含在仓库中**，`pnpm setup:assets` 下载；条款**禁止再分发**模型文件 |
+| [Mediabunny](https://mediabunny.dev/)（视频导出） | [MPL-2.0](https://www.mozilla.org/en-US/MPL/2.0/) | npm 依赖，未修改源码；只用于浏览器内 WebCodecs 封装 |
 
 **模型署名**：**DeepSeek-chan** — Illustration & PSD Layer Separation: Kamiya Ryoko ／
 Live2D Rigging: 霓虹猫_NeonNeko ／ Free model distributed by Kamiya Ryoko
@@ -213,7 +214,50 @@ pnpm bench demo:3 20                         # 帧率基准（参数：场景 �
 pnpm bench scenes/deepseek-chan/scene.json 60    # 全片（带原音频）
 pnpm verify:video                            # 参考视频逐帧定位精度（与 ffmpeg 解码比对）
 pnpm test:viewer                             # 动作 / 表情查看器：列表接口、临时 scene、Playwright smoke
+pnpm test:editor                             # 编辑器 Playwright smoke（加载/时间线/AI 命令/多轨/保存/导出）
+pnpm test:editor-api                         # 本地编辑 HTTP 接口（上传/保存/命令/安全限制）
+pnpm editor:command --scene <scene.json> --input <commands.json> [--out <scene.json>]  # AI 编辑命令
+pnpm export:video --scene <scene.json> [--from 0 --to 3868] [--format mp4|webm|auto] --out <file>
+                                             # 逐帧导出 MV（带音频；不依赖 ffmpeg）
 ```
+
+## 场景 / 动作编辑器与 MV 导出
+
+```bash
+pnpm dev
+# Chrome / Edge 打开：
+# http://localhost:5173/editor.html
+# 直接编辑全片 MV：
+# http://localhost:5173/editor.html?scene=scenes/deepseek-chan/scene.json&frame=2400
+# 轻量示例（背景光晕 + 星星元素 + 音乐）：
+# http://localhost:5173/editor.html?scene=packages/scene/examples/editor-demo.scene.json
+```
+
+- **场景编辑**：图层树、变换、透明度、裁切、滤镜、混合模式、相机、背景色、导入图片/音频、生成形状/渐变背景。
+- **动作编辑**：motion3 / exp3 片段、参数轨、部件不透明度、物理开关；动作库列出模型的 8 个动作和 23 个表情。
+- **多轨时间线**：镜头标记、相机、全部图层、动作/表情片段、任意多条音频轨（音乐轨）；片段可拖动/裁剪，关键帧可拖动/多选/批量缓动。
+- **关键帧与插值**：linear / smooth / easeIn / easeOut / easeInOut / step / 自定义三次贝塞尔；一键动画（淡入、漂浮、脉冲、旋转、弹跳、闪烁、滑入、抖动、放大）。
+- **导出 MV（带音乐）**：编辑器按钮或 CLI，逐帧渲染 + 离线混音，输出 MP4（AVC/AAC）或 WebM（VP9/Opus）。
+- **AI 可调用**：浏览器 `window.__editor`、本地 HTTP `/__charaforge/editor/command`、CLI `pnpm editor:command` 共用 `packages/scene/src/edit.ts` 命令层。
+
+```bash
+# AI / 脚本编辑：命令 → 新场景（stdout 返回 diff / effects / preview）
+pnpm editor:command --scene scenes/deepseek-chan/scene.json \
+  --input .data/edit-commands.json --out .data/edited.scene.json
+
+# 全片导出（60 秒，1280×720，带原音频）
+pnpm export:video --scene scenes/deepseek-chan/scene.json --out .data/export/deepseek-full.mp4 --workers 2
+
+# 只导出 s24 镜头、WebM
+pnpm export:video --scene scenes/deepseek-chan/scene.json --from 2368 --to 2442 \
+  --format webm --out .data/export/s24.webm
+```
+
+- 编辑器保存到 `scenes/` 下的场景 JSON；覆盖已有文件时自动写 `.bak.json`。大场景保存为紧凑 JSON。
+- 全片场景、镜头、音频、时间线加载后可直接预览；编辑器的预览与播放器/harness 同一帧逐位一致。
+- 视频导出是有损编码，像素不与 runtime PNG 逐位相同；帧来源与播放器是同一份 `CharaForgeRuntime`。
+- 2026-11-09 实测：全片 3868 帧导出为 1280×720 MP4（AVC+AAC），时长 64.467 s，37.9 MB，耗时 59.2 s（RTX 5080 Laptop，workers=2）。
+- 完整界面说明、命令格式、HTTP 接口和已知限制见 [docs/editor.md](docs/editor.md)。
 
 ## 外部饰品（ImageAsset / ImageLayer）
 
@@ -233,11 +277,12 @@ pnpm --silent decoration:command --scene packages/scene/examples/accessory.scene
 ## 静态页（`pnpm build`）
 
 ```bash
-pnpm build             # → apps/player/dist/（约 1.5MB，只有页面和打包后的代码）
+pnpm build             # → apps/player/dist/（约 2.2MB，只有页面和打包后的代码）
 pnpm preview           # → http://localhost:4173/
 ```
 
-- 页面：`index.html`（播放器）、`motions.html`（动作 / 表情素材查看器）、`harness.html`（Playwright 测试接口）。
+- 页面：`index.html`（播放器）、`editor.html`（场景 / 动作编辑器）、`motions.html`（动作 / 表情素材查看器）、
+  `export.html`（逐帧视频导出页，`scripts/export-video.ts` 使用）、`harness.html`（Playwright 测试接口）。
 - 产物**不含**模型、参考视频、音频、场景文件和 Cubism Core，也不要把它们复制进去。页面按 URL 引用仓库里的原文件：
   `assets/…`（模型、视频、音频）、`vendor/cubism/core/…`（Core）、`scenes/…`、`packages/scene/examples/…`、`packages/scene/schema/…`。
 - 所有这些请求都是**相对页面地址**的（`apps/player/src/util.ts` 的 `pageUrl`，基于 `document.baseURI`；`vite.config.ts` 的 `base: './'`
@@ -381,14 +426,14 @@ pnpm preview      # http://localhost:4173/；或开发模式 pnpm dev
 
 | 路径 | 内容 |
 |---|---|
-| `apps/player/` | 播放器（React + Pixi，`src/main.tsx` UI、`src/editor.tsx` 饰品编辑器、`engine.ts` 渲染循环、`clock.ts` 音频时钟、`videoSync.ts` 参考视频逐帧对齐）；`harness.html` 给测试和拟合用；`scripts/` 下是 render、bench、verify-video、import-accessory、decoration-command 等 CLI |
-| `packages/runtime/` | 运行时：Cubism 封装、确定性物理、Worker 并行求值、合成器（滤镜、clip、frameHold）；`test/` 确定性测试 |
-| `packages/scene/` | 场景格式 `charaforge.scene` v1、镜头表 `charaforge.shots` v1（TypeBox 定义、JSON Schema、`parseScene` / `parseShots`） |
+| `apps/player/` | 播放器 + 编辑器（React + Pixi）：`src/main.tsx` 播放器 UI、`src/editor/` 场景/动作编辑器（store、时间线、检查器、导出）、`src/editor.tsx` 旧饰品编辑器、`engine.ts` 渲染循环、`clock.ts` 音频时钟、`videoSync.ts` 参考视频逐帧对齐；`harness.html` 测试接口；`server/editorApi.ts` 本地编辑 HTTP API；`scripts/` 下是 render、export-video、editor-command、bench、verify-video、import-accessory、decoration-command 等 CLI |
+| `packages/runtime/` | 运行时：Cubism 封装、确定性物理、Worker 并行求值、合成器（滤镜、clip、frameHold）、场景热更新（`syncScene` / `rebuildEvaluators` / `reloadWorkers`）；`test/` 确定性与编辑热更新测试 |
+| `packages/scene/` | 场景格式 `charaforge.scene` v1、镜头表 `charaforge.shots` v1（TypeBox 定义、JSON Schema、`parseScene` / `parseShots`）、编辑命令层 `src/edit.ts`（关键帧、插值、一键动画、diff/撤销） |
 | `scenes/deepseek-chan/` | `shots.json`（recon 产出、人工校对）、`scene.json`（全片复刻场景，fit 产出） |
 | `tools/recon/` | 参考视频镜头分析（Python） |
 | `tools/gpu/` | GPU 拟合引擎：`l2d/`（moc3 解析、变形器、物理、nvdiffrast 光栅化，内部工具）、`fit/`（整段轨迹优化、导出）、`scripts/`（`a5_fit.py`、`a5_batch.py`、`a5_assemble.ts` 等）、`docs/`、`tests/` |
 | `tools/fit/` | 旧 CPU 拟合引擎 fit4（保留；单元规划与导出代码仍被 GPU 引擎复用） |
 | `tools/qa/` | 验收指标 `metric.py`、闪烁 `flicker.py`、全片报告 `report.py` |
 | `scripts/` | `setup-cubism.mjs`、`setup-assets.mjs`（下载并校验外部资源） |
-| `docs/` | `pipeline.md`（目录、契约、验收口径）、`accessories.md`（外部饰品图片/attach）、`imagine-agy.md`（AI 生图工具调研与调用约定）、`runtime-eval.md`（运行时实现、GPU 与确定性、性能）、`gpu-acceleration.md`（历史提速方案与风险记录） |
+| `docs/` | `editor.md`（场景/动作编辑器、时间线、MV 导出、AI 命令）、`pipeline.md`（目录、契约、验收口径）、`accessories.md`（外部饰品图片/attach）、`imagine-agy.md`（AI 生图工具调研与调用约定）、`runtime-eval.md`（运行时实现、GPU 与确定性、性能）、`gpu-acceleration.md`（历史提速方案与风险记录） |
 | `vendor/`、`assets/`、`.cache/`、`.data/` | 外部 SDK、模型与视频、Framework 编译缓存、中间产物（都不进 git） |

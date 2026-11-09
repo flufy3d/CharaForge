@@ -396,6 +396,7 @@ function App() {
       </div>
       <footer>
         <div>
+          <a href="editor.html">场景 / 动作编辑器（时间线、MV 导出） →</a>　
           <a href="motions.html">动作 / 表情素材查看器 →</a>
         </div>
         {credits.map((c) => (

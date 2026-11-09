@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CharaForge 导出测试</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #111;
+        color: #ddd;
+        font: 12px/1.5 ui-monospace, monospace;
+      }
+      #root canvas {
+        display: block;
+        max-width: 100vw;
+        max-height: 70vh;
+      }
+      #status {
+        position: fixed;
+        left: 8px;
+        bottom: 8px;
+        max-width: calc(100vw - 16px);
+        margin: 0;
+        padding: 6px 8px;
+        overflow-wrap: anywhere;
+        background: rgba(0, 0, 0, 0.72);
+        border: 1px solid #333;
+        border-radius: 4px;
+        color: #9fdc9f;
+        white-space: pre-wrap;
+      }
+    </style>
+    <script src="vendor/cubism/core/live2dcubismcore.min.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <pre id="status">[export] booting</pre>
+    <script type="module" src="src/export-page.ts"></script>
+  </body>
+</html>

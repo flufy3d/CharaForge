@@ -11,7 +11,7 @@
   "scripts": {
     "framework": "node scripts/build-framework.mjs",
     "typecheck": "node scripts/build-framework.mjs && tsc --noEmit",
-    "test": "node scripts/build-framework.mjs && node --experimental-strip-types --disable-warning=ExperimentalWarning --test --test-concurrency=1 test/determinism.test.ts test/image.test.ts"
+    "test": "node scripts/build-framework.mjs && node --experimental-strip-types --disable-warning=ExperimentalWarning --test --test-concurrency=1 test/determinism.test.ts test/image.test.ts test/edit.test.ts"
   },
   "dependencies": {
     "@charaforge/scene": "workspace:*",
