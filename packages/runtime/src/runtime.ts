@@ -6,6 +6,7 @@
  *   - 物理固定步长 1/fps，seek 时从 in − warmup 重放（带检查点），顺序播放增量推进，二者逐位相同。
  */
 import { parseScene, sample, type CameraTransform, type ModelLayer, type Scene, type Transform2D } from '@charaforge/scene';
+import { asciiUrl } from './asciiUrl.ts';
 import { waitForCubismCore } from './coreReady.ts';
 import { Compositor, type LayerDrawParams, type Pixels, type Region, type ResolvedFilter } from './compositor.ts';
 import { LayerEvaluator, type LayerStateToken, type ParamOverrides } from './evaluator.ts';
@@ -179,7 +180,7 @@ export class CharaForgeRuntime {
   async loadScene(input: Scene | unknown | string): Promise<Scene> {
     let raw: unknown = input;
     if (typeof input === 'string') {
-      const res = await fetch(input);
+      const res = await fetch(asciiUrl(input, typeof document !== 'undefined' ? document.baseURI : undefined));
       if (!res.ok) throw new Error(`场景加载失败 ${res.status}：${input}`);
       raw = await res.json();
     }

@@ -7,6 +7,7 @@
  *   /scenes/...                  场景与镜头表
  *   /packages/scene/examples/... 示例场景
  * 支持 Range 请求（<video>/<audio> 精确 seek 需要）。
+ * 路径段可以写成 `_f.<base64url(UTF-8)>`（ASCII 安全的路由，给中文文件名用，见 decodePath），解码后照常做白名单与防穿越检查。
  *
  * pnpm build 的产物（apps/player/dist/）只含页面和打包后的代码（含 Cubism Framework 编译结果），
  * 不含 Cubism Core、模型、视频、音频、场景：这些仍按上面的 URL 从仓库目录读取。
@@ -34,14 +35,39 @@ const TYPES: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
+/** 与 packages/runtime/src/asciiUrl.ts 的 ASCII_SEGMENT_PREFIX 一致 */
+const ASCII_SEGMENT_PREFIX = '_f.';
+
+/**
+ * URL 路径 → 仓库相对路径。逐段百分号解码；`_f.<base64url>` 段解码回 UTF-8 原名（ASCII 安全的路由：
+ * 文件名是中文时，播放器把这一段编码成 base64url，避免反向代理把路径解码成非 ASCII 后转发出错，见 asciiUrl.ts）。
+ * 解码出的段里不允许出现 / \ NUL，也不允许是 . 或 ..（不能借编码绕过下面的白名单与防穿越检查）；非法时抛错。
+ */
+function decodePath(pathname: string): string {
+  return pathname
+    .split('/')
+    .map((seg) => {
+      let d = decodeURIComponent(seg);
+      if (d.startsWith(ASCII_SEGMENT_PREFIX)) {
+        const b64 = d.slice(ASCII_SEGMENT_PREFIX.length);
+        if (!/^[A-Za-z0-9_-]+$/.test(b64)) throw new Error('bad segment');
+        d = Buffer.from(b64, 'base64url').toString('utf8');
+        if (!d || /[/\\\0]/.test(d) || d === '.' || d === '..') throw new Error('bad segment');
+      }
+      return d;
+    })
+    .join('/');
+}
+
 export function repoFiles(): Plugin {
   const handler: Connect.NextHandleFunction = (req, res, next) => {
     const url = new URL(req.url ?? '/', 'http://x');
     let rel: string;
     try {
-      rel = decodeURIComponent(url.pathname).replace(/^\/+/, '');
+      rel = decodePath(url.pathname).replace(/^\/+/, '');
     } catch {
-      return next();
+      res.statusCode = 400;
+      return res.end('bad path');
     }
     if (!MOUNTS.some((m) => rel.startsWith(m))) return next();
     const norm = normalize(rel);

@@ -3,6 +3,7 @@
  * 场景 audio 片段按 (start 帧, offset, duration, gain) 调度到 AudioContext 上。
  * 没有音频时退化为 performance.now()。
  */
+import { asciiUrl } from '@charaforge/runtime';
 import type { Scene } from '@charaforge/scene';
 
 export class PlaybackClock {
@@ -33,7 +34,7 @@ export class PlaybackClock {
     this.ctx = new AudioContext({ latencyHint: 'interactive' });
     await Promise.all(
       assets.map(async (a) => {
-        const res = await fetch(this.resolve(a.uri));
+        const res = await fetch(asciiUrl(this.resolve(a.uri)));
         if (!res.ok) throw new Error(`音频加载失败：${a.uri}`);
         this.buffers.set(a.id, await this.ctx!.decodeAudioData(await res.arrayBuffer()));
       }),

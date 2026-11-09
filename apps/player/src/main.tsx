@@ -13,6 +13,7 @@
  * 快捷键：空格 播放/暂停；←/→ ±1 帧；Shift+←/→ ±10 帧；Home/End；[ / ] 上/下一个镜头标记；
  *         D 调试面板；调试面板打开时 1～4 = 对照模式 关/并排/叠加/差异图；M 静音
  */
+import { asciiUrl } from '@charaforge/runtime';
 import type { Scene } from '@charaforge/scene';
 import { StrictMode, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -40,7 +41,7 @@ async function resolveScene(): Promise<{ label: string; scene: string | object }
   if (p?.startsWith('demo:')) return { label: p, scene: demoScene(Math.max(1, Number(p.slice(5)) || 4)) };
   // 场景路径是仓库相对路径，相对页面地址解析（页面可能在反向代理的路径前缀下，不能用 / 开头）
   if (p) return { label: p, scene: pageUrl(p) };
-  const head = await fetch(pageUrl(DEFAULT_SCENE), { method: 'HEAD' }).catch(() => null);
+  const head = await fetch(asciiUrl(pageUrl(DEFAULT_SCENE)), { method: 'HEAD' }).catch(() => null);
   if (head?.ok) return { label: DEFAULT_SCENE, scene: pageUrl(DEFAULT_SCENE) };
   return { label: `${FALLBACK_SCENE}（${DEFAULT_SCENE} 不存在，已回落）`, scene: pageUrl(FALLBACK_SCENE) };
 }

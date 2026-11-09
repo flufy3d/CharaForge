@@ -7,13 +7,15 @@
 import { CubismMoc } from '@cubism/framework/model/cubismmoc';
 import { CubismMotion } from '@cubism/framework/motion/cubismmotion';
 import { CubismExpressionMotion } from '@cubism/framework/motion/cubismexpressionmotion';
+import { asciiUrl } from './asciiUrl.ts';
 import { ensureCubism } from './cubism.ts';
 import { ModelInstance } from './instance.ts';
 
 export type Fetcher = (url: string) => Promise<ArrayBuffer>;
 
+/** 缺省取文件函数（主线程与 Worker 共用）：非 ASCII 路径改走 ASCII 安全的路由（见 asciiUrl.ts）。 */
 export const defaultFetcher: Fetcher = async (url) => {
-  const res = await fetch(url);
+  const res = await fetch(asciiUrl(url));
   if (!res.ok) throw new Error(`加载失败 ${res.status}：${url}`);
   return res.arrayBuffer();
 };

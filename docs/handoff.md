@@ -214,6 +214,16 @@
     全片加载（47 图层）、3 个 Worker 从前缀地址启动、播放约 56～58 fps、并排 / 叠加 / 差异图逐帧对齐、复制的链接带前缀，没有失败的请求。
     `pnpm test:runtime` 12 通过 1 跳过，typecheck 通过，`pnpm verify:video` 50/50。
   - 已知限制：dev 下 Vite 热更新 websocket 仍连根路径（代理后可能不可用，不影响播放）；前缀地址要以 `/` 结尾（否则相对路径会少一级）。
+- **请求路径只含 ASCII（完成，未提交）**：前缀生效后，代理对 `…/%E5%A4%A7%E8%82%A5%E9%B1%BC.model3.json` 返回 500（它把路径解码成中文再转发，Node http.request 不接受非 ASCII 路径）。
+  - `packages/runtime/src/asciiUrl.ts`：`asciiUrl(url)` 把「解码后含非 ASCII」的路径段换成 `_f.<base64url(UTF-8)>`，纯 ASCII 原样返回。
+    用在运行时的 `defaultFetcher`（主线程与 Worker 都用它取 model3.json / moc3 / 贴图 / physics3 / cdi3 / motion3 / exp3）、`loadScene` 的 fetch、Worker 取 Core；
+    播放器的音频 fetch、默认场景探测、参考视频 `src`。按段编码而不是整条路径编码：与代理前缀无关，model3.json 里的相对引用仍按原始 URL 解析，取文件时才编码。
+  - `apps/player/vite.config.ts` 的白名单中间件（dev 与 preview 共用）：`decodePath` 逐段解码，`_f.` 段解码回原名；解码结果含 `/`、`\`、NUL 或为 `.` / `..` 时返回 400，
+    之后照常做白名单与防穿越检查，Range 与 Content-Type 按解码后的文件名。
+  - 验证：模拟代理加了「解码后用原始字节转发、非 ASCII 返回 500」的模式，旧的请求形式复现 500；修复后经代理的 dev、直连 dev、preview 直连与经代理，
+    Playwright 全片加载、3 个 Worker、播放约 58 fps、并排 / 叠加 / 差异图逐帧对齐，没有失败请求，所有请求路径都只含 ASCII（21 个走 `_f.` 路由）。
+    curl：新路由 200 / Content-Type 正确 / Range 206；编码的 `..`、`../../x` 返回 400；白名单外的路径不会读到文件。
+    `pnpm test:runtime` 12 通过 1 跳过，typecheck 通过，`pnpm verify:video` 50/50。
 
 ## 6. 环境与操作注意
 

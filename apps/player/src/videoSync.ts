@@ -7,6 +7,8 @@
  * 验证方法与结果见 docs/runtime-eval.md（scripts/verify-video.ts，与 ffmpeg 抽帧逐帧比对）。
  */
 
+import { asciiUrl } from '@charaforge/runtime';
+
 export function frameTime(frame: number, fps: number): number {
   return (frame + 0.5) / fps;
 }
@@ -47,7 +49,7 @@ export function loadVideo(url: string): Promise<HTMLVideoElement> {
   v.preload = 'auto';
   v.playsInline = true;
   v.crossOrigin = 'anonymous';
-  v.src = url;
+  v.src = asciiUrl(url); // 非 ASCII 路径改走 ASCII 安全的路由（见 packages/runtime/src/asciiUrl.ts）
   return new Promise((resolve, reject) => {
     v.addEventListener('loadeddata', () => resolve(v), { once: true });
     v.addEventListener('error', () => reject(new Error(`参考视频加载失败：${url}`)), { once: true });
