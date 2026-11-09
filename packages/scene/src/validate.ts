@@ -7,10 +7,27 @@ import type { Shots as ShotsT } from './shots.ts';
 const sceneChecker = TypeCompiler.Compile(Scene);
 const shotsChecker = TypeCompiler.Compile(Shots);
 
+/** 与 packages/runtime 的图片限制保持一致：单边 4096，总像素 16 Mi（4096²）。 */
+const MAX_IMAGE_PIXELS = 16_777_216;
+
 function check<T>(checker: { Check(v: unknown): boolean; Errors(v: unknown): Iterable<{ path: string; message: string }> }, v: unknown, what: string): T {
   if (checker.Check(v)) return v as T;
   const errs = [...checker.Errors(v)].slice(0, 10).map((e) => `  ${e.path}: ${e.message}`);
   throw new Error(`${what} 校验失败：\n${errs.join('\n')}`);
+}
+
+/** 运行时不抓取任意协议；只接受相对资源路径（.png/.webp）或 PNG/WebP data URI。 */
+function isImageUri(uri: string): boolean {
+  if (/^data:image\/(png|webp);base64,/i.test(uri)) return true;
+  if (/^data:/i.test(uri)) return false;
+  // 只允许 assetRoot 下的相对路径：拒绝 http(s)/file 等协议、根路径和 ..
+  if (/^[a-z][a-z0-9+.-]*:/i.test(uri)) return false;
+  if (uri.startsWith('/') || uri.startsWith('\\') || uri.startsWith('//')) return false;
+  const end = uri.search(/[?#]/);
+  const path = (end >= 0 ? uri.slice(0, end) : uri);
+  if (path.split('/').some((seg) => seg === '..')) return false;
+  const lower = path.toLowerCase();
+  return lower.endsWith('.png') || lower.endsWith('.webp');
 }
 
 /** 结构校验 + 语义校验（引用完整性、区间合法性）。失败时抛出带路径的错误。 */
@@ -21,18 +38,41 @@ export function parseScene(v: unknown): SceneT {
   const motions = ids(s.assets.motions);
   const exprs = ids(s.assets.expressions);
   const audio = ids(s.assets.audio);
+  const images = ids(s.assets.images);
   const problems: string[] = [];
   const seen = new Set<string>();
+  const layerById = new Map<string, SceneT['layers'][number]>();
   for (const l of s.layers) {
     if (seen.has(l.id)) problems.push(`图层 ID 重复：${l.id}`);
+    else layerById.set(l.id, l);
     seen.add(l.id);
-    if (!models.has(l.model)) problems.push(`图层 ${l.id} 引用了不存在的模型 ${l.model}`);
+  }
+  const seenImages = new Set<string>();
+  for (const a of s.assets.images ?? []) {
+    if (seenImages.has(a.id)) problems.push(`图片资源 ID 重复：${a.id}`);
+    seenImages.add(a.id);
+    if (a.width * a.height > MAX_IMAGE_PIXELS) {
+      problems.push(`图片资源 ${a.id} 的像素数 ${a.width}×${a.height} 超过上限 ${MAX_IMAGE_PIXELS}`);
+    }
+    if (!isImageUri(a.uri)) problems.push(`图片资源 ${a.id} 的 uri 必须是 .png/.webp 或 PNG/WebP data URI`);
+  }
+  for (const l of s.layers) {
     if (!(l.out > l.in)) problems.push(`图层 ${l.id} 的 out 必须大于 in`);
-    for (const m of l.motions ?? []) if (!motions.has(m.motion)) problems.push(`图层 ${l.id} 引用了不存在的 motion ${m.motion}`);
-    for (const e of l.expressions ?? []) if (!exprs.has(e.expression)) problems.push(`图层 ${l.id} 引用了不存在的 expression ${e.expression}`);
-    for (const p of l.params ?? []) if ('keys' in p.curve) {
-      for (let i = 1; i < p.curve.keys.length; i++) {
-        if (p.curve.keys[i]!.t < p.curve.keys[i - 1]!.t) { problems.push(`图层 ${l.id} 参数 ${p.id} 的关键帧未按时间排序`); break; }
+    if (l.kind === 'model') {
+      if (!models.has(l.model)) problems.push(`图层 ${l.id} 引用了不存在的模型 ${l.model}`);
+      for (const m of l.motions ?? []) if (!motions.has(m.motion)) problems.push(`图层 ${l.id} 引用了不存在的 motion ${m.motion}`);
+      for (const e of l.expressions ?? []) if (!exprs.has(e.expression)) problems.push(`图层 ${l.id} 引用了不存在的 expression ${e.expression}`);
+      for (const p of l.params ?? []) if ('keys' in p.curve) {
+        for (let i = 1; i < p.curve.keys.length; i++) {
+          if (p.curve.keys[i]!.t < p.curve.keys[i - 1]!.t) { problems.push(`图层 ${l.id} 参数 ${p.id} 的关键帧未按时间排序`); break; }
+        }
+      }
+    } else {
+      if (!images.has(l.image)) problems.push(`图片图层 ${l.id} 引用了不存在的图片 ${l.image}`);
+      if (l.attach) {
+        const target = layerById.get(l.attach.layer);
+        if (!target) problems.push(`图片图层 ${l.id} 绑定了不存在的图层 ${l.attach.layer}`);
+        else if (target.kind !== 'model') problems.push(`图片图层 ${l.id} 只能绑定模型图层，${target.id} 是 ${target.kind} 图层`);
       }
     }
   }

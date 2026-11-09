@@ -29,7 +29,11 @@ function summary(): SceneSummary {
     duration: s.duration,
     width: s.composition.width,
     height: s.composition.height,
-    layers: s.layers.map((l) => ({ id: l.id, model: l.model, in: l.in, out: l.out })),
+    layers: s.layers.map((l) =>
+      l.kind === 'model'
+        ? { id: l.id, kind: l.kind, model: l.model, in: l.in, out: l.out }
+        : { id: l.id, kind: l.kind, image: l.image, attach: l.attach?.layer, in: l.in, out: l.out },
+    ),
     markers: (s.markers ?? []).map((m) => ({ id: m.id, start: m.start, end: m.end, label: m.label, kind: m.kind })),
     credits: [...(s.meta.credits ?? []), ...s.assets.models.flatMap((m) => (m.credits ? [m.credits] : []))],
   };

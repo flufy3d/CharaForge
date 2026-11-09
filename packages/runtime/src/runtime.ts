@@ -186,7 +186,10 @@ export class CharaForgeRuntime {
     }
     const scene = parseScene(raw);
     const assets = await loadSceneAssets(scene, (u) => this.loadModel(u), (u) => this.resolveAsset(u));
-    if (this.pool) await this.pool.loadScene(scene, scene.layers.map((l) => l.id));
+    // 阶段 1 只做 schema；图片渲染在阶段 2 接入。先保持旧场景的加载/渲染路径不变。
+    const modelLayers = scene.layers.filter((l): l is ModelLayer => l.kind === 'model');
+    if (modelLayers.length !== scene.layers.length) throw new Error('image 图层尚未实现（阶段 2）');
+    if (this.pool) await this.pool.loadScene(scene, modelLayers.map((l) => l.id));
 
     // 回收旧图层实例
     this.releaseLayers();
@@ -195,7 +198,7 @@ export class CharaForgeRuntime {
     this.compositor.dropCaches();
     this.scene = scene;
     this.compositor.resize(scene.composition.width, scene.composition.height);
-    this.layers = scene.layers.map((layer) => {
+    this.layers = modelLayers.map((layer) => {
       const inst = this.acquireInstance(assets.models.get(layer.model)!);
       const ev = new LayerEvaluator(layer, inst, scene.timebase.fps, resolver(assets.motions, 'motion'), resolver(assets.expressions, 'expression'));
       return { layer, ev };

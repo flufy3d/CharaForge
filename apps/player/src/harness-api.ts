@@ -59,7 +59,7 @@ export interface SceneSummary {
   duration: number;
   width: number;
   height: number;
-  layers: { id: string; model: string; in: number; out: number }[];
+  layers: { id: string; kind: 'model' | 'image'; model?: string; image?: string; attach?: string; in: number; out: number }[];
   markers: { id: string; start: number; end?: number; label?: string; kind?: string }[];
   credits: string[];
 }

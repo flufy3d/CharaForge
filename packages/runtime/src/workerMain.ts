@@ -8,7 +8,7 @@
  * 这样物理链不重复计算，最贵的 Core update 在所有 Worker 间并行；结果与主线程同步路径逐位相同。
  * 由 worker.ts 在 Core 加载之后动态 import（Framework 有模块在加载时就引用全局 Live2DCubismCore）。
  */
-import { parseScene } from '@charaforge/scene';
+import { parseScene, type ModelLayer } from '@charaforge/scene';
 import { ensureCubism } from './cubism.ts';
 import { LayerEvaluator, type ParamOverrides } from './evaluator.ts';
 import type { ModelInstance } from './instance.ts';
@@ -71,7 +71,7 @@ export async function handle(msg: WorkerRequest, enqueuePeer: (m: PeerUpdate) =>
       for (const ev of layers.values()) ev.instance.release();
       layers = new Map();
       const scene = parseScene(msg.scene);
-      const mine = scene.layers.filter((l) => msg.homeLayers.includes(l.id));
+      const mine = scene.layers.filter((l): l is ModelLayer => l.kind === 'model' && msg.homeLayers.includes(l.id));
       const abs = (u: string) => new URL(u, assetBase).href;
       const assets = await loadSceneAssets(scene, (u) => loadModel(abs(u)), abs, new Set(mine.map((l) => l.model)));
       for (const layer of mine) {

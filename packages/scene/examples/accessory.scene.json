@@ -1,0 +1,59 @@
+{
+  "$schema": "../schema/scene.v1.json",
+  "format": "charaforge.scene",
+  "version": 1,
+  "meta": {
+    "title": "示例：外部饰品图片 + attach",
+    "description": "同一张 64×64 透明棋盘图：一个绑定到模型图层顶部，一个独立放在屏幕左下角。图片以 data URI 内嵌，开箱即可渲染。",
+    "credits": ["DeepSeek-chan — Illustration & PSD: Kamiya Ryoko / Live2D Rigging: 霓虹猫_NeonNeko"]
+  },
+  "timebase": { "fps": 60 },
+  "duration": 240,
+  "composition": { "width": 1280, "height": 720, "background": "#ffffff" },
+  "assets": {
+    "models": [{ "id": "ds", "uri": "models/deepseek-chan/DeepSeek/大肥鱼.model3.json", "name": "DeepSeek-chan" }],
+    "images": [
+      {
+        "id": "checker",
+        "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAi0lEQVR4nO3YwQnAIBAEwJSWQlJRqrDT8yuCPgQ5wVnwF8HMa9lHRKTNWyLaE98/Pf33p98HAADAPNkP3H0fAAAAAAAAADBO9gPTi9DpPwAAAAAAAADYAzRBAAAAAAAAwB6gCQIAAAAAAAD2AE0QAAAAAAAAsAdoggAAAAAAAIA9QBMEAGARQESuSgWjFkZObbjgswAAAABJRU5ErkJggg==",
+        "width": 64,
+        "height": 64
+      }
+    ]
+  },
+  "camera": { "x": 640, "y": 360, "zoom": 1 },
+  "layers": [
+    {
+      "id": "main",
+      "kind": "model",
+      "model": "ds",
+      "in": 0,
+      "out": 240,
+      "transform": { "x": 640, "y": 900, "scale": 0.2 }
+    },
+    {
+      "id": "hat",
+      "name": "棋盘帽（绑定模型图层）",
+      "kind": "image",
+      "image": "checker",
+      "in": 0,
+      "out": 240,
+      "transform": { "x": 0, "y": 0, "scale": 8, "rotation": 0, "anchorX": 32, "anchorY": 32 },
+      "opacity": 1,
+      "attach": { "layer": "main", "anchor": [0.5, 0.12], "offset": [0, 0], "rotateWith": true, "scaleWith": true },
+      "provenance": { "source": "manual", "detail": { "note": "示例：显示 attach 的整体变换跟随" } }
+    },
+    {
+      "id": "badge",
+      "name": "屏幕角落徽章（独立图片图层）",
+      "kind": "image",
+      "image": "checker",
+      "in": 0,
+      "out": 240,
+      "space": "screen",
+      "transform": { "x": 96, "y": 640, "scale": 1, "anchorX": 32, "anchorY": 32 },
+      "opacity": 0.9,
+      "provenance": { "source": "manual", "detail": { "note": "示例：不绑定，独立屏幕图层" } }
+    }
+  ]
+}

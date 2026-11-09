@@ -93,6 +93,22 @@ export const AudioAsset = Type.Object(
   { additionalProperties: false },
 );
 
+/**
+ * 外部图片资源（饰品、贴纸等）。图片是不可信数据：运行时只解析和上传，不执行。
+ * uri 相对于资源根目录；也允许 data:image/png;base64,... / data:image/webp;base64,...（示例、测试用）。
+ * width/height 是图片像素尺寸，必须与实际解码结果一致；单边上限 4096，总像素上限 16 MP（16,777,216）。
+ */
+export const ImageAsset = Type.Object(
+  {
+    id: Id,
+    uri: Type.String({ minLength: 1, description: '图片路径（相对于资源根目录）或 PNG/WebP data URI' }),
+    width: Type.Integer({ minimum: 1, maximum: 4096, description: '图片像素宽度' }),
+    height: Type.Integer({ minimum: 1, maximum: 4096, description: '图片像素高度' }),
+    sha256: Type.Optional(Type.String({ pattern: '^[0-9a-f]{64}$', description: '文件内容摘要，供目录/去重使用' })),
+  },
+  { additionalProperties: false },
+);
+
 // ---------- 轨道与片段 ----------
 
 export const ParamTrack = Type.Object(
@@ -163,8 +179,8 @@ export const Transform2D = Type.Object(
     scaleX: Type.Optional(AnimNumber),
     scaleY: Type.Optional(AnimNumber),
     rotation: Type.Optional(AnimNumber),
-    anchorX: Type.Optional(Type.Number({ description: '模型画布像素，缺省为画布中心' })),
-    anchorY: Type.Optional(Type.Number({ description: '模型画布像素，缺省为画布中心' })),
+    anchorX: Type.Optional(Type.Number({ description: '图层本地像素（模型画布或图片）；缺省为对应画布/图片中心' })),
+    anchorY: Type.Optional(Type.Number({ description: '图层本地像素（模型画布或图片）；缺省为对应画布/图片中心' })),
     flipX: Type.Optional(Type.Boolean()),
   },
   { additionalProperties: false },
@@ -296,8 +312,55 @@ export const ModelLayer = Type.Object(
   { additionalProperties: false },
 );
 
-/** 图层联合类型；后续可加入 image、group 等图层。 */
-export const Layer = Type.Union([ModelLayer]);
+/**
+ * 图片图层绑定到模型图层：只跟随目标图层的整体变换（平移/旋转/缩放/flip/相机），
+ * 不解析骨骼、参数或部件。anchor 是目标模型画布的归一化坐标（0..1）。
+ * offset 与 transform.x/y 在 attach 时都使用目标模型画布像素。
+ */
+export const ImageAttach = Type.Object(
+  {
+    layer: Id,
+    anchor: Type.Tuple([Type.Number({ minimum: 0, maximum: 1 }), Type.Number({ minimum: 0, maximum: 1 })], {
+      description: '目标模型画布归一化坐标 [x, y]，0..1',
+    }),
+    offset: Type.Optional(Type.Tuple([Type.Number(), Type.Number()], { description: '目标模型画布像素偏移' })),
+    rotateWith: Type.Optional(Type.Boolean({ description: '是否继承目标旋转，缺省 true' })),
+    scaleWith: Type.Optional(Type.Boolean({ description: '是否继承目标缩放和 flipX，缺省 true' })),
+  },
+  { additionalProperties: false },
+);
+
+/**
+ * 图片图层。transform 与模型图层同语义，但 anchor 的单位是图片像素（缺省图片中心）。
+ * 有 attach 时 space 被忽略，transform.x/y 与 offset 使用目标模型画布像素。
+ */
+export const ImageLayer = Type.Object(
+  {
+    id: Id,
+    name: Type.Optional(Type.String()),
+    kind: Type.Literal('image'),
+    image: Id,
+    in: Frame,
+    out: Type.Number({ description: '结束帧（不含）' }),
+    space: Type.Optional(
+      Type.Union([Type.Literal('world'), Type.Literal('screen')], {
+        description: '缺省 world；有 attach 时忽略，由目标图层的 space 决定',
+      }),
+    ),
+    transform: Transform2D,
+    opacity: Type.Optional(AnimNumber),
+    clip: Type.Optional(Clip),
+    filters: Type.Optional(Type.Array(Filter)),
+    blendMode: Type.Optional(BlendMode),
+    attach: Type.Optional(ImageAttach),
+    semantics: Type.Optional(Semantics),
+    provenance: Type.Optional(Provenance),
+  },
+  { additionalProperties: false },
+);
+
+/** 图层联合类型；后续可加入 group 等图层。 */
+export const Layer = Type.Union([ModelLayer, ImageLayer]);
 
 export const AudioClip = Type.Object(
   {
@@ -353,6 +416,7 @@ export const Scene = Type.Object(
         motions: Type.Optional(Type.Array(MotionAsset)),
         expressions: Type.Optional(Type.Array(ExpressionAsset)),
         audio: Type.Optional(Type.Array(AudioAsset)),
+        images: Type.Optional(Type.Array(ImageAsset)),
       },
       { additionalProperties: false },
     ),
@@ -369,6 +433,7 @@ export type ModelAsset = Static<typeof ModelAsset>;
 export type MotionAsset = Static<typeof MotionAsset>;
 export type ExpressionAsset = Static<typeof ExpressionAsset>;
 export type AudioAsset = Static<typeof AudioAsset>;
+export type ImageAsset = Static<typeof ImageAsset>;
 export type ParamTrack = Static<typeof ParamTrack>;
 export type PartOpacityTrack = Static<typeof PartOpacityTrack>;
 export type MotionClip = Static<typeof MotionClip>;
@@ -379,6 +444,8 @@ export type Clip = Static<typeof Clip>;
 export type Filter = Static<typeof Filter>;
 export type BlendMode = Static<typeof BlendMode>;
 export type ModelLayer = Static<typeof ModelLayer>;
+export type ImageAttach = Static<typeof ImageAttach>;
+export type ImageLayer = Static<typeof ImageLayer>;
 export type Layer = Static<typeof Layer>;
 export type AudioClip = Static<typeof AudioClip>;
 export type Marker = Static<typeof Marker>;
