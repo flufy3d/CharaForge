@@ -10,7 +10,7 @@ import type { EditorStore } from './store.ts';
 const TOOL_LABELS: { id: 'layers' | 'assets' | 'motions' | 'elements'; label: string }[] = [
   { id: 'layers', label: '图层' },
   { id: 'assets', label: '场景素材' },
-  { id: 'motions', label: '动作/表情' },
+  { id: 'motions', label: '动作/体型' },
   { id: 'elements', label: '元素' },
 ];
 
@@ -303,14 +303,16 @@ function AssetsPanel({ store, state }: { store: EditorStore; state: EditorState 
 // ---------- 动作 ----------
 
 function MotionsPanel({ store, state }: { store: EditorStore; state: EditorState }) {
-  const [tab, setTab] = useState<'motion' | 'expression'>('motion');
+  const [tab, setTab] = useState<'motion' | 'expression' | 'body'>('motion');
   const [query, setQuery] = useState('');
   const catalog = state.catalog;
   const hasModel = state.scene?.layers.some((layer) => layer.kind === 'model') ?? false;
   const normalized = query.trim().toLowerCase();
   const motions = (catalog?.motions ?? []).filter((asset) => !normalized || asset.name.toLowerCase().includes(normalized));
   const expressions = (catalog?.expressions ?? []).filter((asset) => !normalized || asset.name.toLowerCase().includes(normalized));
-  const list = tab === 'motion' ? motions : expressions;
+  const bodies = (catalog?.bodies ?? []).filter((asset) => !normalized || asset.name.toLowerCase().includes(normalized));
+  const list = tab === 'motion' ? motions : tab === 'expression' ? expressions : bodies;
+  const tabLabel = tab === 'motion' ? '动作' : tab === 'expression' ? '表情' : '体型';
 
   return (
     <div className="panel-section">
@@ -326,20 +328,23 @@ function MotionsPanel({ store, state }: { store: EditorStore; state: EditorState
         <button type="button" className={tab === 'expression' ? 'active' : ''} onClick={() => setTab('expression')}>
           表情 {catalog?.expressions.length ?? 0}
         </button>
+        <button type="button" className={tab === 'body' ? 'active' : ''} onClick={() => setTab('body')}>
+          体型 {catalog?.bodies.length ?? 0}
+        </button>
       </div>
       <input
         className="text-input search"
         type="search"
-        placeholder={`搜索${tab === 'motion' ? '动作' : '表情'}名称…`}
+        placeholder={`搜索${tabLabel}名称…`}
         value={query}
         onChange={(e) => setQuery(e.target.value)}
       />
       <div className="small muted">
         {catalog
-          ? `来源：${tab === 'motion' ? (catalog.sources.motions === 'declared' ? 'model3.json 声明' : 'Animation/ 目录') : catalog.sources.expressions === 'declared' ? 'model3.json 声明' : 'Exp3/ 目录'}`
+          ? `来源：${tab === 'motion' ? (catalog.sources.motions === 'declared' ? 'model3.json 声明' : 'Animation/ 目录') : tab === 'body' ? 'Exp3/ + charaforge.bodies.json（可选）' : catalog.sources.expressions === 'declared' ? 'model3.json 声明' : 'Exp3/ 目录'}`
           : state.catalogError
             ? '目录读取失败'
-            : '读取动作 / 表情目录…'}
+            : '读取动作 / 表情 / 体型目录…'}
       </div>
       {!hasModel && <div className="notice-inline">场景没有模型图层，添加前请先新建模型实例。</div>}
       {state.catalogError && <pre className="panel-error">{state.catalogError}</pre>}
@@ -351,7 +356,7 @@ function MotionsPanel({ store, state }: { store: EditorStore; state: EditorState
       {!catalog ? (
         <div className="empty small">读取素材目录…</div>
       ) : list.length === 0 ? (
-        <div className="empty small">没有匹配的{tab === 'motion' ? '动作' : '表情'}。</div>
+        <div className="empty small">没有匹配的{tabLabel}。</div>
       ) : (
         <div className="motion-list">
           {list.map((asset) => (
@@ -368,20 +373,23 @@ function MotionsPanel({ store, state }: { store: EditorStore; state: EditorState
                 type="button"
                 className="mini"
                 disabled={!hasModel}
-                title={hasModel ? '添加到当前选中模型图层（没有选中时用第一个模型图层）' : '没有模型图层'}
+                title={hasModel ? (tab === 'body' ? '设为当前模型图层的体型（从入点持续到出点，替换旧体型）' : '添加到当前选中模型图层（没有选中时用第一个模型图层）') : '没有模型图层'}
                 onClick={() => {
                   if (asset.kind === 'motion') void store.addMotion(asset.uri, asset.name);
+                  else if (asset.kind === 'body') void store.setBody(asset.uri);
                   else void store.addExpression(asset.uri);
                 }}
               >
-                添加到选中图层
+                {tab === 'body' ? '设为体型' : '添加到选中图层'}
               </button>
             </div>
           ))}
         </div>
       )}
       <div className="small muted panel-note">
-        动作从当前播放头开始，默认不循环、淡入 0；表情从当前帧开始，持续到图层出点。片段参数可在右侧检查器里细调。
+        {tab === 'body'
+          ? '体型是 exp3 基础参数层，从图层入点持续到出点；切换体型会替换该图层上的旧体型，但不会动表情/动作片段。'
+          : '动作从当前播放头开始，默认不循环、淡入 0；表情从当前帧开始，持续到图层出点。片段参数可在右侧检查器里细调。'}
       </div>
     </div>
   );

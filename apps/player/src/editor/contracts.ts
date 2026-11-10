@@ -142,6 +142,7 @@ export interface EditorStoreApi {
   addGeneratedImage(blob: Blob, name: string, opts?: ImportImageOptions): Promise<void>;
   addMotion(uri: string, name?: string): Promise<void>;
   addExpression(uri: string): Promise<void>;
+  setBody(uri: string): Promise<void>;
   addAnimationPreset(preset: import('@charaforge/scene').AnimationPreset, layerId?: string): Promise<void>;
   setBackground(color: string | null): Promise<void>;
   loadCatalog(): Promise<void>;
@@ -181,6 +182,7 @@ export interface EditorWindowApi {
   exportVideo(opts?: Record<string, unknown>): Promise<Record<string, unknown>>;
   addMotion(uri: string, name?: string): Promise<void>;
   addExpression(uri: string): Promise<void>;
+  setBody(uri: string): Promise<void>;
   importImage(dataUri: string, opts?: ImportImageOptions): Promise<void>;
   readonly store: EditorStoreApi | null;
 }

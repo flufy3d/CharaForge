@@ -216,21 +216,103 @@ select {
   gap: 8px;
   min-width: 0;
 }
+.combo-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  background: #1b2029;
+  border: 1px solid #2c3445;
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+.combo-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #9aa3b2;
+}
+.combo-field select {
+  max-width: 220px;
+  color: #e6e9ef;
+}
+.combo-hint {
+  margin-left: auto;
+}
 .canvas-box {
   position: relative;
   background: #202830;
   border: 1px solid #2c3445;
   border-radius: 6px;
   overflow: hidden;
-  max-width: min(100%, calc(100vh - 300px));
+  max-width: min(100%, calc(100vh - 340px));
   margin: 0 auto;
   width: 100%;
   aspect-ratio: 1 / 1;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.canvas-box.panning {
+  cursor: grabbing;
+}
+.canvas-box.loading {
+  cursor: wait;
 }
 .canvas-box canvas {
   display: block;
   width: 100%;
   height: 100%;
+}
+.zoom-controls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: rgba(16, 20, 27, 0.82);
+  border: 1px solid #2c3445;
+  border-radius: 5px;
+}
+.zoom-controls button {
+  padding: 2px 7px;
+  font-size: 12px;
+}
+.zoom-controls .zoom-value {
+  min-width: 52px;
+  font-variant-numeric: tabular-nums;
+}
+.viewport-hint {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  z-index: 1;
+  color: #aeb8c8;
+  background: rgba(16, 20, 27, 0.72);
+  border-radius: 4px;
+  padding: 2px 6px;
+  pointer-events: none;
+  font-size: 11px;
+}
+.body-item {
+  border-left: 2px solid #7a6cff;
+}
+.combo-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  color: #c9d2e2;
+  font-size: 12px;
+  border-bottom: 1px solid #2c3445;
+  padding-bottom: 7px;
+}
+.combo-summary em {
+  color: #8ab4ff;
+  font-style: normal;
+  margin-right: 3px;
 }
 .overlay {
   position: absolute;

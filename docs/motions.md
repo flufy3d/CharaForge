@@ -1,8 +1,9 @@
-# 动作 / 表情素材查看器
+# 动作 / 表情 / 体型素材查看器
 
-本期目标：只读地查看当前模型（DeepSeek-chan / 大肥鱼）的全部 motion3 动作与 exp3 表情，点击后在角色上预览，
-支持播放/暂停/seek/循环、缩略图/图集，以及表情预览叠加 IDLE。**不做**动作编辑、骨骼编辑、参数轨编辑，
-也不修改 `scenes/deepseek-chan/scene.json` 或任何模型文件。
+只读地查看当前模型（缺省 DeepSeek-chan / 大肥鱼，可用 `?model=` 指向 `assets/models/` 下的其它模型）
+的全部 motion3 动作、exp3 表情和 exp3 体型，点击后在角色上预览，支持播放/暂停/seek/循环、缩略图/图集，
+以及 **体型 + 表情 + 动作同时生效**。**不做**动作编辑、骨骼编辑、参数轨编辑，也不修改
+`scenes/deepseek-chan/scene.json` 或任何模型文件。
 
 入口：
 
@@ -14,6 +15,25 @@ pnpm dev
 `pnpm preview`（`vite preview`）使用同一个中间件，也可以直接打开 `http://localhost:4173/motions.html`。
 页面已加入 `apps/player/vite.config.ts` 的 `build.rollupOptions.input`，`pnpm --filter @charaforge/player build`
 会产出 `dist/motions.html`。
+
+## 体型是什么
+
+三种体型如果是 **同一套 Live2D rig 上的 exp3 参数预设**，动作和表情就是天然复用的：
+它们操作的是同一组参数 / 骨架，体型只改变基础参数（身高、头身比、胸腰、衣服部件等）。
+以前查看器把体型当成普通表情，且同一时间只能选一个 exp3，所以“选体型”会顶掉“选表情”；
+现在把体型拆成独立槽位：
+
+```text
+基础层：体型 exp3（可选）
+覆盖层：表情 exp3（可选，在体型之后应用）
+动作层：motion3（可选，与体型/表情同时播放）
+```
+
+`layer.expressions` 的顺序固定为“体型 → 表情”，所以表情参数可以覆盖体型里的同名参数，
+但不会把体型整个清掉。动作本身不写参数默认值，也不会覆盖体型。
+
+> 如果三种体型是三套独立的 model3（而不是同一 rig 的 exp3），动作/表情能否复用取决于参数 ID、
+> 部件 ID 和骨架是否一致；本查看器当前只预览一个 model3。
 
 ## 数据来源
 
@@ -27,15 +47,43 @@ pnpm dev
    `FileReferences.Expressions` 非空时只使用声明项。
 2. **目录回退**：没有声明时，调用只读接口扫描：
    - 动作：`assets/models/deepseek-chan/DeepSeek/Animation/`
-   - 表情：`assets/models/deepseek-chan/DeepSeek/Exp3/`
+   - 表情 + 体型：`assets/models/deepseek-chan/DeepSeek/Exp3/`
 
 > 选择“接口扫描”（方案 A）而不是生成 `motions.index.json`：`assets/` 被 gitignore，生成文件容易过期，
 > 还要保证 `pnpm dev` / `pnpm preview` 前一定跑过生成脚本；接口方式在两种启动方式下都直接可用。
 >
-> 当前模型走目录回退：8 个 motion3、23 个 exp3（2026-11 核对）。
+> 当前模型走目录回退：8 个 motion3、23 个 exp3，其中 3 个自动识别为体型（20 个表情）。
 
 列表与元数据都只读取文件内容做 JSON 解析，不执行任何内容。中文文件名请求仍走
 `packages/runtime/src/asciiUrl.ts` 的 `_f.<base64url>` 路径段，与播放器、runtime 一致。
+
+## 体型识别与 manifest
+
+没有显式声明时，按以下规则把 exp3 从表情里拆出来：
+
+- 文件名 / model3 声明名包含 `体型`、`身材`、`身型`、`形态`、`身高`、`body shape/type`、`proportion` 等关键词；
+- 或所有参数都是强体型参数（`ParamBodyScale`、`Bust`、`Waist`、`Height`、`Chubby`、`LegLength` 等）；
+- 或至少两个参数，且全部是强/弱体型参数（例如 `身高 + 衣服`）。
+
+单改 `Clothes2`、`脱鞋`、`尾巴开关` 这类单件开关不会被当成体型。
+
+模型目录下可以放一个可选的 `charaforge.bodies.json` 显式声明（和 `大肥鱼.model3.json` 同目录）：
+
+```json
+{
+  "bodies": [
+    { "file": "Exp3/小萝莉.exp3.json", "name": "小萝莉" },
+    { "file": "Exp3/少女.exp3.json", "name": "少女" },
+    { "file": "Exp3/成女.exp3.json", "name": "成女" }
+  ],
+  "default": "Exp3/小萝莉.exp3.json"
+}
+```
+
+- `file` 相对 model3 所在目录；也接受 `"bodies": ["Exp3/a.exp3.json", ...]`。
+- manifest 中列出的文件强制视为体型；`default` 指定初始体型。
+- 没有 manifest 时，初始体型取名字含“默认”的项，否则取排序后的第一个。
+- manifest 读取失败只记 warning，不影响其它素材。
 
 ## 只读列表接口
 
@@ -75,34 +123,39 @@ GET /__charaforge/list-assets?dir=assets/models/deepseek-chan/DeepSeek/Animation
 | `TotalSegmentCount` / `TotalPointCount` | 段数/点数 |
 | `UserDataCount` | 用户数据数 |
 
-表情（exp3）解析 `Parameters`：每项 `Id`、`Value`、`Blend`（Add / Multiply / Overwrite）。表情没有时长/循环，
-预览固定 120 帧（2 秒）。
+表情 / 体型（exp3）解析 `Parameters`：每项 `Id`、`Value`、`Blend`（Add / Multiply / Overwrite）。
+没有动作时预览固定 120 帧（2 秒）；有动作时跟随动作时长。
 
-素材列表项显示缩略图、显示名和动作/表情摘要；右侧元数据面板显示文件名、大小、修改时间、来源（model3 声明 / 目录扫描）、
-资源 uri 等。解析失败的单个文件会跳过，并在页面上以 notice 列出 warning，不会让整个查看器崩溃。
+素材列表项显示缩略图、显示名和动作/表情/体型摘要；右侧元数据面板显示当前组合（体型/表情/动作）、
+文件名、大小、修改时间、来源（model3 声明 / 目录扫描）、资源 uri 等。解析失败的单个文件会跳过，
+并在页面上以 notice 列出 warning，不会让整个查看器崩溃。
 
 ## 临时预览 scene
 
-页面复用 `PlayerEngine` / `CharaForgeRuntime` / `Compositor`，不另写渲染器。每次点击素材时构造一个临时 scene，
+页面复用 `PlayerEngine` / `CharaForgeRuntime` / `Compositor`，不另写渲染器。每次切换槽位时构造一个临时 scene，
 通过 `PlayerEngine.load()` 加载；不写盘，也不修改 `scenes/deepseek-chan/scene.json`。
 
-动作示例（IDLE）：
+体型 + 表情 + IDLE 的示例：
 
 ```json
 {
   "format": "charaforge.scene",
   "version": 1,
-  "meta": { "title": "动作预览：IDLE" },
+  "meta": { "title": "体型 体型2 / 表情 脸红 / 动作 IDLE预览" },
   "timebase": { "fps": 60 },
   "duration": 359,
   "composition": { "width": 720, "height": 720, "background": "#202830" },
   "assets": {
     "models": [{ "id": "m", "uri": "models/deepseek-chan/DeepSeek/大肥鱼.model3.json" }],
     "motions": [{
-      "id": "preview",
+      "id": "motion",
       "model": "m",
       "uri": "models/deepseek-chan/DeepSeek/Animation/IDLE.motion3.json"
-    }]
+    }],
+    "expressions": [
+      { "id": "body", "model": "m", "uri": "models/deepseek-chan/DeepSeek/Exp3/体型2.exp3.json" },
+      { "id": "expression", "model": "m", "uri": "models/deepseek-chan/DeepSeek/Exp3/脸红.exp3.json" }
+    ]
   },
   "layers": [{
     "id": "model",
@@ -110,39 +163,51 @@ GET /__charaforge/list-assets?dir=assets/models/deepseek-chan/DeepSeek/Animation
     "model": "m",
     "in": 0,
     "out": 359,
-    "transform": { "x": 360, "y": 360, "scale": 0.16 },
+    "transform": { "x": 360, "y": 360, "scale": 1 },
     "physics": { "warmup": 45 },
-    "motions": [{ "motion": "preview", "start": 0, "loop": true, "fadeIn": 0 }]
+    "motions": [{ "motion": "motion", "start": 0, "loop": true, "fadeIn": 0 }],
+    "expressions": [
+      { "expression": "body", "start": 0, "fadeIn": 0 },
+      { "expression": "expression", "start": 0, "fadeIn": 0 }
+    ]
   }]
 }
 ```
 
-- 固定 `timebase.fps = 60`、`composition = 720×720`、背景 `#202830`；动作时长
-  `max(120, ceil(Meta.Duration × 60))`，表情固定 120 帧。
-- `fadeIn: 0`：点击后立即看到动作/表情，不必等文件自带的 1 秒淡入。
-- `loop` 初始取 `Meta.Loop`，UI 可切换。循环开启时，页面在播放自然到达末帧后自动从头重播；关闭时播放到
-  自然结束/场景末帧后停止。表情没有 loop，开关禁用。
+- 固定 `timebase.fps = 60`、`composition = 720×720`、背景 `#202830`；有动作时
+  `duration = max(120, ceil(Meta.Duration × 60))`，没有动作时 120 帧。
+- `fadeIn: 0`：点击后立即看到动作/体型/表情，不必等文件自带的 1 秒淡入。
+- `loop` 初始取 `Meta.Loop`，UI 可切换。循环开启时，页面在播放自然到达末帧后自动从头重播。
 - `physics.warmup = 45`，减少第一帧的物理突变。
-- `transform` 是占位值。`loadScene` 后从 `runtime.layerInstance('model')?.canvas` 读取模型画布尺寸，按
-  `scale = min(720 / canvas.width, 720 / canvas.height) × 0.96`、位置 `(360, 360)` 居中 fit；不写死模型缩放。
+- `transform` 是占位值。加载后先 seek 到当前帧，再读取模型所有可见 drawable 的顶点包围盒
+  （`ModelInstance.contentBounds()`），用 `fitTransformToBounds` 按 **角色实际占用的区域** 取景，
+  而不是整张模型画布。这样小体型（例如 Q 版 / 萝莉）切换后也会自动占满预览。
 - 预览 scene 不写 `assets.audio` / `audio`，页面也不调用 `loadVideo()`；`PlaybackClock` 没有音频时退化为
   `performance.now()`，所以不需要用户手势即可播放。
-- 表情预览缺省叠加 IDLE：`assets.motions` 增加 IDLE，`layer.motions` 与 `layer.expressions` 同时存在
-  （按规范先 motion 后 expression）。取消勾选「叠加 IDLE」或使用 `?idle=0` 时回到“默认姿态 + 单个 exp3”。
-  切换类表情（如竖食指开/关）在两种模式下的观感会不同，以实际预览为准。
+
+## 缩放 / 平移
+
+预览画面是独立取景，不修改 scene 文件：
+
+- 滚轮以鼠标位置为锚缩放；拖动画面平移；双击画面或按 `F` / `0` 重新按角色内容适应。
+- 右上角 `− / 百分比 / + / 适应` 可点击；`+` / `−` 快捷键缩放。
+- 百分比相对“自动适应”比例：自动取景后为 100%，放大到 250% 表示角色显示尺寸是适应状态的 2.5 倍。
+- 切换表情 / 动作时保留当前视角；切换体型时重新按新体型的内容包围盒取景（也可以随时按“适应”）。
+- 缩放范围是自动适应比例的 10%–2000%。
 
 ## 缩略图与图集
 
 - 页面启动时（缓存未命中）用一次 **contact sheet** 渲染生成全部素材缩略图：
   - 一个临时 scene，每个素材一个模型图层，默认 6 列 × 160px 方格；
   - 物理关闭，只渲染帧 0；motion 通过 `offset` 取动作中段（约 `min(1.5s, Duration × 0.35)`），
-    表情从帧 0 立即生效；
+    体型 / 表情从帧 0 立即生效；
+  - 先按整张画布渲染一次，再按每个图层的实际内容包围盒收紧到 tile，小体型不会在缩略图里缩成一团；
   - 每个图层带 tile 大小的 `clip`，不会互相覆盖；
   - `runtime.readPixels()` 读出整张图后按 tile 裁成 160×160 PNG data URL。
-- 缩略图缓存在 `localStorage`（key `charaforge.motion-thumbs.v1`），缓存键包含 model uri 与每个素材的
+- 缩略图缓存在 `localStorage`（key `charaforge.motion-thumbs.v2`），缓存键包含 model uri 与每个素材的
   `kind/file/size/mtime`；素材变化后自动失效。缓存不可用或超配额时只在本次会话内使用。
 - 左侧列表直接显示缩略图；顶部「图集」打开全部素材的图集，点击任一缩略图切换到该素材。
-- 生成失败不会阻塞预览：列表回退为「动 / 表」占位符，页面显示 warning；刷新可重试。
+- 生成失败不会阻塞预览：列表回退为「动 / 表 / 体」占位符，页面显示 warning；刷新可重试。
 - 缩略图只是列表/图集展示，不写盘、不进 git，也不改变 `assets/` 内容。
 
 ## 页面与调试接口
@@ -151,28 +216,43 @@ URL 参数：
 
 | 参数 | 含义 |
 |---|---|
-| `kind=motion\|expression` | 初始素材类型，缺省 motion |
-| `name=<文件名>` | 初始素材文件名（含扩展名），缺省 IDLE（`kind=expression` 时缺省第一个表情） |
+| `model=<model3 uri>` | 查看 `assets/` 下的其它模型，例如 `models/mingyue/Mingyue.model3.json`；缺省示例模型 |
+| `modelName=<名称>` | 顶部显示名；缺省从 model3 文件名推断 |
+| `kind=motion\|expression\|body` | 初始最后点击的素材类型，缺省 motion |
+| `name=<文件名>` | 初始最后点击的素材文件名（含扩展名） |
+| `body=<文件名>` | 初始体型；不传用 manifest 的 default / “默认体型” / 第一个 |
+| `expression=<文件名>` | 初始表情 |
+| `motion=<文件名>` | 初始动作；`motion=0` 表示不叠加动作 |
 | `frame=<n>` | 初始帧，缺省 0 |
 | `loop=0` | 动作循环初始关闭 |
-| `idle=0` | 表情预览不叠加 IDLE（缺省叠加） |
+| `idle=0` | 兼容旧链接：等价于 `motion=0` |
 
-快捷键：`空格` 播放/暂停，`←`/`→` ±1 帧（`Shift` ±10），`Home`/`End`，`L` 切换循环。
+快捷键：`空格` 播放/暂停，`←`/`→` ±1 帧（`Shift` ±10），`Home`/`End`，`L` 切换循环，
+`F`/`0` 适应，`+`/`−` 缩放；滚轮缩放、拖动平移、双击适应。
 
 页面暴露只读测试钩子 `window.__motionViewer`（稳定 JSON，供后续代理/Playwright 使用）：
 
 ```ts
 window.__motionViewer.readyState            // 'booting' | 'ready' | 'error'
 await window.__motionViewer.ready           // 启动完成（成功或失败）
-window.__motionViewer.catalog()             // { modelUri, motions, expressions, sources, warnings }
-window.__motionViewer.preview()             // { kind, file, name, uri, duration, fps, loop, withIdle, meta/info, ... }
-window.__motionViewer.selected()            // { kind, file } | null
+window.__motionViewer.catalog()             // { modelUri, motions, expressions, bodies, sources, warnings }
+window.__motionViewer.preview()             // { kind, file, name, uri, duration, fps, loop, withIdle, selection, meta/info, ... }
+window.__motionViewer.selected()            // 最后一次点击：{ kind, file } | null
+window.__motionViewer.selection()           // { motion, expression, body }
 await window.__motionViewer.select(kind, file)
+await window.__motionViewer.setSelection({ body?, expression?, motion? })
+await window.__motionViewer.setBody(file | null)
+await window.__motionViewer.setExpression(file | null)
+await window.__motionViewer.setMotion(file | null)
 await window.__motionViewer.seekAndRender(frame)
 await window.__motionViewer.hashFrame()     // 当前合成像素 SHA-256（0.5 缩放）
 window.__motionViewer.thumbnails()          // { "motion:IDLE.motion3.json": "data:image/png;base64,...", ... } | null
+window.__motionViewer.viewport()            // { scale, fitScale, x, y, anchorX, anchorY } | null
+await window.__motionViewer.fit()           // 按当前帧角色内容适应
+window.__motionViewer.zoomBy(1.2)           // 以画面中心缩放
+window.__motionViewer.panBy(dx, dy)         // 合成像素平移
 await window.__motionViewer.setLoop(true|false)
-await window.__motionViewer.setWithIdle(true|false)
+await window.__motionViewer.setWithIdle(true|false)  // 兼容旧接口：开/关动作层
 window.__motionViewer.status()              // EngineStatus
 ```
 
@@ -187,11 +267,12 @@ pnpm --filter @charaforge/player test:viewer
 
 - `apps/player/scripts/asset-list.test.ts`：列表接口返回形状、排序、中文名、路径穿越/反斜杠/绝对路径/盘符/
   非允许目录拒绝、目录内 symlink 跳过、目录本身 symlink 越界拒绝；真实 assets 存在时校验 8 / 23。
-- `apps/player/scripts/motion-preview.test.ts`：motion3 Meta、exp3 Parameters、资源 uri、临时动作/表情 scene
-  （含叠加 IDLE）、缩略图 contact sheet scene 通过 `parseScene`、fit 公式、真实 8 / 23 文件解析。
-- `apps/player/scripts/motion-viewer.test.ts`：Playwright smoke，打开页面、确认 8 / 23、确认 31 张缩略图与
+- `apps/player/scripts/motion-preview.test.ts`：motion3 Meta、exp3 Parameters、体型识别 / manifest、
+  资源 uri、临时动作/体型+表情/叠加动作 scene、缩略图 contact sheet scene 通过 `parseScene`、
+  画布 fit / 内容包围盒 fit、真实 8 个动作 / 23 个 exp3（3 体型 + 20 表情）解析。
+- `apps/player/scripts/motion-viewer.test.ts`：Playwright smoke，打开页面、确认 8 / 20 / 3、确认 31 张缩略图与
   图集、点击 IDLE、seek 到 0/90 后像素摘要变化、点击“脸红”表情并验证叠加 IDLE 后画面随帧变化、
-  页面无未捕获错误。
+  验证体型是独立槽位（切表情不会丢失体型）、缩放 / 适应、页面无未捕获错误。
 
 回归命令：
 
@@ -206,9 +287,13 @@ pnpm --filter @charaforge/player build
 - 列表接口只存在于 `pnpm dev` / `pnpm preview` 的仓库中间件；用普通静态服务器托管 `dist/` 时不可用
   （现有播放器的模型/场景读取本来也需要这个中间件）。
 - `assets/` 不进 git；新克隆仓库未运行 `pnpm setup:assets` 时，页面显示安装提示，没有素材可列。
-- 首次打开（缩略图缓存未命中）会多一次 contact sheet 渲染，素材多时需要数秒；之后走 localStorage 缓存。
+- 首次打开（缩略图缓存未命中）会多两次 contact sheet 渲染（整画布 + 内容收紧），素材多时需要数秒；
+  之后走 localStorage 缓存。
 - 缩略图不是视频/动图，只截取动作中段的一帧；具体动作仍以右侧预览为准。
-- 切换素材、循环开关或「叠加 IDLE」开关会重新加载临时 scene（模型/motion/exp3 资源按 URL 缓存，不会重复下载），
+- 切换体型 / 表情 / 动作会重新加载临时 scene（模型/motion/exp3 资源按 URL 缓存，不会重复下载），
   可能有短暂重载感。
-- 同一时间只预览一个动作或一个表情；不做多动作混合、参数轨编辑、骨骼编辑。
+- 同一时间只预览一个动作；体型和表情各最多一个，但三者可以同时生效。不做多动作混合、参数轨编辑、骨骼编辑。
+- 体型识别是命名 / 参数启发式；自动识别不准时请用 `charaforge.bodies.json` 显式声明。
+- 如果三种体型是三套独立 model3，而不是同一 rig 的 exp3，本查看器需要按模型分别打开；
+  动作/表情能否复用取决于参数 ID 和骨架是否一致。
 - 模型按原作者条款禁止再分发，查看器只供本地使用，不要公开部署或把 `assets/` 提交进 git。

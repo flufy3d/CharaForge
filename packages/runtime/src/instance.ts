@@ -125,6 +125,37 @@ export class ModelInstance {
     return this.resource.canvas;
   }
 
+  /**
+   * 当前帧所有可见 drawable 的顶点包围盒（模型画布像素，y 向下）。
+   * 用于查看器按“角色实际占用的区域”取景：小体型/换装后画布不变，但内容会变小。
+   * 必须在 Core update 之后调用；没有可见 drawable 时返回 null。
+   */
+  contentBounds(): { x0: number; y0: number; x1: number; y1: number } | null {
+    const { originX, originY, pixelsPerUnit: ppu } = this.resource.canvas;
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    for (let i = 0; i < this.model.getDrawableCount(); i++) {
+      if (!this.model.getDrawableDynamicFlagIsVisible(i)) continue;
+      if (this.model.getDrawableOpacity(i) <= 0.001) continue;
+      const vertices = this.model.getDrawableVertices(i);
+      for (let j = 0; j + 1 < vertices.length; j += 2) {
+        const ux = vertices[j]!;
+        const uy = vertices[j + 1]!;
+        if (!Number.isFinite(ux) || !Number.isFinite(uy)) continue;
+        const px = originX + ux * ppu;
+        const py = originY - uy * ppu;
+        if (px < x0) x0 = px;
+        if (py < y0) y0 = py;
+        if (px > x1) x1 = px;
+        if (py > y1) y1 = py;
+      }
+    }
+    if (!(x1 > x0 && y1 > y0)) return null;
+    return { x0, y0, x1, y1 };
+  }
+
   hasParam(id: string): boolean {
     return this.paramIndex.has(id);
   }

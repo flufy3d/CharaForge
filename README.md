@@ -177,7 +177,7 @@ Windows 原生同样适用；PowerShell 5.1 不支持 `&&`，`pnpm build` 和 `p
 快捷键：`空格` 播放/暂停，`←`/`→` ±1 帧（`Shift` ±10），`Home`/`End`，`[`/`]` 上/下一个镜头，`D` 调试面板，
 调试面板打开时 `1`～`4` 切换对照模式（关 / 并排 / 叠加 / 差异图），`M` 静音。
 
-### 动作 / 表情素材查看器
+### 动作 / 表情 / 体型素材查看器
 
 ```bash
 pnpm dev
@@ -185,10 +185,17 @@ pnpm dev
 # http://localhost:5173/motions.html
 ```
 
-- 独立页面，列出当前模型 `Animation/` 下的 8 个 motion3 动作和 `Exp3/` 下的 23 个 exp3 表情；点击即可在角色上预览。
+- 独立页面，列出当前模型 `Animation/` 下的 8 个 motion3 动作和 `Exp3/` 下的 23 个 exp3；
+  其中 3 个自动识别为「体型」，20 个作为普通表情。点击即可在角色上预览。
+- 默认看示例模型；用 `?model=models/<路径>/<名称>.model3.json` 可以查看 `assets/models/` 下的其它模型（例如溟月），
+  `?modelName=` 可覆盖顶部显示名。
+- **体型是独立槽位**：体型 + 表情 + 动作可以同时生效，切换体型不会顶掉表情/动作；
+  适用于“同一套 rig 的三种体型（exp3 参数预设）”。自动按名称/参数识别体型，也可以用模型目录下的
+  `charaforge.bodies.json` 显式声明和指定默认体型。
+- 预览按角色实际内容的包围盒自动取景，小体型切换后也会占满画面；支持滚轮缩放、拖动平移、双击/`F`/`0` 适应。
 - 动作显示名称、时长、loop、曲线数等元数据；支持搜索、播放/暂停、逐帧、seek、循环开关（快捷键与播放器一致，另加 `L` 循环）。
-- 列表带 160×160 缩略图；顶部「图集」打开全部素材的 contact sheet。缩略图由一次网格 scene 渲染生成并缓存在 localStorage。
-- 表情预览可选「叠加 IDLE」动作（缺省开启，`?idle=0` 关闭）。
+- 列表带 160×160 缩略图；顶部「图集」打开全部素材的 contact sheet。缩略图由一次网格 scene 渲染生成，
+  再按每个素材的内容包围盒收紧，缓存在 localStorage。
 - 预览使用临时 scene（720×720、60fps），不写盘、不加载原参考视频/音频，也不影响 `?scene=...` 全片播放器和 `?edit=1` 饰品编辑器。
 - 列表来源：`model3.json` 的 `FileReferences.Motions / Expressions` 优先；没有声明时由只读接口
   `/__charaforge/list-assets` 扫描 `assets/models/**/Animation` 与 `Exp3`。接口契约、安全限制和临时 scene 细节见
@@ -216,7 +223,7 @@ pnpm --silent decoration:command --scene packages/scene/examples/accessory.scene
 pnpm bench demo:3 20                         # 帧率基准（参数：场景 秒数 [workers] [起始帧]），同时报告音画滞后
 pnpm bench scenes/deepseek-chan/scene.json 60    # 全片（带原音频）
 pnpm verify:video                            # 参考视频逐帧定位精度（与 ffmpeg 解码比对）
-pnpm test:viewer                             # 动作 / 表情查看器：列表接口、临时 scene、Playwright smoke
+pnpm test:viewer                             # 动作 / 表情 / 体型查看器：列表接口、临时 scene、缩放/适应、Playwright smoke
 pnpm test:editor                             # 编辑器 Playwright smoke（加载/时间线/AI 命令/多轨/保存/导出）
 pnpm test:editor-api                         # 本地编辑 HTTP 接口（上传/保存/命令/安全限制）
 pnpm editor:command --scene <scene.json> --input <commands.json> [--out <scene.json>]  # AI 编辑命令
@@ -244,7 +251,8 @@ pnpm dev
 > 编辑器默认打开后者。原场景保留，可随时对比或重新生成。
 
 - **场景编辑**：图层树、变换、透明度、裁切、滤镜、混合模式、相机、背景色、导入图片/音频、生成形状/渐变背景。
-- **动作编辑**：motion3 / exp3 片段、参数轨、部件不透明度、物理开关；动作库列出模型的 8 个动作和 23 个表情。
+- **动作编辑**：motion3 / exp3 片段、参数轨、部件不透明度、物理开关；动作库列出模型的 8 个动作、20 个表情和 3 个体型；
+  「设为体型」会替换当前图层上的旧体型（从入点持续到出点），不影响表情/动作片段。
 - **多轨时间线**：镜头标记、相机、全部图层、动作/表情片段、任意多条音频轨（音乐轨）；片段可拖动/裁剪，关键帧可拖动/多选/批量缓动。
 - **关键帧与插值**：linear / smooth / easeIn / easeOut / easeInOut / step / 自定义三次贝塞尔；一键动画（淡入、漂浮、脉冲、旋转、弹跳、闪烁、滑入、抖动、放大）。
 - **导出 MV（带音乐）**：编辑器按钮或 CLI，逐帧渲染 + 离线混音，输出 MP4（AVC/AAC）或 WebM（VP9/Opus）。
@@ -293,7 +301,7 @@ pnpm preview           # → http://localhost:4173/（默认编辑器）；播�
 ```
 
 - 页面：`index.html`（默认场景 / 动作编辑器）、`editor.html`（编辑器直接入口，内容同 index）、
-  `player.html`（独立播放器 / 参考视频对照）、`motions.html`（动作 / 表情素材查看器）、
+  `player.html`（独立播放器 / 参考视频对照）、`motions.html`（动作 / 表情 / 体型查看器）、
   `export.html`（逐帧视频导出页，`scripts/export-video.ts` 使用）、`harness.html`（Playwright 测试接口）。
 - 产物**不含**模型、参考视频、音频、场景文件和 Cubism Core，也不要把它们复制进去。页面按 URL 引用仓库里的原文件：
   `assets/…`（模型、视频、音频）、`vendor/cubism/core/…`（Core）、`scenes/…`、`packages/scene/examples/…`、`packages/scene/schema/…`。
@@ -309,7 +317,7 @@ pnpm preview           # → http://localhost:4173/（默认编辑器）；播�
   拒绝 `..` 穿越，支持 Range 请求（视频精确 seek 需要）。另外提供只读素材目录接口
   `/__charaforge/list-assets?dir=assets/models/.../Animation|Exp3`（见 [docs/motions.md](docs/motions.md)）。
   `pnpm dev` 和 `pnpm preview`（`vite preview`）用的是同一个中间件，所以 `pnpm preview` 就能完整播放全片，
-  调试模式、原视频对照、动作 / 表情查看器也都可用。
+  调试模式、原视频对照、动作 / 表情 / 体型查看器也都可用。
 - 打包代码放在 `dist/_app/`（不用 Vite 缺省的 `assets/`，否则会和白名单的 `/assets/` 抢同一个 URL 前缀）。
 - 不能用 `file://` 直接打开 `dist/index.html`（Worker、fetch、Range 请求都需要 HTTP），也不要换成别的静态服务器：
   那样要么拿不到 `/assets/`，要么就得把模型复制进可发布的目录。

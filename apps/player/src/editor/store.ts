@@ -30,15 +30,18 @@ import {
   EXP3_DIR,
   PREVIEW_MODEL_URI,
   assetUriFromDir,
+  bodyManifestUri,
   declaredAssetUri,
   declaredExpressionFiles,
   declaredMotionFiles,
   displayName,
   isExpressionFile,
   isMotionFile,
+  parseBodyManifest,
   parseExpressionInfo,
   parseMotionMeta,
   sortAssets,
+  splitBodyPresets,
   type AssetFileInfo,
   type AssetSource,
   type Catalog,
@@ -478,6 +481,7 @@ export class EditorStore implements EditorStoreApi {
       },
       addMotion: (uri, name) => store.addMotion(uri, name),
       addExpression: (uri) => store.addExpression(uri),
+      setBody: (uri) => store.setBody(uri),
       importImage: async (dataUri, opts) => {
         const res = await fetch(dataUri);
         if (!res.ok) throw new Error(`读取 data URI 失败：HTTP ${res.status}`);
@@ -1114,6 +1118,58 @@ export class EditorStore implements EditorStoreApi {
     if (result) this.notify(`已添加表情 ${basename(uri)}（起始帧 ${start}）`);
   }
 
+  /**
+   * 设置模型图层的体型：体型是基础 exp3，从图层入点持续到出点；
+   * 切换时移除该图层上已有的体型 clip，避免多个体型参数互相叠加。
+   */
+  async setBody(uri: string): Promise<void> {
+    const layer = this.selectedModelLayer() ?? this.firstModelLayer();
+    if (!layer) {
+      this.notify('场景里没有模型图层，无法设置体型', 'warn');
+      return;
+    }
+    if (this.state.selection.kind !== 'layer' || this.state.selection.id !== layer.id) {
+      this.select({ kind: 'layer', id: layer.id });
+    }
+    const bodyUris = new Set((this.state.catalog?.bodies ?? []).map((body) => body.uri));
+    const clips = layer.expressions ?? [];
+    const scene = this.state.scene;
+    const resolved = clips.map((clip) => ({
+      clip,
+      uri: scene?.assets.expressions?.find((item) => item.id === clip.expression)?.uri,
+    }));
+    // 如果旧场景里有无法解析的 expression 资产，保守处理：只删除旧体型，不重建整个列表。
+    const canRebuild = resolved.every((item) => typeof item.uri === 'string' && item.uri);
+    const commands: EditCommand[] = [];
+    if (canRebuild) {
+      // 从后往前删空，再按“体型 → 表情”的顺序重建，保证体型永远是基础层。
+      for (let i = clips.length - 1; i >= 0; i--) commands.push({ op: 'removeExpression', layer: layer.id, index: i });
+      commands.push({ op: 'addExpression', layer: layer.id, uri, start: layer.in, fadeIn: 0 });
+      for (const item of resolved) {
+        if (!item.uri || bodyUris.has(item.uri)) continue;
+        const clip = item.clip;
+        commands.push({
+          op: 'addExpression',
+          layer: layer.id,
+          uri: item.uri,
+          start: clip.start,
+          ...(clip.end !== undefined ? { end: clip.end } : {}),
+          ...(clip.fadeIn !== undefined ? { fadeIn: clip.fadeIn } : {}),
+          ...(clip.fadeOut !== undefined ? { fadeOut: clip.fadeOut } : {}),
+          ...(clip.weight !== undefined ? { weight: clip.weight } : {}),
+        });
+      }
+    } else {
+      for (let i = clips.length - 1; i >= 0; i--) {
+        const asset = scene?.assets.expressions?.find((item) => item.id === clips[i]!.expression);
+        if (asset && bodyUris.has(asset.uri)) commands.push({ op: 'removeExpression', layer: layer.id, index: i });
+      }
+      commands.push({ op: 'addExpression', layer: layer.id, uri, start: layer.in, fadeIn: 0 });
+    }
+    const result = await this.applyUi(commands, { label: `设置体型：${basename(uri)}` });
+    if (result) this.notify(`已设置体型 ${basename(uri)}（${layer.in}–${layer.out}）`);
+  }
+
   async addAnimationPreset(preset: AnimationPreset, layerId?: string, durationFrames = 90): Promise<void> {
     const layer =
       (layerId ? this.state.scene?.layers.find((item) => item.id === layerId) : null) ??
@@ -1275,19 +1331,33 @@ export class EditorStore implements EditorStoreApi {
         )
       ).filter((item): item is ExpressionAssetInfo => item !== null);
 
+      let manifest;
+      try {
+        const res = await fetch(asciiUrl(this.assetUrl(bodyManifestUri(modelUri))));
+        if (res.ok) manifest = parseBodyManifest((await res.json()) as unknown, modelUri);
+        else if (res.status !== 404) warnings.push(`体型 manifest 读取失败：HTTP ${res.status}`);
+      } catch (e) {
+        warnings.push(`体型 manifest 读取失败：${errorMessage(e)}`);
+      }
+
       sortAssets(motions);
       sortAssets(expressions);
+      const split = splitBodyPresets(expressions, manifest);
+      sortAssets(split.expressions);
+      sortAssets(split.bodies);
       const catalog: Catalog = {
         modelUri,
         motions,
-        expressions,
-        sources: { motions: motionSource, expressions: expressionSource },
+        expressions: split.expressions,
+        bodies: split.bodies,
+        ...(split.defaultBody ? { defaultBody: split.defaultBody } : {}),
+        sources: { motions: motionSource, expressions: expressionSource, bodies: expressionSource },
         warnings,
       };
       if (this.state.scene?.assets.models[0]?.uri !== modelUri) return;
       this.setState({
         catalog,
-        catalogError: !motions.length && !expressions.length && warnings.length ? warnings.join('\n') : null,
+        catalogError: !motions.length && !expressions.length && !split.bodies.length && warnings.length ? warnings.join('\n') : null,
       });
     } catch (e) {
       this.setState({ catalogError: errorMessage(e) });

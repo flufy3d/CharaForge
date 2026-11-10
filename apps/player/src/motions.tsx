@@ -18,7 +18,7 @@
  */
 import { asciiUrl } from '@charaforge/runtime';
 import type { Scene } from '@charaforge/scene';
-import { StrictMode, useEffect, useMemo, useRef, useState } from 'react';
+import { StrictMode, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { PlayerEngine, type EngineStatus } from './engine.ts';
 import {
@@ -30,27 +30,36 @@ import {
   THUMBNAIL_TILE,
   assetKey,
   assetUriFromDir,
+  bodyManifestUri,
   buildPreviewScene,
   buildThumbnailScene,
   catalogAssets,
+  clampNumber,
   declaredAssetUri,
   declaredExpressionFiles,
   declaredMotionFiles,
   displayName,
   fitTransform,
+  fitTransformToBounds,
   isExpressionFile,
   isMotionFile,
+  modelAssetDir,
+  modelNameFromUri,
+  parseBodyManifest,
   parseExpressionInfo,
   parseMotionMeta,
   previewDuration,
   sortAssets,
+  splitBodyPresets,
   type AssetFileInfo,
   type AssetKind,
   type AssetSource,
+  type BodyAssetInfo,
   type Catalog,
   type CatalogAsset,
   type ExpressionAssetInfo,
   type ExpressionInfo,
+  type FitTransform,
   type MotionAssetInfo,
   type MotionMeta,
 } from './motionCatalog.ts';
@@ -58,10 +67,33 @@ import { pageUrl, sha256Hex, timecode } from './util.ts';
 
 const params = new URLSearchParams(location.search);
 const LIST_ENDPOINT = '__charaforge/list-assets';
+/** ?model=... 可以查看 assets/models/ 下的任意模型；缺省仍是示例模型。 */
+const MODEL_URI = params.get('model')?.trim() || PREVIEW_MODEL_URI;
+const MODEL_NAME = params.get('modelName')?.trim() || modelNameFromUri(MODEL_URI);
+const MODEL_ANIMATION_DIR = modelAssetDir(MODEL_URI, 'Animation') || ANIMATION_DIR;
+const MODEL_EXP3_DIR = modelAssetDir(MODEL_URI, 'Exp3') || EXP3_DIR;
 
 type Phase = 'booting' | 'ready' | 'error';
 
+interface PreviewSelection {
+  motion: string | null;
+  expression: string | null;
+  body: string | null;
+}
+
+/** 预览取景：scale 是模型画布像素 → 合成像素；anchor 是缩放中心（模型画布像素）。 */
+interface PreviewViewport {
+  scale: number;
+  /** 自动适应时的 scale；缩放百分比相对它计算。 */
+  fitScale: number;
+  x: number;
+  y: number;
+  anchorX: number;
+  anchorY: number;
+}
+
 interface PreviewInfo {
+  /** 最后一次点击的素材（用于列表高亮和元数据面板）。 */
   kind: AssetKind;
   /** 文件名（含扩展名） */
   file: string;
@@ -72,8 +104,10 @@ interface PreviewInfo {
   fps: number;
   composition: { width: number; height: number };
   loop: boolean;
-  /** 表情预览是否叠加了 IDLE 动作 */
+  /** 当前预览是否叠加了动作（无动作时只显示体型/表情的静态状态）。 */
   withIdle: boolean;
+  /** 当前同时生效的体型 / 表情 / 动作。 */
+  selection: PreviewSelection;
   source: AssetSource;
   size: number;
   mtime: string;
@@ -94,10 +128,12 @@ interface ViewerState {
   catalog: Catalog | null;
   warnings: string[];
   selected: { kind: AssetKind; file: string } | null;
+  /** 当前同时生效的体型 / 表情 / 动作（三者互不覆盖）。 */
+  selection: PreviewSelection;
+  viewport: PreviewViewport | null;
   preview: PreviewInfo | null;
   loadingPreview: boolean;
   loop: boolean;
-  withIdle: boolean;
   /** kind:file → 160×160 PNG data URL；null = 尚未生成（生成中或失败） */
   thumbnails: Record<string, string> | null;
   status: EngineStatus | null;
@@ -111,11 +147,20 @@ interface MotionViewerApi {
   warnings: () => string[];
   preview: () => PreviewInfo | null;
   selected: () => { kind: AssetKind; file: string } | null;
+  selection: () => PreviewSelection;
   select: (kind: AssetKind, file: string) => Promise<void>;
+  setSelection: (patch: Partial<PreviewSelection>) => Promise<void>;
+  setBody: (file: string | null) => Promise<void>;
+  setExpression: (file: string | null) => Promise<void>;
+  setMotion: (file: string | null) => Promise<void>;
   seekAndRender: (frame: number) => Promise<void>;
   hashFrame: () => Promise<string>;
   thumbnails: () => Record<string, string> | null;
   status: () => EngineStatus | null;
+  viewport: () => PreviewViewport | null;
+  fit: () => Promise<void>;
+  zoomBy: (factor: number) => void;
+  panBy: (dx: number, dy: number) => void;
   setLoop: (loop: boolean) => Promise<void>;
   setWithIdle: (withIdle: boolean) => Promise<void>;
 }
@@ -135,10 +180,11 @@ let view: ViewerState = {
   catalog: null,
   warnings: [],
   selected: null,
+  selection: { motion: null, expression: null, body: null },
+  viewport: null,
   preview: null,
   loadingPreview: false,
   loop: false,
-  withIdle: true,
   thumbnails: null,
   status: null,
 };
@@ -202,7 +248,7 @@ function rawFromDirectory(dir: string, f: AssetFileInfo): RawAsset {
 }
 
 function rawFromDeclared(file: string, declaredName?: string): RawAsset {
-  const uri = declaredAssetUri(PREVIEW_MODEL_URI, file);
+  const uri = declaredAssetUri(MODEL_URI, file);
   const slash = uri.lastIndexOf('/');
   const name = slash >= 0 ? uri.slice(slash + 1) : uri;
   return {
@@ -236,6 +282,14 @@ async function fetchJson(url: string): Promise<unknown> {
   return (await res.json()) as unknown;
 }
 
+/** 可选文件：404 视为没有，其他错误继续抛给调用方记 warning。 */
+async function fetchOptionalJson(url: string): Promise<unknown | undefined> {
+  const res = await fetch(asciiUrl(url));
+  if (res.status === 404) return undefined;
+  if (!res.ok) throw new Error(`加载失败 ${res.status}：${url}`);
+  return (await res.json()) as unknown;
+}
+
 async function listDirectory(dir: string): Promise<AssetFileInfo[]> {
   const u = new URL(pageUrl(LIST_ENDPOINT));
   u.searchParams.set('dir', dir);
@@ -260,7 +314,7 @@ async function loadCatalog(onStage: (stage: string) => void): Promise<Catalog> {
   onStage('读取 model3.json（检查是否声明 Motions / Expressions）');
   let model3: unknown = null;
   try {
-    model3 = await fetchJson(assetUrl(PREVIEW_MODEL_URI));
+    model3 = await fetchJson(assetUrl(MODEL_URI));
   } catch (e) {
     warnings.push(`model3.json 读取失败，将只依赖目录列表：${errorMessage(e)}`);
   }
@@ -275,8 +329,8 @@ async function loadCatalog(onStage: (stage: string) => void): Promise<Catalog> {
     rawMotions = dedupeRaw(declaredMotions.map((file) => rawFromDeclared(file)));
   } else {
     try {
-      const files = (await listDirectory(ANIMATION_DIR)).filter((f) => isMotionFile(f.name));
-      rawMotions = files.map((f) => rawFromDirectory(ANIMATION_DIR, f));
+      const files = (await listDirectory(MODEL_ANIMATION_DIR)).filter((f) => isMotionFile(f.name));
+      rawMotions = files.map((f) => rawFromDirectory(MODEL_ANIMATION_DIR, f));
     } catch (e) {
       warnings.push(`动作目录读取失败：${errorMessage(e)}`);
       rawMotions = [];
@@ -288,8 +342,8 @@ async function loadCatalog(onStage: (stage: string) => void): Promise<Catalog> {
     rawExpressions = dedupeRaw(declaredExpressions.map((e) => rawFromDeclared(e.file, e.name)));
   } else {
     try {
-      const files = (await listDirectory(EXP3_DIR)).filter((f) => isExpressionFile(f.name));
-      rawExpressions = files.map((f) => rawFromDirectory(EXP3_DIR, f));
+      const files = (await listDirectory(MODEL_EXP3_DIR)).filter((f) => isExpressionFile(f.name));
+      rawExpressions = files.map((f) => rawFromDirectory(MODEL_EXP3_DIR, f));
     } catch (e) {
       warnings.push(`表情目录读取失败：${errorMessage(e)}`);
       rawExpressions = [];
@@ -356,22 +410,44 @@ async function loadCatalog(onStage: (stage: string) => void): Promise<Catalog> {
     )
   ).filter((x): x is ExpressionAssetInfo => x !== null);
 
+  // 可选的体型 manifest：显式列出哪些 exp3 是体型，并指定默认体型。
+  // 没有 manifest 时由 splitBodyPresets 根据名称/参数推断。
+  let manifest;
+  try {
+    const rawManifest = await fetchOptionalJson(assetUrl(bodyManifestUri(MODEL_URI)));
+    if (rawManifest !== undefined) manifest = parseBodyManifest(rawManifest, MODEL_URI);
+  } catch (e) {
+    warnings.push(`体型 manifest 读取失败，将按名称/参数推断：${errorMessage(e)}`);
+  }
+
   sortAssets(motions);
   sortAssets(expressions);
+  const split = splitBodyPresets(expressions, manifest);
+  sortAssets(split.expressions);
+  sortAssets(split.bodies);
+  if (manifest) {
+    const known = new Set(expressions.map((asset) => asset.uri));
+    for (const item of manifest.bodies) {
+      if (!known.has(item.uri)) warnings.push(`体型 manifest 引用了不存在或未解析成功的表情：${item.uri}`);
+    }
+  }
   if (!motions.length && !expressions.length && warnings.length) throw new Error(warnings.join('\n'));
   return {
-    modelUri: PREVIEW_MODEL_URI,
+    modelUri: MODEL_URI,
+    modelName: MODEL_NAME,
     motions,
-    expressions,
-    sources: { motions: motionSource, expressions: expressionSource },
+    expressions: split.expressions,
+    bodies: split.bodies,
+    ...(split.defaultBody ? { defaultBody: split.defaultBody } : {}),
+    sources: { motions: motionSource, expressions: expressionSource, bodies: expressionSource },
     warnings,
   };
 }
 
-const THUMBNAIL_CACHE_KEY = 'charaforge.motion-thumbs.v1';
+const THUMBNAIL_CACHE_KEY = 'charaforge.motion-thumbs.v2';
 
 function thumbnailCacheKey(cat: Catalog): string {
-  const files = [...cat.motions, ...cat.expressions].map((a) => `${a.kind}:${a.file}:${a.size}:${a.mtime}`);
+  const files = catalogAssets(cat).map((a) => `${a.kind}:${a.file}:${a.size}:${a.mtime}`);
   return [cat.modelUri, ...files].join('|');
 }
 
@@ -414,18 +490,34 @@ async function generateThumbnails(eng: PlayerEngine, cat: Catalog, onStage: (sta
   if (!first || first.kind !== 'model') throw new Error('缩略图 scene 没有模型图层');
   const canvas = eng.runtime.layerInstance(first.id)?.canvas;
   if (!canvas) throw new Error('缩略图 scene 没有模型实例');
-  const scale = Math.min(THUMBNAIL_TILE / canvas.width, THUMBNAIL_TILE / canvas.height) * 0.86;
-  assets.forEach((_, i) => {
+  const fitTile = (i: number, scale: number, anchorX?: number, anchorY?: number) => {
     const col = i % THUMBNAIL_COLUMNS;
     const row = Math.floor(i / THUMBNAIL_COLUMNS);
     const layer = scene.layers[i]!;
-    (layer as unknown as { transform: { x: number; y: number; scale: number } }).transform = {
+    (layer as unknown as { transform: FitTransform }).transform = {
       x: col * THUMBNAIL_TILE + THUMBNAIL_TILE / 2,
       y: row * THUMBNAIL_TILE + THUMBNAIL_TILE / 2,
       scale,
+      ...(anchorX !== undefined ? { anchorX } : {}),
+      ...(anchorY !== undefined ? { anchorY } : {}),
     };
+  };
+  const fullScale = Math.min(THUMBNAIL_TILE / canvas.width, THUMBNAIL_TILE / canvas.height) * 0.86;
+  assets.forEach((_, i) => fitTile(i, fullScale));
+  eng.redraw();
+  await eng.runtime.renderFrameAsync(0);
+
+  // 先按整张画布渲染一次（让每个图层的体型/表情生效），再按各自内容包围盒收紧到 tile。
+  assets.forEach((_, i) => {
+    const inst = eng.runtime.layerInstance(scene.layers[i]!.id);
+    const bounds = inst?.contentBounds();
+    if (!bounds) return;
+    const bw = bounds.x1 - bounds.x0;
+    const bh = bounds.y1 - bounds.y0;
+    if (!(bw > 0 && bh > 0)) return;
+    const scale = Math.min(THUMBNAIL_TILE / bw, THUMBNAIL_TILE / bh) * 0.86;
+    fitTile(i, scale, (bounds.x0 + bounds.x1) / 2, (bounds.y0 + bounds.y1) / 2);
   });
-  eng.runtime.invalidate();
   eng.redraw();
   await eng.runtime.renderFrameAsync(0);
   const px = eng.runtime.readPixels();
@@ -451,21 +543,37 @@ async function generateThumbnails(eng: PlayerEngine, cat: Catalog, onStage: (sta
   return images;
 }
 
-function updateUrl(kind: AssetKind, file: string, loop: boolean, withIdle: boolean): void {
+function updateUrl(selection: PreviewSelection, selected: { kind: AssetKind; file: string } | null, loop: boolean): void {
   const q = new URLSearchParams(location.search);
-  q.set('kind', kind);
-  q.set('name', file);
+  // kind/name 保留为“最后一次点击”，方便深链直接打开某个素材；三个槽位则各自独立。
+  if (selected) {
+    q.set('kind', selected.kind);
+    q.set('name', selected.file);
+  } else {
+    q.delete('kind');
+    q.delete('name');
+  }
+  if (selection.body) q.set('body', selection.body);
+  else q.delete('body');
+  if (selection.expression) q.set('expression', selection.expression);
+  else q.delete('expression');
+  if (selection.motion) q.set('motion', selection.motion);
+  else q.set('motion', '0');
   q.delete('frame');
-  if (kind === 'motion' && !loop) q.set('loop', '0');
+  q.delete('idle');
+  if (!loop) q.set('loop', '0');
   else q.delete('loop');
-  if (kind === 'expression' && !withIdle) q.set('idle', '0');
-  else q.delete('idle');
   const search = q.toString();
   history.replaceState(null, '', `${location.pathname}${search ? `?${search}` : ''}${location.hash}`);
 }
 
-function findAsset(cat: Catalog, kind: AssetKind, file: string | null): MotionAssetInfo | ExpressionAssetInfo | undefined {
-  const list: (MotionAssetInfo | ExpressionAssetInfo)[] = kind === 'motion' ? cat.motions : cat.expressions;
+function findAsset(
+  cat: Catalog,
+  kind: AssetKind,
+  file: string | null,
+): MotionAssetInfo | ExpressionAssetInfo | BodyAssetInfo | undefined {
+  const list =
+    kind === 'motion' ? cat.motions : kind === 'expression' ? cat.expressions : cat.bodies;
   return file ? list.find((a) => a.file === file) : undefined;
 }
 
@@ -510,11 +618,12 @@ function onEngineStatus(s: EngineStatus): void {
   }
   const preview = view.preview;
   const atEnd = !!preview && s.frame >= preview.duration - 1;
-  if (view.loop && preview?.kind === 'motion' && lastPlaying && !s.playing && atEnd && !replaying) {
+  const hasMotion = !!view.selection.motion;
+  if (view.loop && hasMotion && lastPlaying && !s.playing && atEnd && !replaying) {
     replaying = true;
     setTimeout(() => {
       replaying = false;
-      if (view.loop && view.preview?.kind === 'motion' && engine && !engine.clock.playing) {
+      if (view.loop && view.selection.motion && engine && !engine.clock.playing) {
         engine.play().catch((e) => console.warn('[motions] 自动重播失败', e));
       }
     }, 30);
@@ -522,18 +631,79 @@ function onEngineStatus(s: EngineStatus): void {
   lastPlaying = s.playing;
 }
 
-async function selectAsset(
-  kind: AssetKind,
-  file: string,
-  opts: { loop?: boolean; frame?: number; preserveFrame?: boolean; withIdle?: boolean } = {},
-): Promise<void> {
+/** 按模型“实际内容”取景；没有可见 drawable 时退回整张画布。 */
+function fitViewport(scene: Scene, eng: PlayerEngine, margin = 0.92): PreviewViewport {
+  const inst = eng.runtime.layerInstance('model');
+  if (!inst) throw new Error('预览 scene 没有模型实例');
+  const W = scene.composition.width;
+  const H = scene.composition.height;
+  const bounds = inst.contentBounds();
+  if (bounds) {
+    const fit = fitTransformToBounds(bounds, W, H, margin);
+    return {
+      scale: fit.scale,
+      fitScale: fit.scale,
+      x: fit.x,
+      y: fit.y,
+      anchorX: fit.anchorX ?? inst.canvas.width / 2,
+      anchorY: fit.anchorY ?? inst.canvas.height / 2,
+    };
+  }
+  const fit = fitTransform(inst.canvas, W, H, 0.96);
+  return {
+    scale: fit.scale,
+    fitScale: fit.scale,
+    x: fit.x,
+    y: fit.y,
+    anchorX: inst.canvas.width / 2,
+    anchorY: inst.canvas.height / 2,
+  };
+}
+
+/** 把预览取景写入模型图层的 transform（只影响查看器，不写盘）。 */
+function applyViewport(scene: Scene, vp: PreviewViewport): void {
+  const layer = scene.layers.find((item) => item.kind === 'model');
+  if (!layer) return;
+  (layer as unknown as { transform: FitTransform }).transform = {
+    x: vp.x,
+    y: vp.y,
+    scale: vp.scale,
+    anchorX: vp.anchorX,
+    anchorY: vp.anchorY,
+  };
+}
+
+interface ReloadOptions {
+  selection?: Partial<PreviewSelection>;
+  /** 最后一次点击的素材；不传则保留当前选择。 */
+  selected?: { kind: AssetKind; file: string } | null;
+  loop?: boolean;
+  frame?: number;
+  preserveFrame?: boolean;
+  /** true = 重新按内容取景；false = 保留当前视角。缺省在体型变化或首次加载时重新取景。 */
+  fit?: boolean;
+}
+
+async function reloadPreview(opts: ReloadOptions = {}): Promise<void> {
   const run = async (): Promise<void> => {
     const cat = view.catalog;
     const eng = engine;
     if (!cat || !eng) throw new Error('查看器尚未就绪');
-    const entry = findAsset(cat, kind, file);
-    if (!entry) throw new Error(`没有找到${kind === 'motion' ? '动作' : '表情'}：${file}`);
+    const previous = view.selection;
+    const selection: PreviewSelection = {
+      motion: opts.selection && 'motion' in opts.selection ? opts.selection.motion ?? null : previous.motion,
+      expression: opts.selection && 'expression' in opts.selection ? opts.selection.expression ?? null : previous.expression,
+      body: opts.selection && 'body' in opts.selection ? opts.selection.body ?? null : previous.body,
+    };
+    const motionEntry = selection.motion ? cat.motions.find((item) => item.file === selection.motion) : undefined;
+    const bodyEntry = selection.body ? cat.bodies.find((item) => item.file === selection.body) : undefined;
+    const expressionEntry = selection.expression ? cat.expressions.find((item) => item.file === selection.expression) : undefined;
+    if (selection.motion && !motionEntry) throw new Error(`没有找到动作：${selection.motion}`);
+    if (selection.body && !bodyEntry) throw new Error(`没有找到体型：${selection.body}`);
+    if (selection.expression && !expressionEntry) throw new Error(`没有找到表情：${selection.expression}`);
 
+    const bodyChanged = selection.body !== previous.body;
+    const motionChanged = selection.motion !== previous.motion;
     const currentFrame = eng.scene ? eng.frame : 0;
     const resume = opts.preserveFrame ? currentFrame : Math.max(0, Math.floor(opts.frame ?? 0));
     const wasPlaying = !!eng.clock?.playing;
@@ -542,55 +712,51 @@ async function selectAsset(
       eng.stop();
     }
 
-    const same = view.selected?.kind === kind && view.selected.file === file && view.preview?.kind === 'motion';
-    const sameAsset = view.selected?.kind === kind && view.selected.file === file;
-    const defaultLoop = kind === 'motion' ? (entry as MotionAssetInfo).meta.loop : false;
-    const loop = kind === 'motion' ? (opts.loop ?? (same ? view.loop : defaultLoop)) : false;
-    const idleEntry = cat.motions.find((m) => m.file === 'IDLE.motion3.json');
-    const withIdleWanted = kind === 'expression' ? (opts.withIdle ?? (sameAsset ? view.withIdle : true)) : false;
-    const withIdle = withIdleWanted && !!idleEntry;
-
-    setView({ loadingPreview: true, error: null, loop, withIdle, status: null, stage: '构造临时预览场景' });
+    const loop = opts.loop ?? (motionChanged ? (motionEntry?.meta.loop ?? false) : view.loop);
+    setView({ loadingPreview: true, error: null, loop, status: null, stage: '构造临时预览场景' });
     const sceneInput = buildPreviewScene({
-      kind,
-      file: entry.file,
-      uri: entry.uri,
-      motionMeta: kind === 'motion' ? (entry as MotionAssetInfo).meta : undefined,
+      modelUri: cat.modelUri,
+      modelName: cat.modelName,
+      motion: motionEntry ? { file: motionEntry.file, uri: motionEntry.uri, meta: motionEntry.meta } : undefined,
+      body: bodyEntry ? { file: bodyEntry.file, uri: bodyEntry.uri } : undefined,
+      expression: expressionEntry ? { file: expressionEntry.file, uri: expressionEntry.uri } : undefined,
       loop,
-      idleMotionUri: withIdle && idleEntry ? idleEntry.uri : undefined,
     });
     const scene: Scene = await eng.load(sceneInput, (stage) => setView({ stage }));
-    const canvas = eng.runtime.layerInstance('model')?.canvas;
-    if (canvas) {
-      const t = fitTransform(canvas, scene.composition.width, scene.composition.height);
-      (scene.layers[0] as unknown as { transform: typeof t }).transform = t;
-      eng.runtime.invalidate();
-      eng.redraw();
-    }
-
-    const preview: PreviewInfo = {
-      kind,
-      file: entry.file,
-      name: entry.name,
-      uri: entry.uri,
-      duration: previewDuration(kind, kind === 'motion' ? (entry as MotionAssetInfo).meta : undefined),
-      fps: PREVIEW_FPS,
-      composition: { width: scene.composition.width, height: scene.composition.height },
-      loop,
-      withIdle,
-      source: entry.source,
-      size: entry.size,
-      mtime: entry.mtime,
-      meta: kind === 'motion' ? (entry as MotionAssetInfo).meta : undefined,
-      info: kind === 'expression' ? (entry as ExpressionAssetInfo).info : undefined,
-    };
-    setView({ selected: { kind, file: entry.file }, preview, loadingPreview: false, stage: '预览就绪' });
 
     // rAF 循环要先跑起来，seekAndRender 才能等到新帧上屏。
     eng.start();
     await seekAndRender(resume);
+
+    const shouldFit = opts.fit ?? (bodyChanged || !view.viewport);
+    const viewport = shouldFit ? fitViewport(scene, eng) : view.viewport!;
+    applyViewport(scene, viewport);
+    eng.redraw();
+    await seekAndRender(resume);
+
+    const selected = opts.selected === undefined ? view.selected : opts.selected;
+    const entry = selected ? findAsset(cat, selected.kind, selected.file) : undefined;
+    const preview: PreviewInfo = {
+      kind: selected?.kind ?? motionEntry?.kind ?? 'motion',
+      file: entry?.file ?? motionEntry?.file ?? '',
+      name: entry?.name ?? motionEntry?.name ?? '',
+      uri: entry?.uri ?? motionEntry?.uri ?? '',
+      duration: previewDuration(motionEntry ? 'motion' : 'expression', motionEntry?.meta),
+      fps: PREVIEW_FPS,
+      composition: { width: scene.composition.width, height: scene.composition.height },
+      loop,
+      withIdle: !!motionEntry,
+      selection,
+      source: entry?.source ?? motionEntry?.source ?? 'directory',
+      size: entry?.size ?? 0,
+      mtime: entry?.mtime ?? '',
+      ...(selected?.kind === 'motion' && entry ? { meta: (entry as MotionAssetInfo).meta } : {}),
+      ...(selected?.kind === 'expression' && entry ? { info: (entry as ExpressionAssetInfo).info } : {}),
+      ...(selected?.kind === 'body' && entry ? { info: (entry as BodyAssetInfo).info } : {}),
+    };
+    setView({ selection, viewport, selected: selected ?? null, preview, loadingPreview: false, stage: '预览就绪' });
     if (wasPlaying) await eng.play();
-    updateUrl(kind, entry.file, loop, withIdle);
+    updateUrl(selection, selected ?? null, loop);
   };
 
   const next = selectQueue.then(run, run);
@@ -598,18 +764,92 @@ async function selectAsset(
   return next;
 }
 
+/** 点击左侧素材：只改对应槽位，体型 / 表情 / 动作互不覆盖。 */
+async function selectAsset(
+  kind: AssetKind,
+  file: string,
+  opts: { loop?: boolean; frame?: number; preserveFrame?: boolean } = {},
+): Promise<void> {
+  const cat = view.catalog;
+  if (!cat) throw new Error('查看器尚未就绪');
+  const entry = findAsset(cat, kind, file);
+  if (!entry) throw new Error(`没有找到${kind === 'motion' ? '动作' : kind === 'body' ? '体型' : '表情'}：${file}`);
+  const patch: Partial<PreviewSelection> =
+    kind === 'motion' ? { motion: file } : kind === 'body' ? { body: file } : { expression: file };
+  return reloadPreview({
+    selection: patch,
+    selected: { kind, file },
+    ...(opts.loop !== undefined ? { loop: opts.loop } : {}),
+    ...(opts.frame !== undefined ? { frame: opts.frame } : {}),
+    ...(opts.preserveFrame ? { preserveFrame: true } : {}),
+  });
+}
+
+async function setSelection(patch: Partial<PreviewSelection>): Promise<void> {
+  return reloadPreview({ selection: patch, selected: view.selected });
+}
+
 function setLoop(loop: boolean): Promise<void> {
-  const p = view.preview;
-  const selected = view.selected;
-  if (!p || p.kind !== 'motion' || !selected) return Promise.resolve();
-  return selectAsset('motion', selected.file, { loop, preserveFrame: true });
+  if (!view.selection.motion) return Promise.resolve();
+  return reloadPreview({ loop, preserveFrame: true });
 }
 
 function setWithIdle(withIdle: boolean): Promise<void> {
-  const p = view.preview;
-  const selected = view.selected;
-  if (!p || p.kind !== 'expression' || !selected) return Promise.resolve();
-  return selectAsset('expression', selected.file, { withIdle, preserveFrame: true });
+  const cat = view.catalog;
+  if (!cat) return Promise.resolve();
+  if (withIdle) {
+    const idle = cat.motions.find((item) => item.file === 'IDLE.motion3.json') ?? cat.motions[0];
+    return reloadPreview({ selection: { motion: idle?.file ?? null }, preserveFrame: true });
+  }
+  return reloadPreview({ selection: { motion: null }, preserveFrame: true });
+}
+
+/** 在当前帧按模型内容重新取景（“适应”按钮 / 双击画面）。 */
+async function fitNow(): Promise<void> {
+  const eng = engine;
+  const scene = eng?.scene;
+  if (!eng || !scene) return;
+  const viewport = fitViewport(scene, eng);
+  applyViewport(scene, viewport);
+  eng.redraw();
+  setView({ viewport });
+  await seekAndRender(eng.frame);
+}
+
+/** 以合成画面中的某个点为锚缩放；point 缺省为画面中心。 */
+function zoomBy(factor: number, point?: { x: number; y: number }): void {
+  const eng = engine;
+  const scene = eng?.scene;
+  const vp = view.viewport;
+  if (!eng || !scene || !vp) return;
+  const W = scene.composition.width;
+  const H = scene.composition.height;
+  const px = point?.x ?? W / 2;
+  const py = point?.y ?? H / 2;
+  const minScale = vp.fitScale * 0.1;
+  const maxScale = vp.fitScale * 20;
+  const scale = clampNumber(vp.scale * factor, minScale, maxScale);
+  const k = scale / vp.scale;
+  const next: PreviewViewport = {
+    ...vp,
+    scale,
+    x: px - (px - vp.x) * k,
+    y: py - (py - vp.y) * k,
+  };
+  applyViewport(scene, next);
+  eng.redraw();
+  setView({ viewport: next });
+}
+
+function panBy(dx: number, dy: number): void {
+  const eng = engine;
+  const scene = eng?.scene;
+  const vp = view.viewport;
+  if (!eng || !scene || !vp) return;
+  const next: PreviewViewport = { ...vp, x: vp.x + dx, y: vp.y + dy };
+  applyViewport(scene, next);
+  eng.redraw();
+  setView({ viewport: next });
 }
 
 /** 当前合成结果的像素摘要（测试/后续代理用，不依赖 canvas 截图）。 */
@@ -627,11 +867,20 @@ const viewer: MotionViewerApi = {
   warnings: () => view.warnings,
   preview: () => view.preview,
   selected: () => view.selected,
+  selection: () => view.selection,
   select: (kind, file) => selectAsset(kind, file),
+  setSelection,
+  setBody: (file) => (file ? selectAsset('body', file) : setSelection({ body: null })),
+  setExpression: (file) => (file ? selectAsset('expression', file) : setSelection({ expression: null })),
+  setMotion: (file) => (file ? selectAsset('motion', file) : setSelection({ motion: null })),
   seekAndRender,
   hashFrame,
   thumbnails: () => view.thumbnails,
   status: () => view.status,
+  viewport: () => view.viewport,
+  fit: fitNow,
+  zoomBy,
+  panBy,
   setLoop,
   setWithIdle,
 };
@@ -652,8 +901,9 @@ async function boot(canvas: HTMLCanvasElement): Promise<void> {
     await eng.init(canvas, 0);
     eng.onStatus = onEngineStatus;
 
-    if (!cachedThumbnails && (cat.motions.length || cat.expressions.length)) {
-      setView({ stage: `生成素材缩略图（${cat.motions.length + cat.expressions.length} 个）` });
+    const allAssets = catalogAssets(cat);
+    if (!cachedThumbnails && allAssets.length) {
+      setView({ stage: `生成素材缩略图（${allAssets.length} 个）` });
       try {
         const images = await generateThumbnails(eng, cat, (stage) => setView({ stage }));
         setView({ thumbnails: images });
@@ -663,22 +913,45 @@ async function boot(canvas: HTMLCanvasElement): Promise<void> {
       }
     }
 
-    const requestedKind: AssetKind = params.get('kind') === 'expression' ? 'expression' : 'motion';
-    const requested = params.get('name') ? findAsset(cat, requestedKind, params.get('name')) : undefined;
-    // 缺省预览 IDLE；没有 IDLE 时用排序后的第一个动作。kind=expression 时缺省第一个表情。
-    const fallback =
-      requestedKind === 'expression'
-        ? cat.expressions[0]
-        : cat.motions.find((a) => a.file === 'IDLE.motion3.json') ?? cat.motions[0];
-    const entry = requested ?? fallback ?? cat.motions[0] ?? cat.expressions[0];
-    if (entry) {
+    const kindParam = params.get('kind');
+    const requestedKind: AssetKind = kindParam === 'expression' || kindParam === 'body' ? kindParam : 'motion';
+    const nameParam = params.get('name');
+    const requested = nameParam
+      ? findAsset(cat, requestedKind, nameParam) ??
+        findAsset(cat, 'body', nameParam) ??
+        findAsset(cat, 'expression', nameParam) ??
+        findAsset(cat, 'motion', nameParam)
+      : undefined;
+    const idleEntry = cat.motions.find((a) => a.file === 'IDLE.motion3.json') ?? cat.motions[0];
+
+    const motionParam = params.get('motion');
+    const idleOff = params.get('idle') === '0';
+    let motionFile: string | null =
+      motionParam === '0' || idleOff ? null : motionParam ? findAsset(cat, 'motion', motionParam)?.file ?? null : idleEntry?.file ?? null;
+    let bodyFile: string | null = params.get('body')
+      ? findAsset(cat, 'body', params.get('body'))?.file ?? null
+      : cat.defaultBody ?? cat.bodies[0]?.file ?? null;
+    let expressionFile: string | null = params.get('expression')
+      ? findAsset(cat, 'expression', params.get('expression'))?.file ?? null
+      : null;
+
+    // kind/name 深链：显式槽位参数优先；只有对应槽位没写时才用 kind/name 的兼容入口。
+    if (requested) {
+      if (requested.kind === 'motion' && !params.has('motion')) motionFile = requested.file;
+      else if (requested.kind === 'body' && !params.has('body')) bodyFile = requested.file;
+      else if (requested.kind === 'expression' && !params.has('expression')) expressionFile = requested.file;
+    }
+    const selection: PreviewSelection = { motion: motionFile, expression: expressionFile, body: bodyFile };
+    const selected = requested ?? (motionFile ? { kind: 'motion' as const, file: motionFile } : bodyFile ? { kind: 'body' as const, file: bodyFile } : null);
+    if (catalogAssets(cat).length) {
       const frameParam = params.has('frame') ? Number(params.get('frame')) : 0;
       const loopParam = params.get('loop') === '0' ? false : undefined;
-      const idleParam = params.get('idle') === '0' ? false : undefined;
-      await selectAsset(entry.kind, entry.file, {
+      await reloadPreview({
+        selection,
+        selected,
         frame: Number.isFinite(frameParam) ? frameParam : 0,
-        loop: entry.kind === 'motion' ? loopParam : undefined,
-        withIdle: entry.kind === 'expression' ? idleParam : undefined,
+        ...(loopParam !== undefined ? { loop: loopParam } : {}),
+        fit: true,
       });
     }
     setView({ phase: 'ready', stage: '就绪' });
@@ -709,25 +982,31 @@ function hardBadge(label: string) {
   return <span className="tag">{label}</span>;
 }
 
+function assetKindLabel(kind: AssetKind, short = false): string {
+  if (kind === 'motion') return short ? '动' : '动作';
+  if (kind === 'body') return short ? '体' : '体型';
+  return short ? '表' : '表情';
+}
+
 function AssetList(props: {
   kind: AssetKind;
-  assets: (MotionAssetInfo | ExpressionAssetInfo)[];
-  selected: ViewerState['selected'];
+  assets: CatalogAsset[];
+  activeFile: string | null;
   thumbnails: Record<string, string> | null;
   onSelect: (kind: AssetKind, file: string) => void;
 }) {
-  const { kind, assets, selected, thumbnails, onSelect } = props;
-  if (!assets.length) return <div className="empty small muted">没有可用的{kind === 'motion' ? '动作' : '表情'}素材。</div>;
+  const { kind, assets, activeFile, thumbnails, onSelect } = props;
+  if (!assets.length) return <div className="empty small muted">没有可用的{assetKindLabel(kind)}素材。</div>;
   return (
     <div className="asset-list">
       {assets.map((a) => {
-        const active = selected?.kind === kind && selected.file === a.file;
+        const active = activeFile === a.file;
         const thumb = thumbnails?.[assetKey(a)];
         return (
           <button
             key={a.file}
             type="button"
-            className={`asset-item${active ? ' active' : ''}`}
+            className={`asset-item${active ? ' active' : ''}${kind === 'body' ? ' body-item' : ''}`}
             data-kind={kind}
             data-asset={a.file}
             onClick={() => onSelect(kind, a.file)}
@@ -738,7 +1017,7 @@ function AssetList(props: {
                 <img src={thumb} alt="" loading="lazy" />
               ) : (
                 <span className="thumb-fallback" aria-hidden="true">
-                  {kind === 'motion' ? '动' : '表'}
+                  {assetKindLabel(kind, true)}
                 </span>
               )}
             </span>
@@ -796,7 +1075,9 @@ function Gallery(props: {
                 </span>
                 <span className="gallery-name">{a.name}</span>
                 <span className="gallery-meta">
-                  {a.kind === 'motion' ? `动作 · ${a.meta.duration.toFixed(2)}s` : `表情 · ${a.info.parameters.length} 参数`}
+                  {a.kind === 'motion'
+                    ? `动作 · ${a.meta.duration.toFixed(2)}s`
+                    : `${assetKindLabel(a.kind)} · ${a.info.parameters.length} 参数`}
                 </span>
               </button>
             );
@@ -810,18 +1091,32 @@ function Gallery(props: {
 function MetaPanel(props: { preview: PreviewInfo }) {
   const { preview } = props;
   const motion = preview.kind === 'motion';
+  const body = preview.kind === 'body';
   const bytes = (n: number) => (n > 0 ? `${n.toLocaleString()} B` : '—');
+  const kindLabel = motion ? 'motion3 动作' : body ? 'exp3 体型（基础层）' : 'exp3 表情';
   return (
     <div className="meta-panel">
       <div className="meta-head">
         <strong>{preview.name}</strong>
         {motion && hardBadge(preview.loop ? 'loop' : 'once')}
+        {body && hardBadge('体型基础层')}
         {hardBadge(preview.source === 'declared' ? 'model3 声明' : '目录扫描')}
+      </div>
+      <div className="combo-summary">
+        <span>
+          <em>体型</em> {preview.selection.body ?? '默认'}
+        </span>
+        <span>
+          <em>表情</em> {preview.selection.expression ?? '无'}
+        </span>
+        <span>
+          <em>动作</em> {preview.selection.motion ?? '无'}
+        </span>
       </div>
       <dl className="meta-grid">
         <div>
           <dt>类型</dt>
-          <dd>{motion ? 'motion3 动作' : 'exp3 表情'}</dd>
+          <dd>{kindLabel}</dd>
         </div>
         <div>
           <dt>{motion ? '时长' : '预览时长'}</dt>
@@ -863,7 +1158,7 @@ function MetaPanel(props: { preview: PreviewInfo }) {
               <dd>{[...new Set(preview.info!.parameters.map((p) => p.blend))].join(' / ') || '—'}</dd>
             </div>
             <div>
-              <dt>叠加 IDLE</dt>
+              <dt>叠加动作</dt>
               <dd>{preview.withIdle ? '是' : '否'}</dd>
             </div>
           </>
@@ -901,12 +1196,21 @@ function MetaPanel(props: { preview: PreviewInfo }) {
           </tbody>
         </table>
       )}
+      {body && (
+        <div className="small muted">
+          体型是 exp3 基础参数层，会与表情、动作同时生效。当前实现按“内容包围盒”自动取景，因此换小体型后角色仍会占满预览；
+          也可以滚轮缩放、拖动平移。
+        </div>
+      )}
     </div>
   );
 }
 
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasBoxRef = useRef<HTMLDivElement>(null);
+  const panRef = useRef<{ pointerId: number; lastX: number; lastY: number } | null>(null);
+  const [panning, setPanning] = useState(false);
   const s = useViewerState();
   const [tab, setTab] = useState<AssetKind>('motion');
   const [query, setQuery] = useState('');
@@ -915,6 +1219,73 @@ function App() {
   useEffect(() => {
     boot(canvasRef.current!);
   }, []);
+
+  // 滚轮缩放：用原生监听器才能 preventDefault，避免页面跟着滚动。
+  useEffect(() => {
+    const box = canvasBoxRef.current;
+    const canvas = canvasRef.current;
+    if (!box || !canvas) return;
+    const onWheel = (event: WheelEvent) => {
+      const scene = engine?.scene;
+      if (!scene || !view.viewport) return;
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) return;
+      const point = {
+        x: ((event.clientX - rect.left) / rect.width) * scene.composition.width,
+        y: ((event.clientY - rect.top) / rect.height) * scene.composition.height,
+      };
+      zoomBy(event.deltaY < 0 ? 1.12 : 1 / 1.12, point);
+    };
+    box.addEventListener('wheel', onWheel, { passive: false });
+    return () => box.removeEventListener('wheel', onWheel);
+  }, []);
+
+  function canvasPoint(event: { clientX: number; clientY: number }): { x: number; y: number } | null {
+    const scene = engine?.scene;
+    const canvas = canvasRef.current;
+    if (!scene || !canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return null;
+    return {
+      x: ((event.clientX - rect.left) / rect.width) * scene.composition.width,
+      y: ((event.clientY - rect.top) / rect.height) * scene.composition.height,
+    };
+  }
+
+  function onCanvasPointerDown(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (loading || !view.viewport) return;
+    if (event.button !== 0 && event.button !== 1) return;
+    panRef.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY };
+    setPanning(true);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function onCanvasPointerMove(event: ReactPointerEvent<HTMLDivElement>): void {
+    const pan = panRef.current;
+    const point = canvasPoint(event);
+    const scene = engine?.scene;
+    if (!pan || !point || !scene) return;
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    const dx = ((event.clientX - pan.lastX) / rect.width) * scene.composition.width;
+    const dy = ((event.clientY - pan.lastY) / rect.height) * scene.composition.height;
+    pan.lastX = event.clientX;
+    pan.lastY = event.clientY;
+    panBy(dx, dy);
+  }
+
+  function endPan(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (!panRef.current) return;
+    panRef.current = null;
+    setPanning(false);
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      /* 指针已经释放 */
+    }
+  }
 
   useEffect(() => {
     if (s.selected) setTab(s.selected.kind);
@@ -949,6 +1320,9 @@ function App() {
       else if (e.key === 'Home') eng.seek(0);
       else if (e.key === 'End') eng.seek(eng.duration - 1);
       else if (e.key === 'l' || e.key === 'L') void setLoop(!view.loop).catch((err) => setView({ error: explainError(err) }));
+      else if (e.key === 'f' || e.key === 'F' || e.key === '0') void fitNow().catch((err) => console.warn('[motions]', err));
+      else if (e.key === '+' || e.key === '=') zoomBy(1.12);
+      else if (e.key === '-' || e.key === '_') zoomBy(1 / 1.12);
       else handled = false;
       if (handled) e.preventDefault();
     };
@@ -972,17 +1346,29 @@ function App() {
     () => (s.catalog?.expressions ?? []).filter((a) => !normalizedQuery || a.name.toLowerCase().includes(normalizedQuery)),
     [s.catalog, normalizedQuery],
   );
-  const assets = tab === 'motion' ? motions : expressions;
+  const bodies = useMemo(
+    () => (s.catalog?.bodies ?? []).filter((a) => !normalizedQuery || a.name.toLowerCase().includes(normalizedQuery)),
+    [s.catalog, normalizedQuery],
+  );
+  const assets = tab === 'motion' ? motions : tab === 'expression' ? expressions : bodies;
+  const activeFile = s.selection[tab];
   const allAssets = useMemo(() => (s.catalog ? catalogAssets(s.catalog) : []), [s.catalog]);
-  const selectedAsset = s.selected?.kind === tab ? findAsset(s.catalog!, tab, s.selected.file) : undefined;
+  const selectedAsset = s.selected ? findAsset(s.catalog!, s.selected.kind, s.selected.file) : undefined;
   const loading = s.phase === 'booting' || s.loadingPreview;
   const frame = Math.min(s.status?.frame ?? 0, Math.max(0, (s.preview?.duration ?? 1) - 1));
   const last = Math.max(0, (s.preview?.duration ?? 1) - 1);
   const fps = s.preview?.fps ?? PREVIEW_FPS;
+  const zoomPct = s.viewport ? Math.round((s.viewport.scale / s.viewport.fitScale) * 100) : 100;
 
   function choose(kind: AssetKind, file: string): void {
     if (s.phase !== 'ready') return;
     void selectAsset(kind, file).catch((e) => setView({ error: explainError(e), loadingPreview: false }));
+  }
+
+  function chooseSlot(patch: Partial<PreviewSelection>): void {
+    if (s.phase !== 'ready') return;
+    setTab(patch.body !== undefined ? 'body' : patch.expression !== undefined ? 'expression' : 'motion');
+    void setSelection(patch).catch((e) => setView({ error: explainError(e), loadingPreview: false }));
   }
 
   function togglePlay(): void {
@@ -992,11 +1378,13 @@ function App() {
   return (
     <div className="motions-app">
       <header>
-        <strong>CharaForge 动作 / 表情素材查看器</strong>
-        <span className="muted">DeepSeek-chan（大肥鱼）</span>
+        <strong>CharaForge 动作 / 表情 / 体型查看器</strong>
+        <span className="muted" title={s.catalog?.modelUri ?? MODEL_URI}>
+          {s.catalog?.modelName ?? MODEL_NAME}
+        </span>
         {(s.catalog?.motions.length ?? 0) > 0 && (
           <span className="muted small">
-            动作 {s.catalog!.motions.length} · 表情 {s.catalog!.expressions.length}
+            动作 {s.catalog!.motions.length} · 表情 {s.catalog!.expressions.length} · 体型 {s.catalog!.bodies.length}
           </span>
         )}
         <span className="spacer" />
@@ -1043,24 +1431,116 @@ function App() {
             >
               表情 <span className="muted">{s.catalog?.expressions.length ?? 0}</span>
             </button>
+            <button
+              type="button"
+              className={tab === 'body' ? 'active' : ''}
+              onClick={() => setTab('body')}
+              role="tab"
+              aria-selected={tab === 'body'}
+            >
+              体型 <span className="muted">{s.catalog?.bodies.length ?? 0}</span>
+            </button>
           </div>
           <div className="source-line small muted">
-            来源：{tab === 'motion' ? s.catalog?.sources.motions === 'declared' ? 'model3.json 声明' : 'Animation/ 目录' : s.catalog?.sources.expressions === 'declared' ? 'model3.json 声明' : 'Exp3/ 目录'}
+            来源：
+            {tab === 'motion'
+              ? s.catalog?.sources.motions === 'declared'
+                ? 'model3.json 声明'
+                : 'Animation/ 目录'
+              : tab === 'body'
+                ? 'Exp3/ 目录 + charaforge.bodies.json（可选）'
+                : s.catalog?.sources.expressions === 'declared'
+                  ? 'model3.json 声明'
+                  : 'Exp3/ 目录'}
           </div>
-          <input className="search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`搜索${tab === 'motion' ? '动作' : '表情'}名称…`} />
+          <input className="search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`搜索${assetKindLabel(tab)}名称…`} />
           {!s.catalog ? (
             <div className="empty small muted">读取素材目录…</div>
           ) : (
-            <AssetList kind={tab} assets={assets} selected={s.selected} thumbnails={s.thumbnails} onSelect={choose} />
+            <AssetList kind={tab} assets={assets} activeFile={activeFile} thumbnails={s.thumbnails} onSelect={choose} />
           )}
           <div className="small muted sidebar-note">
-            点击素材即可在右侧预览。预览是临时 scene，不写盘，也不会修改全片场景。
+            {tab === 'body'
+              ? '体型是独立的基础参数层：选好体型后，再切表情或动作不会把它覆盖掉。'
+              : '点击素材会更新对应槽位；右侧的体型 / 表情 / 动作可以同时生效。预览是临时 scene，不写盘。'}
           </div>
         </aside>
 
         <main className="preview-panel">
-          <div className="canvas-box">
+          <div className="combo-bar">
+            <label className="combo-field">
+              <span>体型</span>
+              <select
+                value={s.selection.body ?? ''}
+                disabled={!s.catalog || loading}
+                onChange={(e) => chooseSlot({ body: e.target.value || null })}
+              >
+                <option value="">默认</option>
+                {(s.catalog?.bodies ?? []).map((body) => (
+                  <option key={body.file} value={body.file}>
+                    {body.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="combo-field">
+              <span>表情</span>
+              <select
+                value={s.selection.expression ?? ''}
+                disabled={!s.catalog || loading}
+                onChange={(e) => chooseSlot({ expression: e.target.value || null })}
+              >
+                <option value="">无</option>
+                {(s.catalog?.expressions ?? []).map((expr) => (
+                  <option key={expr.file} value={expr.file}>
+                    {expr.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="combo-field">
+              <span>动作</span>
+              <select
+                value={s.selection.motion ?? ''}
+                disabled={!s.catalog || loading}
+                onChange={(e) => chooseSlot({ motion: e.target.value || null })}
+              >
+                <option value="">无</option>
+                {(s.catalog?.motions ?? []).map((motion) => (
+                  <option key={motion.file} value={motion.file}>
+                    {motion.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="combo-hint small muted">体型 + 表情 + 动作同时生效</span>
+          </div>
+
+          <div
+            className={`canvas-box${panning ? ' panning' : ''}${loading ? ' loading' : ''}`}
+            ref={canvasBoxRef}
+            onPointerDown={onCanvasPointerDown}
+            onPointerMove={onCanvasPointerMove}
+            onPointerUp={endPan}
+            onPointerCancel={endPan}
+            onDoubleClick={() => void fitNow().catch((err) => console.warn('[motions]', err))}
+            title="滚轮缩放 · 拖动平移 · 双击适应"
+          >
             <canvas ref={canvasRef} />
+            <div className="zoom-controls" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+              <button type="button" onClick={() => zoomBy(1 / 1.2)} title="缩小（-）">
+                −
+              </button>
+              <button type="button" className="zoom-value" onClick={() => void fitNow()} title="适应角色（F / 0）">
+                {zoomPct}%
+              </button>
+              <button type="button" onClick={() => zoomBy(1.2)} title="放大（+）">
+                +
+              </button>
+              <button type="button" onClick={() => void fitNow()} title="适应角色（F / 0）">
+                适应
+              </button>
+            </div>
             {loading && (
               <div className="overlay">
                 <div className="spinner" />
@@ -1068,6 +1548,7 @@ function App() {
               </div>
             )}
             {!loading && !s.preview && s.phase !== 'error' && <div className="overlay">选择左侧素材开始预览</div>}
+            <div className="viewport-hint small">滚轮缩放 · 拖动平移 · 双击适应</div>
           </div>
 
           <div className="transport">
@@ -1102,19 +1583,19 @@ function App() {
               <input
                 type="checkbox"
                 checked={s.loop}
-                disabled={s.preview?.kind !== 'motion'}
+                disabled={!s.selection.motion}
                 onChange={(e) => void setLoop(e.target.checked).catch((err) => setView({ error: explainError(err), loadingPreview: false }))}
               />
               循环
             </label>
-            <label className="inline" title="表情预览叠加 IDLE 动作">
+            <label className="inline" title="快速开关动作层（不会清掉体型/表情选择）">
               <input
                 type="checkbox"
-                checked={s.withIdle}
-                disabled={s.preview?.kind !== 'expression'}
+                checked={!!s.selection.motion}
+                disabled={!s.catalog?.motions.length}
                 onChange={(e) => void setWithIdle(e.target.checked).catch((err) => setView({ error: explainError(err), loadingPreview: false }))}
               />
-              叠加 IDLE
+              叠加动作
             </label>
           </div>
 
@@ -1122,14 +1603,15 @@ function App() {
             <MetaPanel preview={s.preview} />
           ) : (
             <div className="meta-panel small muted">
-              当前模型：{PREVIEW_MODEL_URI}
+              当前模型：{MODEL_URI}
               <br />
               动作来源：model3.json 的 FileReferences.Motions 优先，没有声明时扫描 Animation/；表情同理（Expressions 优先，否则 Exp3/）。
             </div>
           )}
 
           <div className="keys small muted">
-            快捷键：<kbd>空格</kbd> 播放/暂停　<kbd>←</kbd>/<kbd>→</kbd> ±1 帧（<kbd>Shift</kbd> ±10）　<kbd>Home</kbd>/<kbd>End</kbd>　<kbd>L</kbd> 循环
+            快捷键：<kbd>空格</kbd> 播放/暂停　<kbd>←</kbd>/<kbd>→</kbd> ±1 帧（<kbd>Shift</kbd> ±10）　<kbd>Home</kbd>/<kbd>End</kbd>　
+            <kbd>L</kbd> 循环　<kbd>F</kbd>/<kbd>0</kbd> 适应　<kbd>+</kbd>/<kbd>−</kbd> 缩放　滚轮缩放 · 拖动平移 · 双击适应
           </div>
         </main>
       </div>
@@ -1140,12 +1622,19 @@ function App() {
 
       <footer>
         <div>
-          预览只使用 CharaForge runtime；不加载原参考视频 / 音频，不写 scene 文件。素材目录来自只读接口{' '}
+          预览只使用 CharaForge runtime；不加载原参考视频 / 音频，不写 scene 文件。体型是可选的{' '}
+          <code>charaforge.bodies.json</code> 声明 + Exp3/ 自动识别；素材目录来自只读接口{' '}
           <code>/__charaforge/list-assets</code>（`pnpm dev` / `pnpm preview` 提供）。
         </div>
         <div className="muted small">
-          模型：DeepSeek-chan — Illustration &amp; PSD Layer Separation: Kamiya Ryoko / Live2D Rigging: 霓虹猫_NeonNeko。
-          模型按原作者条款禁止再分发，本页面只供本地查看。
+          {MODEL_URI === PREVIEW_MODEL_URI ? (
+            <>
+              模型：DeepSeek-chan — Illustration &amp; PSD Layer Separation: Kamiya Ryoko / Live2D Rigging: 霓虹猫_NeonNeko。
+              模型按原作者条款禁止再分发，本页面只供本地查看。
+            </>
+          ) : (
+            <>模型：{MODEL_NAME}。使用权以模型目录中的原条款为准；本页面只供本地查看，不写盘。</>
+          )}
         </div>
         {selectedAsset && <div className="muted small mono">{selectedAsset.uri}</div>}
       </footer>
