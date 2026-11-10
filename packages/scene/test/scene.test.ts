@@ -7,6 +7,7 @@ import { parseScene, sample, sampleCurve, cubicBezier } from '../src/index.ts';
 const example = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'examples', 'minimal.scene.json'), 'utf8'));
 const accessory = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'examples', 'accessory.scene.json'), 'utf8'));
 const editorDemo = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'examples', 'editor-demo.scene.json'), 'utf8'));
+const mvScene = JSON.parse(readFileSync(join(import.meta.dirname, '..', '..', '..', 'scenes', 'deepseek-chan', 'scene.mv.json'), 'utf8'));
 
 test('示例场景通过校验', () => {
   parseScene(example);
@@ -21,6 +22,16 @@ test('编辑器示例通过校验（背景光晕 + 星星 + 音乐轨）', () =>
   assert.equal(scene.layers.length, 5);
   assert.equal(scene.assets.images?.length, 3);
   assert.equal(scene.audio?.length, 1);
+});
+
+test('MV 背景版场景通过校验（原角色 + 背景/小元素图层）', () => {
+  const scene = parseScene(mvScene);
+  assert.equal(scene.layers.length, 128);
+  assert.equal(scene.assets.images?.length, 20);
+  assert.equal(scene.duration, 3868);
+  assert.notEqual(scene.composition.background, null);
+  assert.ok(scene.layers.some((layer) => layer.id === 'bg.dots'));
+  assert.ok(scene.layers.some((layer) => layer.id === 'splash.1'));
 });
 
 test('图片图层引用不存在的图片会报错', () => {

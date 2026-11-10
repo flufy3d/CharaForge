@@ -462,6 +462,9 @@ export class CharaForgeRuntime {
     H: number,
   ): ImageLayerPlan | null {
     const scene = this.scene!;
+    // 图片图层同样遵守 in/out 活跃区间（与模型图层一致）。旧实现漏掉了这个判断，
+    // 会让背景/元素图层在整个场景里一直可见。
+    if (f < layer.in || f >= layer.out) return null;
     const opacity = sample(layer.opacity, f, 1);
     const own = layerMatrix(sampleTransform(layer.transform, f, imageCanvas(image)));
     let toScreen: Affine;

@@ -3,6 +3,7 @@
  *
  * 覆盖：
  *   - 固定位置的透明棋盘 PNG：位置、透明边、alpha；
+ *   - 图片图层的 in/out 活跃区间；
  *   - attach 跟随目标模型图层的平移；
  *   - scaleWith=false 不继承目标缩放；
  *   - 图片图层在 Worker 路径与同步路径逐位一致；
@@ -93,6 +94,17 @@ test('透明棋盘图片固定位置渲染：位置、透明边、alpha', async 
   // 64×64 图片有 4px 透明边框，所以可见 alpha 从 128+4=132 到 192−1−4=187
   assert.ok(box.x0 >= 130 && box.x0 <= 134, `左边界：${box.x0}`);
   assert.ok(box.x1 >= 185 && box.x1 <= 189, `右边界：${box.x1}`);
+});
+
+test('图片图层遵守 in/out 活跃区间', async () => {
+  const scene = baseScene([CHECKER], [imageLayer({ in: 10, out: 20 })]);
+  await h.page.evaluate((s) => window.__charaforge.loadScene(s), scene);
+  const outside = alphaBBox(await renderRgba(5));
+  assert.equal(outside.count, 0, 'in 之前图片不应绘制');
+  const after = alphaBBox(await renderRgba(25));
+  assert.equal(after.count, 0, 'out 之后图片不应绘制');
+  const inside = alphaBBox(await renderRgba(15));
+  assert.ok(inside.count > 2000, `活跃区间内图片应可见：${inside.count}`);
 });
 
 test('runtime.addImageLayer 可在运行时追加图片图层', async () => {

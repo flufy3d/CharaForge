@@ -16,7 +16,7 @@ pnpm dev
 # Chrome / Edge 打开：
 # http://localhost:5173/editor.html
 # 直接打开全片 MV：
-# http://localhost:5173/editor.html?scene=scenes/deepseek-chan/scene.json&frame=2400
+# http://localhost:5173/editor.html?scene=scenes/deepseek-chan/scene.mv.json&frame=2400
 # 轻量示例（背景光晕 + 星星元素 + 音乐）：
 # http://localhost:5173/editor.html?scene=packages/scene/examples/editor-demo.scene.json
 ```
@@ -26,6 +26,28 @@ pnpm dev
 
 轻量示例场景：`packages/scene/examples/editor-demo.scene.json`（6 秒，背景光晕 + 两颗星星 + 粉色气泡 + IDLE 动作 + 音乐轨），
 适合快速试时间线、关键帧和导出。
+
+正式 MV 有两个版本：
+
+- `scenes/deepseek-chan/scene.json`：原始拟合场景（47 个角色图层，透明背景，用于回归/对比）。
+- `scenes/deepseek-chan/scene.mv.json`：在原场景上叠加程序生成的近似背景与小元素（点阵边框、天空、深色光晕、照片卡、气泡、闪光、聊天窗口、转场泼溅等，共 128 个图层）。编辑器默认打开这一版。
+
+背景版的主要图层：
+
+| 图层 | 时段 | 内容 |
+|---|---|---|
+| `bg.dots` | 全片 | 浅蓝点阵 + 蓝色白点边框 |
+| `bg.sky.1/2` | 254–676、1157–1198 | 天空/云朵（Photo Booth、泼溅后） |
+| `bg.dark.1..4` | 1527–1707、2639–2690、2969–3097、3478–3662 | 深蓝径向光晕 |
+| `bg.orange` / `bg.watercolor` | 3280–3296 / 3382–3408 | 橙色半调 / 水彩云雾转场 |
+| `chat` / `booth` | 0–254 / 254–394 | 聊天窗口 / Photo Booth 白框 |
+| `halo.*` | 多个片段 | 角色背后的圆环光晕 |
+| `card.*` / `cardWide.*` | 多处 | 白色照片卡（简笔角色剪影） |
+| `bubble.*` / `sparkle.*` | s19 之后多处 | 蓝色气泡、四角闪光 |
+| `splash.*` | 转场帧 | 蓝/红蓝/白/深蓝泼溅、白色剪影 |
+| `sticker.question` / `sticker.check` | s22–24 / s26 | 红色问号、对勾 |
+
+觉得某层太抢眼时，在时间线或图层列表选中它，改 `opacity` 或直接删除即可；背景图都是内嵌 WebP data URI，不依赖 `assets/` 里的外部文件。
 
 ## 界面
 
@@ -121,10 +143,10 @@ pnpm dev
 
 ```bash
 # 全片（60 秒，3868 帧，MP4/AVC+AAC）
-pnpm export:video --scene scenes/deepseek-chan/scene.json --out .data/export/deepseek-full.mp4 --workers 2
+pnpm export:video --scene scenes/deepseek-chan/scene.mv.json --out .data/export/deepseek-full.mp4 --workers 2
 
 # 指定帧范围、WebM、低质量
-pnpm export:video --scene scenes/deepseek-chan/scene.json --from 2368 --to 2442 \
+pnpm export:video --scene scenes/deepseek-chan/scene.mv.json --from 2368 --to 2442 \
   --format webm --quality low --out .data/export/s24.webm
 
 # 覆盖尺寸/背景
@@ -138,8 +160,10 @@ pnpm export:video --scene packages/scene/examples/minimal.scene.json --from 0 --
 实现使用 [Mediabunny](https://mediabunny.dev/)（MPL-2.0）的 WebCodecs 封装；不依赖 ffmpeg。
 编码有损，因此导出的像素不会与 runtime PNG 逐位相同，但每帧来源与播放器完全一致（同一份 `CharaForgeRuntime`）。
 
-2026-11-09 实测：`scenes/deepseek-chan/scene.json` 全片 3868 帧 → 1280×720 MP4（AVC+AAC），
-时长 64.467 s，37,967,113 字节，导出耗时 59.2 s（RTX 5080 Laptop，`--workers 2 --quality high`）。
+实测（RTX 5080 Laptop，`--workers 2 --quality high`）：
+
+- `scenes/deepseek-chan/scene.json`：3868 帧 → 64.467 s，37,967,113 字节，59.2 s。
+- `scenes/deepseek-chan/scene.mv.json`（128 图层，含背景/小元素）：3868 帧 → 64.467 s，47,324,791 字节，63.7 s。
 
 ## AI / 脚本调用
 
@@ -198,7 +222,7 @@ curl -s http://localhost:5173/__charaforge/editor/ping
 curl -s -X POST http://localhost:5173/__charaforge/editor/command \
   -H 'Content-Type: application/json' \
   -d '{
-    "scene": "scenes/deepseek-chan/scene.json",
+    "scene": "scenes/deepseek-chan/scene.mv.json",
     "commands": [
       { "op": "addKeyframe",
         "target": { "kind": "layer", "id": "s24.main", "path": "transform.x" },
@@ -215,12 +239,12 @@ curl -s -X POST http://localhost:5173/__charaforge/editor/command \
 ### CLI 命令层
 
 ```bash
-pnpm editor:command --scene scenes/deepseek-chan/scene.json \
+pnpm editor:command --scene scenes/deepseek-chan/scene.mv.json \
   --input .data/edit-commands.json --out .data/edited.scene.json
 
 # stdin / dry-run / 预览
 cat .data/edit-commands.json | pnpm --silent editor:command \
-  --scene scenes/deepseek-chan/scene.json --dry-run --frame 2400
+  --scene scenes/deepseek-chan/scene.mv.json --dry-run --frame 2400
 ```
 
 输入可以是命令数组、`{ "commands": [...] }` 或单个命令对象；stdout 是 JSON。

@@ -195,6 +195,9 @@ export class PlayerEngine {
     for (const f of this.layerIns) {
       void this.runtime.prefetch([f]).then(() => {
         this.status.prewarm = { done: ++done, total };
+        // 预热进度回调可能在 seek 之后才返回；同步一下当前帧，避免编辑器/播放器状态栏被旧帧号覆盖。
+        this.status.frame = this.frame;
+        this.status.playing = this.clock.playing;
         if (!this.clock.playing || done === total) this.onStatus(this.status);
       });
     }

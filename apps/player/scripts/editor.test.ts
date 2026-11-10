@@ -275,6 +275,33 @@ test('导出 4 帧 WebM（含音频）', async () => {
   assert.match(String(result.mimeType), /video\/webm/);
 });
 
+test('MV 背景版场景可加载（128 图层 / 20 个内嵌素材）', async () => {
+  const mv = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+  const errors: string[] = [];
+  mv.on('pageerror', (e) => errors.push(e.message));
+  await mv.addInitScript(() => {
+    (window as unknown as { __ed: () => unknown }).__ed = () => (window as unknown as { __editor: unknown }).__editor;
+  });
+  try {
+    await mv.goto(`${server.baseUrl}/editor.html?scene=scenes/deepseek-chan/scene.mv.json&workers=0&frame=300`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 120_000,
+    });
+    await mv.waitForFunction(() => !!(window as unknown as { __editor?: unknown }).__editor, null, { timeout: 120_000 });
+    await mv.evaluate(() => (window as unknown as { __ed: () => { ready: Promise<void> } }).__ed().ready);
+    const summary = await mv.evaluate(() => (window as unknown as { __ed: () => { summary(): { layers: number } } }).__ed().summary());
+    const scene = await mv.evaluate(() =>
+      (window as unknown as { __ed: () => { scene(): { assets: { images?: unknown[] } } } }).__ed().scene(),
+    );
+    assert.equal(summary.layers, 128);
+    assert.equal(scene.assets.images?.length, 20);
+    assert.equal(await mv.locator('[data-testid^="track-layer-"]').count(), 128);
+    assert.deepEqual(errors, []);
+  } finally {
+    await mv.close();
+  }
+});
+
 test('页面无未捕获错误', () => {
   assert.deepEqual(pageErrors, []);
 });

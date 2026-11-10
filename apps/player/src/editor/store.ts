@@ -60,7 +60,8 @@ import type {
 } from './contracts.ts';
 import { exportSceneVideo, type ExportVideoResult } from './export.ts';
 
-export const DEFAULT_SCENE_PATH = 'scenes/deepseek-chan/scene.json';
+// 编辑器默认打开“带背景和小元素”的 MV；原始拟合场景仍是 scene.json。
+export const DEFAULT_SCENE_PATH = 'scenes/deepseek-chan/scene.mv.json';
 
 const MAX_HISTORY = 100;
 const COALESCE_MS = 1500;

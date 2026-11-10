@@ -228,10 +228,14 @@ pnpm dev
 # Chrome / Edge 打开：
 # http://localhost:5173/editor.html
 # 直接编辑全片 MV：
-# http://localhost:5173/editor.html?scene=scenes/deepseek-chan/scene.json&frame=2400
+# http://localhost:5173/editor.html?scene=scenes/deepseek-chan/scene.mv.json&frame=2400
 # 轻量示例（背景光晕 + 星星元素 + 音乐）：
 # http://localhost:5173/editor.html?scene=packages/scene/examples/editor-demo.scene.json
 ```
+
+> `scenes/deepseek-chan/scene.json` 是原始拟合场景（只有角色动画，透明背景）；
+> `scenes/deepseek-chan/scene.mv.json` 在它基础上叠加了近似背景、点阵边框、光环、照片卡、气泡、闪光和转场泼溅，
+> 编辑器默认打开后者。原场景保留，可随时对比或重新生成。
 
 - **场景编辑**：图层树、变换、透明度、裁切、滤镜、混合模式、相机、背景色、导入图片/音频、生成形状/渐变背景。
 - **动作编辑**：motion3 / exp3 片段、参数轨、部件不透明度、物理开关；动作库列出模型的 8 个动作和 23 个表情。
@@ -242,21 +246,22 @@ pnpm dev
 
 ```bash
 # AI / 脚本编辑：命令 → 新场景（stdout 返回 diff / effects / preview）
-pnpm editor:command --scene scenes/deepseek-chan/scene.json \
+pnpm editor:command --scene scenes/deepseek-chan/scene.mv.json \
   --input .data/edit-commands.json --out .data/edited.scene.json
 
 # 全片导出（60 秒，1280×720，带原音频）
-pnpm export:video --scene scenes/deepseek-chan/scene.json --out .data/export/deepseek-full.mp4 --workers 2
+pnpm export:video --scene scenes/deepseek-chan/scene.mv.json --out .data/export/deepseek-full.mp4 --workers 2
 
 # 只导出 s24 镜头、WebM
-pnpm export:video --scene scenes/deepseek-chan/scene.json --from 2368 --to 2442 \
+pnpm export:video --scene scenes/deepseek-chan/scene.mv.json --from 2368 --to 2442 \
   --format webm --out .data/export/s24.webm
 ```
 
 - 编辑器保存到 `scenes/` 下的场景 JSON；覆盖已有文件时自动写 `.bak.json`。大场景保存为紧凑 JSON。
 - 全片场景、镜头、音频、时间线加载后可直接预览；编辑器的预览与播放器/harness 同一帧逐位一致。
 - 视频导出是有损编码，像素不与 runtime PNG 逐位相同；帧来源与播放器是同一份 `CharaForgeRuntime`。
-- 2026-11-09 实测：全片 3868 帧导出为 1280×720 MP4（AVC+AAC），时长 64.467 s，37.9 MB，耗时 59.2 s（RTX 5080 Laptop，workers=2）。
+- 2026-11-10 实测：`scene.mv.json` 全片 3868 帧（128 图层，含背景/小元素）导出为 1280×720 MP4（AVC+AAC），
+  时长 64.467 s，47,324,791 字节，耗时 63.7 s（RTX 5080 Laptop，workers=2）；原始 `scene.json` 为 37.9 MB / 59.2 s。
 - 完整界面说明、命令格式、HTTP 接口和已知限制见 [docs/editor.md](docs/editor.md)。
 
 ## 外部饰品（ImageAsset / ImageLayer）
