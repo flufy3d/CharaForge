@@ -1261,9 +1261,18 @@ export function Timeline({ store }: { store: EditorStoreApi }): JSX.Element {
   const badgeShift = playheadX < 24 ? 0 : playheadX > laneWidth - 24 ? -100 : -50;
 
   const [snap, setSnap] = useState(true);
+  const [panMode, setPanMode] = useState(false);
+  const [panning, setPanning] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const rulerLaneRef = useRef<HTMLDivElement>(null);
   const interactingRef = useRef(false);
+  const panRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
   const audioGainMemory = useRef(new Map<number, number>());
 
   const ensureVisible = (frame: number, zoomValue = zoom) => {
@@ -1312,8 +1321,52 @@ export function Timeline({ store }: { store: EditorStoreApi }): JSX.Element {
     return () => element.removeEventListener('wheel', onWheel);
   }, [store, zoom]);
 
+  const beginPan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const middle = event.button === 1;
+    const leftInPanMode = panMode && event.button === 0;
+    if (!middle && !leftInPanMode) return;
+    if (leftInPanMode) {
+      const target = event.target as HTMLElement;
+      // 平移模式下仍然让按钮、关键帧、片段、标记响应自己的点击。
+      if (target.closest('button, input, select, textarea, .tl-key, .tl-clip, .tl-audio-bar, .tl-range-handle, .tl-marker')) return;
+    }
+    event.preventDefault();
+    element.setPointerCapture(event.pointerId);
+    panRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: element.scrollLeft,
+      scrollTop: element.scrollTop,
+    };
+    setPanning(true);
+  };
+
+  const movePan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const pan = panRef.current;
+    const element = scrollRef.current;
+    if (!pan || !element) return;
+    element.scrollLeft = Math.max(0, pan.scrollLeft - (event.clientX - pan.startX));
+    element.scrollTop = Math.max(0, pan.scrollTop - (event.clientY - pan.startY));
+  };
+
+  const endPan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const pan = panRef.current;
+    const element = scrollRef.current;
+    if (!pan) return;
+    panRef.current = null;
+    setPanning(false);
+    try {
+      element?.releasePointerCapture(event.pointerId);
+    } catch {
+      /* 指针已经释放 */
+    }
+  };
+
   const beginScrub = (event: ReactPointerEvent<HTMLElement>) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || panMode) return;
     const lane = rulerLaneRef.current;
     if (!lane) return;
     event.preventDefault();
@@ -1352,6 +1405,15 @@ export function Timeline({ store }: { store: EditorStoreApi }): JSX.Element {
     const clamped = clampZoom(nextZoom);
     store.setTimelineZoom(clamped);
     requestAnimationFrame(() => ensureVisible(store.getState().frame, clamped));
+  };
+
+  // 缩放滑块用对数刻度：低倍率区间（整段全览）更容易微调，高倍率也不会一步跳太远。
+  const zoomSliderValue = Math.round(
+    ((Math.log(zoom) - Math.log(MIN_ZOOM)) / (Math.log(MAX_ZOOM) - Math.log(MIN_ZOOM))) * 1000,
+  );
+  const setZoomFromSlider = (value: number) => {
+    const ratio = clamp(value, 0, 1000) / 1000;
+    setZoom(Math.exp(Math.log(MIN_ZOOM) + ratio * (Math.log(MAX_ZOOM) - Math.log(MIN_ZOOM))));
   };
 
   const fit = () => {
@@ -1534,14 +1596,34 @@ export function Timeline({ store }: { store: EditorStoreApi }): JSX.Element {
         <button type="button" className="tl-btn" title="缩小时间线（Ctrl+滚轮）" data-testid="timeline-zoom-out" onClick={() => setZoom(zoom / 1.5)}>
           −
         </button>
-        <span className="tl-zoom-read" title="每帧像素">
-          {zoom.toFixed(2)} px/帧
-        </span>
+        <input
+          className="tl-zoom-slider"
+          type="range"
+          min={0}
+          max={1000}
+          step={1}
+          value={zoomSliderValue}
+          data-testid="timeline-zoom-slider"
+          title="时间线缩放（对数刻度；Ctrl+滚轮围绕鼠标缩放）"
+          onChange={(event) => setZoomFromSlider(Number(event.target.value))}
+        />
         <button type="button" className="tl-btn" title="放大时间线（Ctrl+滚轮）" data-testid="timeline-zoom-in" onClick={() => setZoom(zoom * 1.5)}>
           +
         </button>
+        <span className="tl-zoom-read" title="每帧像素">
+          {zoom.toFixed(2)} px/帧
+        </span>
         <button type="button" className="tl-btn" data-testid="timeline-fit" title="缩放到完整时长" onClick={fit}>
           适应
+        </button>
+        <button
+          type="button"
+          className={`tl-btn${panMode ? ' active' : ''}`}
+          data-testid="timeline-pan"
+          title="平移模式：左键拖动时间线；中键拖动始终可用"
+          onClick={() => setPanMode((value) => !value)}
+        >
+          平移
         </button>
         <button
           type="button"
@@ -1595,13 +1677,27 @@ export function Timeline({ store }: { store: EditorStoreApi }): JSX.Element {
         >
           打关键帧
         </button>
-        <span className="tl-hint" title="在右侧属性面板固定参数后，会在底部出现参数轨">
-          双击图层头展开 · 属性面板固定参数
+        <span className="tl-hint" title="Ctrl+滚轮围绕鼠标缩放；中键拖动或在“平移”模式下左键拖动时间线">
+          Ctrl+滚轮缩放 · 中键拖动平移 · 双击图层头展开
         </span>
       </div>
 
       {scene ? (
-        <div className="tl-scroll" ref={scrollRef}>
+        <div
+          className={`tl-scroll${panMode ? ' pan-mode' : ''}${panning ? ' panning' : ''}`}
+          ref={scrollRef}
+          onPointerDown={beginPan}
+          onPointerMove={movePan}
+          onPointerUp={endPan}
+          onPointerCancel={endPan}
+          onMouseDown={(event) => {
+            // 阻止 Chromium 在中键按下时进入自动滚动模式。
+            if (event.button === 1) event.preventDefault();
+          }}
+          onAuxClick={(event) => {
+            if (event.button === 1) event.preventDefault();
+          }}
+        >
           <div className="tl-content" style={contentStyle}>
             <div className="tl-ruler-row">
               <div className="tl-ruler-head">

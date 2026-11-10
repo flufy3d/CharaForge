@@ -254,6 +254,7 @@ pnpm dev
 - **动作编辑**：motion3 / exp3 片段、参数轨、部件不透明度、物理开关；动作库列出模型的 8 个动作、20 个表情和 3 个体型；
   「设为体型」会替换当前图层上的旧体型（从入点持续到出点），不影响表情/动作片段。
 - **多轨时间线**：镜头标记、相机、全部图层、动作/表情片段、任意多条音频轨（音乐轨）；片段可拖动/裁剪，关键帧可拖动/多选/批量缓动。
+  时间线支持 Ctrl+滚轮围绕鼠标缩放、缩放滑块 / ± / 适应，中键拖动或“平移”模式左键拖动平移。
 - **关键帧与插值**：linear / smooth / easeIn / easeOut / easeInOut / step / 自定义三次贝塞尔；一键动画（淡入、漂浮、脉冲、旋转、弹跳、闪烁、滑入、抖动、放大）。
 - **导出 MV（带音乐）**：编辑器按钮或 CLI，逐帧渲染 + 离线混音，输出 MP4（AVC/AAC）或 WebM（VP9/Opus）。
 - **AI 可调用**：浏览器 `window.__editor`、本地 HTTP `/__charaforge/editor/command`、CLI `pnpm editor:command` 共用 `packages/scene/src/edit.ts` 命令层。

@@ -127,6 +127,36 @@ test('全片场景加载：47 图层 / 43 标记 / 1 音频，时间线渲染', 
   assert.ok((await page.locator('[data-keyframe]').count()) > 500, '时间线应显示关键帧');
 });
 
+test('时间线缩放滑块与平移模式', async () => {
+  const contentWidth = () => page.locator('.tl-content').evaluate((el) => el.getBoundingClientRect().width);
+  const beforeWidth = await contentWidth();
+  await page.locator('[data-testid="timeline-zoom-slider"]').evaluate((el, value) => {
+    const input = el as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    setter.call(input, String(value));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }, 900);
+  await page.waitForFunction((width) => document.querySelector('.tl-content')!.getBoundingClientRect().width > width + 50, beforeWidth);
+  const zoomedWidth = await contentWidth();
+  assert.ok(zoomedWidth > beforeWidth, '缩放滑块应放大时间线内容');
+
+  // 先把水平滚动归零，再在“平移”模式下左键拖动标尺，scrollLeft 应增加。
+  await page.locator('.tl-scroll').evaluate((el) => {
+    el.scrollLeft = 0;
+  });
+  await page.locator('[data-testid="timeline-pan"]').click();
+  const ruler = await page.locator('[data-testid="timeline-ruler"]').boundingBox();
+  assert.ok(ruler);
+  await page.mouse.move(ruler.x + 500, ruler.y + 12);
+  await page.mouse.down();
+  await page.mouse.move(ruler.x + 300, ruler.y + 12, { steps: 6 });
+  await page.mouse.up();
+  const scrollLeft = await page.locator('.tl-scroll').evaluate((el) => el.scrollLeft);
+  assert.ok(scrollLeft > 50, `平移后 scrollLeft 应增加，实际 ${scrollLeft}`);
+  await page.locator('[data-testid="timeline-pan"]').click();
+});
+
 test('编辑器预览与 harness 同一帧逐位一致', async () => {
   const editorHash = await page.evaluate(async () => {
     const rt = (window.__ed() as unknown as { store: { engine: { runtime: { readPixels(): { data: Uint8Array } } } } }).store.engine.runtime;
