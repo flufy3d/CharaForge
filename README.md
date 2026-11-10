@@ -237,6 +237,7 @@ pnpm dev
 ```
 
 `/editor.html` 仍保留为直接入口；独立播放器在 `/player.html`（只用于预览/参考视频对照）。
+编辑器顶部右侧有「独立播放器 ↗」和「素材 / 动作查看器 ↗」两个入口；播放器会带当前场景和帧号，未保存的修改需要先保存。
 
 > `scenes/deepseek-chan/scene.json` 是原始拟合场景（只有角色动画，透明背景）；
 > `scenes/deepseek-chan/scene.mv.json` 在它基础上叠加了近似背景、点阵边框、光环、照片卡、气泡、闪光和转场泼溅，

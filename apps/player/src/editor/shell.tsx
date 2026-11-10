@@ -527,6 +527,10 @@ export function EditorShell({ store, canvasRef }: ShellProps) {
     if (!confirmDiscard()) return;
     void store.reload().catch(() => {});
   };
+  // 独立播放器打开当前场景/帧；未保存修改不会带过去（先保存或导出）。
+  const playerHref = scene
+    ? `player.html?scene=${encodeURIComponent(scenePath)}&frame=${Math.max(0, Math.floor(state.frame))}`
+    : 'player.html';
 
   return (
     <div className="editor-app" data-testid="editor-app">
@@ -591,6 +595,15 @@ export function EditorShell({ store, canvasRef }: ShellProps) {
           <button type="button" className="primary" data-testid="export-button" disabled={!canInteract} title="E" onClick={() => setExportOpen(true)}>
             导出视频…
           </button>
+          <a
+            className="toolbar-link"
+            href={playerHref}
+            target="_blank"
+            rel="noreferrer"
+            title="在独立播放器中打开当前场景/帧（未保存修改不会带过去）"
+          >
+            独立播放器 ↗
+          </a>
           <a
             className="toolbar-link"
             href="motions.html"
