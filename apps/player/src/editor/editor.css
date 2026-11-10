@@ -224,6 +224,20 @@ kbd {
   font-size: 11px;
   font-family: ui-monospace, Consolas, monospace;
 }
+.toolbar-link {
+  border: 1px solid #3a5d93;
+  background: #1b2a42;
+  color: #a9c8ff;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.toolbar-link:hover {
+  background: #243a5c;
+  color: #d4e4ff;
+}
 .dirty-dot {
   min-width: 62px;
   color: var(--muted);

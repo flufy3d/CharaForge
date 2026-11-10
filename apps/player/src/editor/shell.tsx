@@ -591,6 +591,15 @@ export function EditorShell({ store, canvasRef }: ShellProps) {
           <button type="button" className="primary" data-testid="export-button" disabled={!canInteract} title="E" onClick={() => setExportOpen(true)}>
             导出视频…
           </button>
+          <a
+            className="toolbar-link"
+            href="motions.html"
+            target="_blank"
+            rel="noreferrer"
+            title="独立打开动作 / 表情素材查看器（含缩略图、图集、循环预览）"
+          >
+            素材 / 动作查看器 ↗
+          </a>
           <span className="ai-badge" title="在浏览器控制台或 Playwright 里调用 window.__editor 操作场景">
             AI: window.__editor
           </span>

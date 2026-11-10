@@ -9,8 +9,8 @@ import type { EditorStore } from './store.ts';
 
 const TOOL_LABELS: { id: 'layers' | 'assets' | 'motions' | 'elements'; label: string }[] = [
   { id: 'layers', label: '图层' },
-  { id: 'assets', label: '素材' },
-  { id: 'motions', label: '动作' },
+  { id: 'assets', label: '场景素材' },
+  { id: 'motions', label: '动作/表情' },
   { id: 'elements', label: '元素' },
 ];
 
@@ -314,6 +314,11 @@ function MotionsPanel({ store, state }: { store: EditorStore; state: EditorState
 
   return (
     <div className="panel-section">
+      <div className="panel-actions">
+        <a className="toolbar-link" href="motions.html" target="_blank" rel="noreferrer" title="打开带缩略图/图集/循环预览的完整查看器">
+          打开完整素材 / 动作查看器 ↗
+        </a>
+      </div>
       <div className="tool-tabs sub">
         <button type="button" className={tab === 'motion' ? 'active' : ''} onClick={() => setTab('motion')}>
           动作 {catalog?.motions.length ?? 0}
