@@ -13,16 +13,17 @@
 
 ```bash
 pnpm dev
-# Chrome / Edge 打开：
-# http://localhost:5173/editor.html
+# 根路径默认就是编辑器：
+# http://localhost:5173/
 # 直接打开全片 MV：
-# http://localhost:5173/editor.html?scene=scenes/deepseek-chan/scene.mv.json&frame=2400
+# http://localhost:5173/?scene=scenes/deepseek-chan/scene.mv.json&frame=2400
 # 轻量示例（背景光晕 + 星星元素 + 音乐）：
-# http://localhost:5173/editor.html?scene=packages/scene/examples/editor-demo.scene.json
+# http://localhost:5173/?scene=packages/scene/examples/editor-demo.scene.json
 ```
 
-`pnpm preview` 使用同一个中间件，也可以打开 `http://localhost:4173/editor.html`。
-`editor.html` 已加入 `vite.config.ts` 的构建输入，`pnpm build` 会产出 `dist/editor.html`。
+`pnpm preview` 使用同一个中间件，也可以打开 `http://localhost:4173/`。
+`index.html`（默认编辑器）、`editor.html`（直接入口）、`player.html`（独立播放器）都已加入 `vite.config.ts` 的构建输入；
+`editor.html` 与 `index.html` 内容相同，便于旧链接继续使用。独立播放器只作为预览/参考视频对照页，主入口是编辑器。
 
 轻量示例场景：`packages/scene/examples/editor-demo.scene.json`（6 秒，背景光晕 + 两颗星星 + 粉色气泡 + IDLE 动作 + 音乐轨），
 适合快速试时间线、关键帧和导出。

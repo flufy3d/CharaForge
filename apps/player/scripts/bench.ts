@@ -32,7 +32,7 @@ try {
   if (from) q.set('frame', from);
   // 其他播放器 URL 参数，如 BENCH_QUERY='prewarm=0'
   for (const [k, v] of new URLSearchParams(process.env.BENCH_QUERY ?? '')) q.set(k, v);
-  await page.goto(`${baseUrl}/?${q}`);
+  await page.goto(`${baseUrl}/player.html?${q}`);
   await page.waitForFunction(() => (window as any).__player?.status?.ready, null, { timeout: 180_000, polling: 200 });
   const info = await page.evaluate(() => {
     const gl = (window as any).__player.runtime.gl as WebGL2RenderingContext;

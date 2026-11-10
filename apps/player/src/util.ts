@@ -3,7 +3,7 @@
  * 页面可能挂在任意路径前缀下（反向代理，如 https://host/api/local-proxy/p/5173/），所以运行时的请求一律不用 / 开头的绝对路径。
  * 开头的 / 会被去掉：'/assets/x' 与 'assets/x' 等价。
  */
-/** Cubism Core 的仓库相对路径（index.html / harness.html 的 <script> 也用同一个相对路径） */
+/** Cubism Core 的仓库相对路径（player.html / editor.html / harness.html 的 <script> 也用同一个相对路径） */
 export const CORE_PATH = 'vendor/cubism/core/live2dcubismcore.min.js';
 
 export function pageUrl(rel: string): string {

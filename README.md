@@ -141,15 +141,18 @@ tools/.venv/bin/python -I tools/gpu/tests/test_a1_moc3.py    # moc3 解析器与
 
 > Windows 原生播放已在 2026-11-09 验证；Windows 下的 `pnpm test:runtime`、`pnpm bench` 尚未跑，数据待补。
 
-## 播放器
+## 独立播放器（`/player.html`）
+
+`pnpm dev` 的根路径默认打开编辑器；独立播放器保留在 `/player.html`，用于只读预览、参考视频对照和性能测试。
 
 ```bash
-pnpm dev               # http://localhost:5173/
+pnpm dev               # 编辑器 http://localhost:5173/
+                       # 独立播放器 http://localhost:5173/player.html
 ```
 
 Windows 原生同样适用；PowerShell 5.1 不支持 `&&`，`pnpm build` 和 `pnpm preview` 分两行执行即可。
 
-缺省打开全片场景 `scenes/deepseek-chan/scene.json`（约 4.3MB，47 个图层），点「播放」或按空格开始，
+播放器缺省打开全片场景 `scenes/deepseek-chan/scene.json`（约 4.3MB，47 个图层），点「播放」或按空格开始，
 原音频为时钟：画面帧号 = floor(音频时间 × 60)。
 
 - 加载约 6 秒出第一帧（页面显示加载阶段），之后**可以立即播放**。加载后 Worker 会提前为各图层做物理预热
@@ -158,7 +161,7 @@ Windows 原生同样适用；PowerShell 5.1 不支持 `&&`，`pnpm build` 和 `p
   （另一拟合任务把 GPU 占到 84～92% 时 3.6～3.8%），画面相对声音滞后均值约 0.8 帧，60 秒内无漂移。
   数据与方法见 [docs/runtime-eval.md](docs/runtime-eval.md) 第 6 节；Windows 原生播放尚未做正式 bench。
 
-URL 参数：
+独立播放器 URL 参数（`/player.html`；场景/动作编辑器也支持 `scene=`、`frame=`、`workers=`）：
 
 | 参数 | 含义 |
 |---|---|
@@ -225,13 +228,15 @@ pnpm export:video --scene <scene.json> [--from 0 --to 3868] [--format mp4|webm|a
 
 ```bash
 pnpm dev
-# Chrome / Edge 打开：
-# http://localhost:5173/editor.html
+# 根路径默认就是编辑器：
+# http://localhost:5173/
 # 直接编辑全片 MV：
-# http://localhost:5173/editor.html?scene=scenes/deepseek-chan/scene.mv.json&frame=2400
+# http://localhost:5173/?scene=scenes/deepseek-chan/scene.mv.json&frame=2400
 # 轻量示例（背景光晕 + 星星元素 + 音乐）：
-# http://localhost:5173/editor.html?scene=packages/scene/examples/editor-demo.scene.json
+# http://localhost:5173/?scene=packages/scene/examples/editor-demo.scene.json
 ```
+
+`/editor.html` 仍保留为直接入口；独立播放器在 `/player.html`（只用于预览/参考视频对照）。
 
 > `scenes/deepseek-chan/scene.json` 是原始拟合场景（只有角色动画，透明背景）；
 > `scenes/deepseek-chan/scene.mv.json` 在它基础上叠加了近似背景、点阵边框、光环、照片卡、气泡、闪光和转场泼溅，
@@ -283,10 +288,11 @@ pnpm --silent decoration:command --scene packages/scene/examples/accessory.scene
 
 ```bash
 pnpm build             # → apps/player/dist/（约 2.2MB，只有页面和打包后的代码）
-pnpm preview           # → http://localhost:4173/
+pnpm preview           # → http://localhost:4173/（默认编辑器）；播放器 /player.html
 ```
 
-- 页面：`index.html`（播放器）、`editor.html`（场景 / 动作编辑器）、`motions.html`（动作 / 表情素材查看器）、
+- 页面：`index.html`（默认场景 / 动作编辑器）、`editor.html`（编辑器直接入口，内容同 index）、
+  `player.html`（独立播放器 / 参考视频对照）、`motions.html`（动作 / 表情素材查看器）、
   `export.html`（逐帧视频导出页，`scripts/export-video.ts` 使用）、`harness.html`（Playwright 测试接口）。
 - 产物**不含**模型、参考视频、音频、场景文件和 Cubism Core，也不要把它们复制进去。页面按 URL 引用仓库里的原文件：
   `assets/…`（模型、视频、音频）、`vendor/cubism/core/…`（Core）、`scenes/…`、`packages/scene/examples/…`、`packages/scene/schema/…`。
@@ -399,7 +405,8 @@ systemd-run --user --unit=cf-qa-report --collect --working-directory=$HOME/Chara
 
 ```bash
 pnpm build
-pnpm preview      # http://localhost:4173/；或开发模式 pnpm dev
+pnpm preview      # 编辑器 http://localhost:4173/；播放器 http://localhost:4173/player.html
+# 或开发模式 pnpm dev（同样：/ 编辑器，/player.html 播放器）
 ```
 
 ## 验收口径与当前结果
@@ -431,7 +438,7 @@ pnpm preview      # http://localhost:4173/；或开发模式 pnpm dev
 
 | 路径 | 内容 |
 |---|---|
-| `apps/player/` | 播放器 + 编辑器（React + Pixi）：`src/main.tsx` 播放器 UI、`src/editor/` 场景/动作编辑器（store、时间线、检查器、导出）、`src/editor.tsx` 旧饰品编辑器、`engine.ts` 渲染循环、`clock.ts` 音频时钟、`videoSync.ts` 参考视频逐帧对齐；`harness.html` 测试接口；`server/editorApi.ts` 本地编辑 HTTP API；`scripts/` 下是 render、export-video、editor-command、bench、verify-video、import-accessory、decoration-command 等 CLI |
+| `apps/player/` | 编辑器 + 独立播放器（React + Pixi）：`index.html` 默认编辑器、`player.html` 独立播放器、`src/editor/` 场景/动作编辑器（store、时间线、检查器、导出）、`src/main.tsx` 播放器 UI、`src/editor.tsx` 旧饰品编辑器、`engine.ts` 渲染循环、`clock.ts` 音频时钟、`videoSync.ts` 参考视频逐帧对齐；`harness.html` 测试接口；`server/editorApi.ts` 本地编辑 HTTP API；`scripts/` 下是 render、export-video、editor-command、bench、verify-video、import-accessory、decoration-command 等 CLI |
 | `packages/runtime/` | 运行时：Cubism 封装、确定性物理、Worker 并行求值、合成器（滤镜、clip、frameHold）、场景热更新（`syncScene` / `rebuildEvaluators` / `reloadWorkers`）；`test/` 确定性与编辑热更新测试 |
 | `packages/scene/` | 场景格式 `charaforge.scene` v1、镜头表 `charaforge.shots` v1（TypeBox 定义、JSON Schema、`parseScene` / `parseShots`）、编辑命令层 `src/edit.ts`（关键帧、插值、一键动画、diff/撤销） |
 | `scenes/deepseek-chan/` | `shots.json`（recon 产出、人工校对）、`scene.json`（全片复刻场景，fit 产出） |

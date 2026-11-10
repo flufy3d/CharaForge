@@ -1009,7 +1009,7 @@ function App() {
         >
           图集 {s.thumbnails ? allAssets.length : ''}
         </button>
-        <a href="index.html">← 返回播放器</a>
+        <a href="index.html">← 返回编辑器</a>
       </header>
 
       {s.error && (

@@ -138,7 +138,7 @@ export default defineConfig({
     alias: [{ find: /^@cubism\/framework\/(.*)$/, replacement: `${join(REPO, '.cache', 'cubism-framework')}/$1` }],
   },
   optimizeDeps: {
-    entries: ['index.html', 'harness.html', 'motions.html', 'editor.html', 'export.html'],
+    entries: ['index.html', 'player.html', 'harness.html', 'motions.html', 'editor.html', 'export.html'],
     include: ['pixi.js', 'react', 'react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
   },
   server: {
@@ -157,7 +157,9 @@ export default defineConfig({
     assetsDir: '_app',
     rollupOptions: {
       input: {
+        // index = 默认编辑器；player 保留独立播放器/参考视频对照页。
         index: join(HERE, 'index.html'),
+        player: join(HERE, 'player.html'),
         harness: join(HERE, 'harness.html'),
         motions: join(HERE, 'motions.html'),
         editor: join(HERE, 'editor.html'),
